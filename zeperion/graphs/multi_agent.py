@@ -7,9 +7,10 @@ from typing import Literal, Optional, Type
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import RetryPolicy
 
 from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
-from zeperion.agents.base import BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent
 from zeperion.models import (
     AgentRole,
     GlobalStatus,
@@ -286,17 +287,19 @@ def create_multi_agent_graph(
 
         return updates
 
-    # Define routing logic
     def route_after_tester(
         state: WorkflowState,
     ) -> Literal["developer", "planner", "pr_pipeline", "blocked", "end"]:
-        """
-        Route after tester node.
+        """Decide the next node after the Tester finishes.
 
-        Logic:
-        - If test passed and all work done → auto-enter PR Pipeline (if GitHub configured)
-        - If test passed or max fix attempts reached but work not done → next round
-        - If test failed and under max fix attempts → retry developer
+        The rules, in priority order:
+
+        1. Test failed → retry Developer until ``max_fix_attempts``; then BLOCKED.
+        2. Test passed and Planner/Tester declared ``GLOBAL_STATUS=DONE``
+           → enter PR pipeline if GitHub is configured, otherwise END.
+        3. Test passed but not DONE and we have hit ``max_rounds`` → END.
+        4. Test passed and there is still work to do → loop back to Planner.
+        5. Anything else (e.g. PENDING / unexpected) → BLOCKED.
         """
         test_status = state["test_status"]
         fix_attempt = state["fix_attempt"]
@@ -307,32 +310,30 @@ def create_multi_agent_graph(
             if fix_attempt >= config.max_fix_attempts:
                 logger.warning("Max fix attempts reached, blocking workflow")
                 return "blocked"
-
-            # Test failed, retry developer
             logger.info(f"Test failed, retry fix attempt {fix_attempt + 1}")
             return "developer"
 
-        # Test passed or no retryable failure remains
-        if test_status == TestStatus.PASS:
-            # Workflow is DONE → auto-enter PR Pipeline (if GitHub configured)
-            if global_status == GlobalStatus.DONE:
-                if config.github_repo or config.github_token:
-                    logger.info("Workflow complete, auto-entering PR Pipeline")
-                    return "pr_pipeline"
-                else:
-                    logger.info("Workflow complete (GitHub not configured, skipping PR Pipeline)")
-                    return "end"
-            # Hit max rounds → stop
-            elif round_num >= config.max_rounds:
-                logger.info("Max rounds reached, stopping")
-                return "end"
-            # Continue to next round
-            else:
-                logger.info(f"Moving to round {round_num + 1}")
-                return "planner"
+        if test_status != TestStatus.PASS:
+            logger.warning(
+                f"Unexpected test status {test_status!r}, blocking workflow"
+            )
+            return "blocked"
 
-        logger.warning(f"Unexpected test status {test_status}, blocking workflow")
-        return "blocked"
+        if global_status == GlobalStatus.DONE:
+            if config.github_repo or config.github_token:
+                logger.info("Workflow complete, auto-entering PR Pipeline")
+                return "pr_pipeline"
+            logger.info(
+                "Workflow complete (GitHub not configured, skipping PR Pipeline)"
+            )
+            return "end"
+
+        if round_num >= config.max_rounds:
+            logger.info("Max rounds reached, stopping")
+            return "end"
+
+        logger.info(f"Moving to round {round_num + 1}")
+        return "planner"
 
     def increment_round(state: WorkflowState) -> WorkflowState:
         """Increment round counter and reset fix attempt."""
@@ -426,13 +427,23 @@ def create_multi_agent_graph(
             "updated_at": iso_now(),
         }
 
-    # Build graph
+    # Retry transient LLM/CLI invocation failures (network blips, rate limits).
+    # Parsing failures intentionally bypass the retry — they reflect a model
+    # output mismatch that won't fix itself by retrying.
+    agent_retry_policy = RetryPolicy(
+        max_attempts=3,
+        initial_interval=1.0,
+        backoff_factor=2.0,
+        max_interval=30.0,
+        jitter=True,
+        retry_on=AgentInvocationError,
+    )
+
     workflow = StateGraph(WorkflowState)
 
-    # Add nodes
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("developer", developer_node)
-    workflow.add_node("tester", tester_node)
+    workflow.add_node("planner", planner_node, retry_policy=agent_retry_policy)
+    workflow.add_node("developer", developer_node, retry_policy=agent_retry_policy)
+    workflow.add_node("tester", tester_node, retry_policy=agent_retry_policy)
     workflow.add_node("increment_round", increment_round)
     workflow.add_node("increment_fix", increment_fix_attempt)
     workflow.add_node("blocked", block_workflow)

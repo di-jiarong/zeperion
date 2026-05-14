@@ -101,7 +101,7 @@ def run(
         "multi_agent",
         "--mode",
         "-m",
-        help="Workflow mode: multi_agent, single_agent_ralph, pr_pipeline",
+        help="Workflow mode: multi_agent | pr_pipeline",
     ),
     config_file: str = typer.Option(
         ".zeperion/config.yaml",
@@ -122,13 +122,11 @@ def run(
         help="Thread ID for checkpoint (default: 'main')",
     ),
 ):
-    """
-    Run ZEPERION workflow.
+    """Run ZEPERION workflow.
 
     Modes:
-    - multi_agent: Planner → Developer → Tester loop
-    - single_agent_ralph: Single agent task queue
-    - pr_pipeline: PR creation and review automation
+    - ``multi_agent``: Planner -> Developer -> Tester loop.
+    - ``pr_pipeline``: commit -> push -> PR -> Codex review -> auto-merge.
     """
     # Load config
     config_path = Path(config_file)

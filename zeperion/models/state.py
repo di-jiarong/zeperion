@@ -4,7 +4,7 @@ import os
 from enum import Enum
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from zeperion.utils.time import iso_now
@@ -28,7 +28,14 @@ class PhaseType(str, Enum):
 
 
 class TestStatus(str, Enum):
-    """Test execution status."""
+    """Test execution status.
+
+    The ``__test__`` sentinel tells pytest this is not a test class — the
+    ``Test`` prefix here is domain vocabulary, not a pytest convention.
+    """
+
+    __test__ = False
+
     PASS = "PASS"
     FAIL = "FAIL"
     ERROR = "ERROR"
@@ -163,8 +170,7 @@ class WorkflowConfig(BaseModel):
     pr_auto_merge: bool = Field(default=True, description="Enable auto-merge")
     codex_poll_minutes: int = Field(default=30, description="Codex review poll interval")
 
-    class Config:
-        frozen = True
+    model_config = ConfigDict(frozen=True)
 
 
 class AgentOutput(BaseModel):
@@ -175,8 +181,7 @@ class AgentOutput(BaseModel):
     lessons: list[str] = Field(default_factory=list)
     raw_output: str = Field(description="Full agent output")
 
-    class Config:
-        frozen = True
+    model_config = ConfigDict(frozen=True)
 
 
 def create_initial_state(config: WorkflowConfig) -> WorkflowState:
