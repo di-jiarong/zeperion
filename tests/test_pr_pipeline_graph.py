@@ -50,8 +50,10 @@ def _initial_state(*, has_token: bool = True) -> PRPipelineState:
         "codex_thumbs_count": 0,
         "codex_comments_count": 0,
         "codex_reviewed_commit": None,
+        "last_codex_review_request_commit": None,
         "commit_sha": None,
         "merge_enabled": False,
+        "pr_fixer_attempts": 0,
     }
 
 
@@ -59,6 +61,8 @@ def _make_github_mock(
     *,
     codex_thumbs: int = 0,
     codex_comments: int = 0,
+    codex_inline_comments: int | None = None,
+    codex_issue_comments: int | None = None,
     codex_reviewed_commit: str | None = None,
     existing_pr: dict | None = None,
     has_changes: bool = True,
@@ -106,9 +110,17 @@ def _make_github_mock(
     # a coroutine by default, so override with a plain Mock.
     client.extract_pr_number = MagicMock(return_value=77)
 
+    # If the test doesn't explicitly set inline/issue, default the inline
+    # count to ``codex_comments`` (treat the legacy ``codex_comments``
+    # argument as inline-only). This keeps existing tests that wanted
+    # NEEDS_FIXES behaviour working under the new threshold.
+    inline = codex_inline_comments if codex_inline_comments is not None else codex_comments
+    issue = codex_issue_comments if codex_issue_comments is not None else 0
     client.collect_codex_feedback.return_value = {
         "thumbs_count": codex_thumbs,
-        "comments_count": codex_comments,
+        "comments_count": inline + issue,
+        "inline_comments_count": inline,
+        "issue_comments_count": issue,
         "reviewed_commit": codex_reviewed_commit,
     }
     client.enable_auto_merge.return_value = None
@@ -202,7 +214,6 @@ class TestPipelineNeedsFixes:
         # pr_fixer commits and pushes.
         assert final["pr_phase"] == PRPhase.COMMIT
         client.enable_auto_merge.assert_not_called()
-        client.add_pr_comment.assert_not_called()
         # The pr_fixer flow specifically calls these:
         client.get_codex_comments.assert_awaited_once_with("owner/repo", 77)
         fake_agent.invoke.assert_awaited_once()
@@ -215,6 +226,14 @@ class TestPipelineNeedsFixes:
         assert len(commit_calls) == 2
         # push_branch fires once for commit_changes_node and once for pr_fixer.
         assert client.push_branch.await_count == 2
+        # pr_fixer now also asks Codex to re-review the new commit
+        # exactly once, with the SHA recorded for debouncing.
+        client.add_pr_comment.assert_awaited_once()
+        rereview_body = client.add_pr_comment.await_args.args[2]
+        assert rereview_body.startswith("@codex review")
+        assert "pr_fixer round 1" in rereview_body
+        assert final["last_codex_review_request_commit"] is not None
+        assert final["pr_fixer_attempts"] == 1
 
 
 class TestPipelineWaiting:
@@ -240,9 +259,14 @@ class TestPipelineWaiting:
 
     @pytest.mark.asyncio
     async def test_waiting_status_triggers_codex_review_comment(self) -> None:
+        # WAITING fires when Codex *did* review the head commit but only
+        # left top-level (issue) comments — no inline review comments.
+        # Two summary-style issue comments shouldn't be enough to kick
+        # pr_fixer; we want to keep waiting for explicit signoff.
         client = _make_github_mock(
             codex_thumbs=0,
-            codex_comments=2,
+            codex_inline_comments=0,
+            codex_issue_comments=2,
             codex_reviewed_commit="abc123",
         )
 
@@ -253,9 +277,18 @@ class TestPipelineWaiting:
             final = await graph.ainvoke(_initial_state())
 
         assert final["codex_status"] == CodexStatus.WAITING
-        client.add_pr_comment.assert_awaited_once_with(
-            "owner/repo", 77, "@codex review"
-        )
+        # We now post a richer, debounced message that includes the
+        # commit SHA we want Codex to look at. Assert on shape, not on
+        # exact wording — the wording is allowed to evolve.
+        client.add_pr_comment.assert_awaited_once()
+        call_args = client.add_pr_comment.await_args
+        assert call_args.args[0] == "owner/repo"
+        assert call_args.args[1] == 77
+        body = call_args.args[2]
+        assert body.startswith("@codex review")
+        assert "wait_for_review" in body
+        # Debounce field must be set so a second invocation is suppressed.
+        assert final["last_codex_review_request_commit"] is not None
 
 
 class TestPipelineEdgeCases:
@@ -362,6 +395,50 @@ class TestPipelineEdgeCases:
             graph = create_pr_pipeline_graph(_config())
             with pytest.raises(Exception, match="git repository"):
                 await graph.ainvoke(_initial_state())
+
+
+class TestCodexThreshold:
+    """Direct unit tests for the new inline-comment-based threshold."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "thumbs,inline,issue,reviewed,expected",
+        [
+            # 1) Thumbs-up overrides everything — APPROVED.
+            (1, 0, 0, "abc", CodexStatus.APPROVED),
+            # 2) One inline comment is enough to route to pr_fixer.
+            (0, 1, 0, "abc", CodexStatus.NEEDS_FIXES),
+            # 3) Many issue comments without inline => still WAITING.
+            (0, 0, 5, "abc", CodexStatus.WAITING),
+            # 4) Old "more than 5 total comments" no longer triggers
+            #    NEEDS_FIXES if none of them are inline.
+            (0, 0, 10, "abc", CodexStatus.WAITING),
+            # 5) No review yet => PENDING regardless of counters.
+            (0, 0, 0, None, CodexStatus.PENDING),
+            # 6) Mixed: 1 inline + many issue => NEEDS_FIXES (inline wins).
+            (0, 1, 3, "abc", CodexStatus.NEEDS_FIXES),
+        ],
+    )
+    async def test_codex_threshold_uses_inline_count(
+        self, thumbs, inline, issue, reviewed, expected
+    ) -> None:
+        from zeperion.graphs.pr_pipeline import check_codex_review_node
+
+        client = _make_github_mock(
+            codex_thumbs=thumbs,
+            codex_inline_comments=inline,
+            codex_issue_comments=issue,
+            codex_reviewed_commit=reviewed,
+        )
+        state = _initial_state()
+        state["pr_number"] = 99
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await check_codex_review_node(state)
+
+        assert result["codex_status"] == expected
 
 
 class TestPipelineRouter:
@@ -487,3 +564,323 @@ class TestPipelineFixerEdgeCases:
         ]
         # Only the initial commit_changes commit; pr_fixer crashed before commit.
         assert len(commit_calls) == 1
+
+
+class TestCodexRereviewDebounce:
+    """Once we've asked Codex to re-review a SHA, we must never ask again."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_review_does_not_repeat_request_for_same_sha(
+        self,
+    ) -> None:
+        from zeperion.graphs.pr_pipeline import wait_for_review_node
+
+        client = _make_github_mock(
+            codex_thumbs=0,
+            codex_inline_comments=0,
+            codex_issue_comments=1,
+            codex_reviewed_commit="abc123",
+        )
+        state = _initial_state()
+        state["pr_number"] = 77
+        state["codex_status"] = CodexStatus.WAITING
+        state["commit_sha"] = "abc123"
+        # Same SHA we'd be requesting => must be debounced.
+        state["last_codex_review_request_commit"] = "abc123"
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await wait_for_review_node(state)
+
+        client.add_pr_comment.assert_not_called()
+        assert result["last_codex_review_request_commit"] == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_wait_for_review_requests_when_new_sha(self) -> None:
+        from zeperion.graphs.pr_pipeline import wait_for_review_node
+
+        client = _make_github_mock(
+            codex_thumbs=0,
+            codex_inline_comments=0,
+            codex_issue_comments=1,
+            codex_reviewed_commit="abc123",
+        )
+        state = _initial_state()
+        state["pr_number"] = 77
+        state["codex_status"] = CodexStatus.WAITING
+        state["commit_sha"] = "newsha999"
+        state["last_codex_review_request_commit"] = "abc123"  # different
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await wait_for_review_node(state)
+
+        client.add_pr_comment.assert_awaited_once()
+        body = client.add_pr_comment.await_args.args[2]
+        assert body.startswith("@codex review")
+        assert "newsha9" in body  # SHA prefix included
+        assert result["last_codex_review_request_commit"] == "newsha999"
+
+    @pytest.mark.asyncio
+    async def test_pr_fixer_rerun_with_same_commit_does_not_double_ping(
+        self, tmp_path
+    ) -> None:
+        """Two pr_fixer rounds for the same SHA must @codex review once."""
+        from zeperion.graphs.pr_pipeline import _build_pr_fixer_node
+
+        config = _config()
+        node = _build_pr_fixer_node(config)
+
+        client = _make_github_mock(
+            codex_thumbs=0,
+            codex_inline_comments=2,
+            codex_reviewed_commit="abc",
+        )
+        client.get_codex_comments.return_value = [
+            {"id": 1, "body": "fix", "path": "x.py", "line": 1, "kind": "review"}
+        ]
+
+        # Step 1: simulate a round that already pinged Codex for the
+        # commit SHA the next push will produce. (In the real flow we
+        # only know the SHA after rev-parse — but the SHA is fixed in
+        # our mock, ``"deadbeefdeadbeef..."``, so we can pre-populate.)
+        fake_agent = AsyncMock()
+        fake_agent.invoke.return_value = MagicMock()
+        state = _initial_state()
+        state["pr_number"] = 77
+        state["pr_branch"] = "feature/widget"
+        state["last_codex_review_request_commit"] = "deadbeef" * 5
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ), patch(
+            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+        ):
+            result = await node(state)
+
+        # The fix commit produces ``"deadbeef" * 5`` (per the mock), and
+        # the debounce should swallow the request.
+        client.add_pr_comment.assert_not_called()
+        # last_codex_review_request_commit must remain unchanged when
+        # the request was suppressed.
+        assert result["last_codex_review_request_commit"] == "deadbeef" * 5
+
+
+class TestCreatePRTitleFallback:
+    """``create_or_update_pr_node`` must NOT poison state["pr_title"]
+    with a fallback. This was a real production bug: the fallback was a
+    bare ``task_id`` like ``calc_v1`` (no ``feat:`` prefix), and writing
+    it back to state caused the next ``commit_changes_node`` run to use
+    ``calc_v1`` as the commit subject — producing dozens of useless
+    identical commits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fallback_used_for_github_but_not_persisted_to_state(
+        self,
+    ) -> None:
+        from zeperion.graphs.pr_pipeline import create_or_update_pr_node
+
+        client = _make_github_mock(existing_pr=None)
+        state = _initial_state()
+        state["pr_branch"] = "feature/widget"
+        state["pr_target_branch"] = "main"
+        state["task_id"] = "calc_v1"
+        state["pr_title"] = None  # Planner did not provide a title
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await create_or_update_pr_node(state)
+
+        # GitHub got the Conventional Commits fallback.
+        client.create_pr.assert_awaited_once()
+        gh_title = client.create_pr.await_args.args[3]
+        assert gh_title == "feat: calc_v1"
+
+        # State must NOT carry the fallback forward — otherwise a later
+        # commit_changes_node would use "calc_v1" as its commit subject.
+        assert result.get("pr_title") is None
+
+    @pytest.mark.asyncio
+    async def test_planner_title_is_respected_and_persisted(self) -> None:
+        from zeperion.graphs.pr_pipeline import create_or_update_pr_node
+
+        client = _make_github_mock(existing_pr=None)
+        state = _initial_state()
+        state["pr_branch"] = "feature/widget"
+        state["pr_target_branch"] = "main"
+        state["task_id"] = "ignored-when-planner-spoke"
+        state["pr_title"] = "feat: add /version endpoint"
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await create_or_update_pr_node(state)
+
+        gh_title = client.create_pr.await_args.args[3]
+        assert gh_title == "feat: add /version endpoint"
+        assert result["pr_title"] == "feat: add /version endpoint"
+
+    @pytest.mark.asyncio
+    async def test_no_task_id_falls_back_to_branch(self) -> None:
+        from zeperion.graphs.pr_pipeline import create_or_update_pr_node
+
+        client = _make_github_mock(existing_pr=None)
+        state = _initial_state()
+        state["pr_branch"] = "feature/something"
+        state["pr_target_branch"] = "main"
+        state["task_id"] = None
+        state["pr_title"] = None
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await create_or_update_pr_node(state)
+
+        gh_title = client.create_pr.await_args.args[3]
+        assert gh_title == "feat: feature/something"
+        # Still must NOT persist the branch-name fallback.
+        assert result.get("pr_title") is None
+
+
+class TestAutoMergeBehaviour:
+    """``auto_merge_node`` honours ``pr_auto_merge`` and tolerates failures."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_in_config_skips_github_call(self) -> None:
+        from zeperion.graphs.pr_pipeline import _build_auto_merge_node
+
+        config = _config().model_copy(update={"pr_auto_merge": False})
+        node = _build_auto_merge_node(config)
+
+        client = _make_github_mock(codex_thumbs=1, codex_reviewed_commit="abc")
+        state = _initial_state()
+        state["pr_url"] = "https://github.com/owner/repo/pull/77"
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await node(state)
+
+        client.enable_auto_merge.assert_not_called()
+        assert result["pr_phase"] == PRPhase.AUTO_MERGE
+        assert result["merge_enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_github_failure_is_graceful_not_fatal(self) -> None:
+        from zeperion.graphs.pr_pipeline import _build_auto_merge_node
+
+        config = _config().model_copy(update={"pr_auto_merge": True})
+        node = _build_auto_merge_node(config)
+
+        client = _make_github_mock(codex_thumbs=1, codex_reviewed_commit="abc")
+        client.enable_auto_merge.side_effect = RuntimeError(
+            "Auto merge is not allowed for this repository"
+        )
+        state = _initial_state()
+        state["pr_url"] = "https://github.com/owner/repo/pull/77"
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await node(state)
+
+        # Graceful degradation — PR stays APPROVED, manual merge possible.
+        assert result["pr_phase"] == PRPhase.AUTO_MERGE
+        assert result["merge_enabled"] is False
+        assert "auto_merge skipped" in (result.get("last_error") or "")
+
+    @pytest.mark.asyncio
+    async def test_enabled_and_successful_marks_merge_enabled(self) -> None:
+        from zeperion.graphs.pr_pipeline import _build_auto_merge_node
+
+        config = _config().model_copy(update={"pr_auto_merge": True})
+        node = _build_auto_merge_node(config)
+
+        client = _make_github_mock(codex_thumbs=1, codex_reviewed_commit="abc")
+        state = _initial_state()
+        state["pr_url"] = "https://github.com/owner/repo/pull/77"
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            result = await node(state)
+
+        client.enable_auto_merge.assert_awaited_once_with(
+            "https://github.com/owner/repo/pull/77"
+        )
+        assert result["pr_phase"] == PRPhase.AUTO_MERGE
+        assert result["merge_enabled"] is True
+
+
+class TestPRFixerAttemptsCap:
+    """Stop a Codex<->fixer ping-pong loop after max_pr_fixer_rounds."""
+
+    @pytest.mark.asyncio
+    async def test_cap_blocks_further_fixer_rounds(self) -> None:
+        from zeperion.graphs.pr_pipeline import _build_pr_fixer_node
+
+        config = _config().model_copy(update={"max_pr_fixer_rounds": 2})
+        node = _build_pr_fixer_node(config)
+
+        client = _make_github_mock(
+            codex_thumbs=0,
+            codex_inline_comments=3,
+            codex_reviewed_commit="abc",
+        )
+        fake_agent = AsyncMock()
+
+        state = _initial_state()
+        state["pr_number"] = 77
+        state["pr_branch"] = "feature/widget"
+        state["pr_fixer_attempts"] = 2  # already at cap
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ), patch(
+            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+        ):
+            result = await node(state)
+
+        assert result["pr_phase"] == PRPhase.FAILED
+        assert "max_pr_fixer_rounds" in (result.get("last_error") or "")
+        # Critical: the LLM was NOT invoked once the cap was reached.
+        fake_agent.invoke.assert_not_called()
+        # And we did NOT post a Codex re-review.
+        client.add_pr_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attempts_counter_increments_per_round(self) -> None:
+        from zeperion.graphs.pr_pipeline import _build_pr_fixer_node
+
+        config = _config().model_copy(update={"max_pr_fixer_rounds": 5})
+        node = _build_pr_fixer_node(config)
+
+        client = _make_github_mock(
+            codex_thumbs=0,
+            codex_inline_comments=1,
+            codex_reviewed_commit="abc",
+        )
+        client.get_codex_comments.return_value = [
+            {"id": 1, "body": "fix", "path": "x.py", "line": 1, "kind": "review"}
+        ]
+        fake_agent = AsyncMock()
+        fake_agent.invoke.return_value = MagicMock()
+
+        state = _initial_state()
+        state["pr_number"] = 77
+        state["pr_branch"] = "feature/widget"
+        state["pr_fixer_attempts"] = 1  # halfway
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ), patch(
+            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+        ):
+            result = await node(state)
+
+        assert result["pr_fixer_attempts"] == 2
+        assert result["pr_phase"] == PRPhase.COMMIT

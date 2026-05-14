@@ -23,6 +23,7 @@ from zeperion.models import (
 from zeperion.prompts import get_template_manager
 from zeperion.storage import StateStorage
 from zeperion.utils.time import iso_now
+from zeperion.utils.tracing import trace_agent
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,11 @@ def create_multi_agent_graph(
             "enable_checkpoint=False is incompatible with an explicit checkpointer"
         )
 
-    # Initialize agents
+    # Initialize agents.
+    #
+    # The ``agent_class`` shortcut is used by integration tests to swap
+    # in a deterministic FakeAgent — those tests deliberately bypass
+    # fallback chains, so we honour it as-is.
     if agent_class:
         planner = agent_class(role=AgentRole.PLANNER, model=config.planner_model)
         developer = agent_class(role=AgentRole.DEVELOPER, model=config.developer_model)
@@ -84,18 +89,21 @@ def create_multi_agent_graph(
             AgentRole.PLANNER,
             config.planner_model,
             config,
+            fallback_models=config.planner_fallback_models,
         )
         developer = _create_agent(
             config.developer_agent_type,
             AgentRole.DEVELOPER,
             config.developer_model,
             config,
+            fallback_models=config.developer_fallback_models,
         )
         tester = _create_agent(
             config.tester_agent_type,
             AgentRole.TESTER,
             config.tester_model,
             config,
+            fallback_models=config.tester_fallback_models,
         )
 
     developer_uses_claude_code = isinstance(developer, ClaudeCodeAgent)
@@ -110,6 +118,60 @@ def create_multi_agent_graph(
 
     # Load requirement
     requirement = Path(config.requirement_file).read_text()
+
+    def _record_agent_started(agent_name: str, state: WorkflowState) -> None:
+        """Persist an ``agent_started`` event so ``zeperion status`` /
+        ``zeperion logs`` can detect "in-flight" agents.
+
+        Without this, ``events.jsonl`` only contains ``agent_completed``
+        rows, so a running planner shows up as "no recent event" and
+        the operator has no way to tell from disk state whether a long
+        round is alive or hung.
+        """
+        storage.append_event(
+            thread_id,
+            {
+                "event": "agent_started",
+                "role": agent_name,
+                "round": state["round"],
+                "fix_attempt": state.get("fix_attempt"),
+                "phase": state.get("phase"),
+                "task_id": state.get("task_id"),
+            },
+        )
+
+    def _agent_invocation_failed(
+        agent_name: str,
+        state: WorkflowState,
+        exc: AgentInvocationError,
+    ) -> dict:
+        """Build a BLOCKED state patch when an agent (and its whole
+        fallback chain) failed to produce output.
+
+        The new ``global_status=BLOCKED`` is observed by ``route_after_*``
+        helpers to short-circuit directly to the ``blocked`` node — we
+        skip the rest of the round rather than letting it cascade
+        through Developer/Tester on garbage state.
+        """
+        logger.error(
+            "%s invocation failed after fallback chain: %s",
+            agent_name,
+            exc,
+            extra={
+                "event": "agent_invocation_failed",
+                "role": agent_name,
+                "thread_id": thread_id,
+                "round": state["round"],
+                "fix_attempt": state.get("fix_attempt"),
+                "error": str(exc),
+            },
+        )
+        return {
+            "phase": PhaseType.BLOCKED,
+            "global_status": GlobalStatus.BLOCKED,
+            "last_error": f"{agent_name} failed: {exc}"[:500],
+            "updated_at": iso_now(),
+        }
 
     def record_agent_result(
         agent_name: str,
@@ -140,11 +202,39 @@ def create_multi_agent_graph(
                 "output_chars": len(output.raw_output),
             },
         )
+        logger.info(
+            "%s done in %sms",
+            agent_name,
+            duration_ms,
+            extra={
+                "event": "agent_completed",
+                "role": agent_name,
+                "thread_id": thread_id,
+                "round": state["round"],
+                "fix_attempt": state.get("fix_attempt"),
+                "duration_ms": duration_ms,
+                "task_id": output.task_id,
+                "test_status": getattr(output.test_status, "value", output.test_status),
+                "global_status": getattr(output.global_status, "value", output.global_status),
+            },
+        )
 
     # Define nodes
     async def planner_node(state: WorkflowState) -> WorkflowState:
         """Planner agent node."""
-        logger.info(f"Planner: Round {state['round']}")
+        logger.info(
+            "Planner: Round %s",
+            state["round"],
+            extra={
+                "event": "agent_start",
+                "role": "planner",
+                "round": state["round"],
+                "thread_id": thread_id,
+                "model": config.planner_model,
+            },
+        )
+
+        _record_agent_started("planner", state)
 
         # Load previous outputs
         current_plan = storage.load_agent_output("planner")
@@ -159,37 +249,73 @@ def create_multi_agent_graph(
             round_num=state["round"],
         )
 
-        # Invoke agent
-        started_at = time.monotonic()
-        output = await planner.invoke(prompt, state.get("planner_session_id"))
-        duration_ms = int((time.monotonic() - started_at) * 1000)
+        # Invoke agent.
+        #
+        # We deliberately catch AgentInvocationError *inside* the node
+        # rather than letting it bubble up: LangGraph's RetryPolicy on
+        # the node would otherwise re-execute the entire fallback chain
+        # for every node-level retry, wasting LLM tokens. The fallback
+        # chain inside ``planner`` already handled transient failures
+        # across multiple models — if it still failed we've genuinely
+        # run out of options for this round.
+        try:
+            async with trace_agent(
+                "planner",
+                model=config.planner_model,
+                thread_id=thread_id,
+                round_=state["round"],
+            ) as span:
+                started_at = time.monotonic()
+                output = await planner.invoke(prompt, state.get("planner_session_id"))
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
+                if output.task_id:
+                    span.set_attribute("zeperion.task_id", output.task_id)
+                span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
+        except AgentInvocationError as exc:
+            return _agent_invocation_failed("planner", state, exc)
 
-        # Save output
         record_agent_result("planner", state, output, duration_ms)
 
         # Save lessons
         for lesson in output.lessons:
             storage.append_lesson(lesson)
 
-        return {
+        # Carry the Planner-proposed PR title forward only when present —
+        # writing ``None`` would clobber a title set in a previous round
+        # (e.g. a re-plan that forgot to repeat PR_TITLE).
+        state_patch: dict = {
             "phase": PhaseType.DEVELOPMENT,
             "task_id": output.task_id,
             "global_status": output.global_status,
             "lessons_learned": output.lessons,
             "updated_at": iso_now(),
         }
+        if output.pr_title:
+            state_patch["pr_title"] = output.pr_title
+        return state_patch
 
     async def developer_node(state: WorkflowState) -> WorkflowState:
         """Developer agent node."""
         logger.info(
-            f"Developer: Round {state['round']}, Fix attempt {state['fix_attempt']}"
+            "Developer: Round %s, Fix attempt %s",
+            state["round"],
+            state["fix_attempt"],
+            extra={
+                "event": "agent_start",
+                "role": "developer",
+                "round": state["round"],
+                "fix_attempt": state["fix_attempt"],
+                "thread_id": thread_id,
+                "model": config.developer_model,
+            },
         )
 
-        # Load previous outputs
+        _record_agent_started("developer", state)
+
         plan = storage.load_agent_output("planner") or ""
         test_report = storage.load_agent_output("tester")
 
-        # Build prompt using template
         prompt = template_manager.render_developer(
             requirement=requirement,
             plan=plan,
@@ -199,12 +325,22 @@ def create_multi_agent_graph(
             uses_claude_code=developer_uses_claude_code,
         )
 
-        # Invoke agent
-        started_at = time.monotonic()
-        output = await developer.invoke(prompt, state.get("developer_session_id"))
-        duration_ms = int((time.monotonic() - started_at) * 1000)
+        try:
+            async with trace_agent(
+                "developer",
+                model=config.developer_model,
+                thread_id=thread_id,
+                round_=state["round"],
+                fix_attempt=state["fix_attempt"],
+            ) as span:
+                started_at = time.monotonic()
+                output = await developer.invoke(prompt, state.get("developer_session_id"))
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
+                span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
+        except AgentInvocationError as exc:
+            return _agent_invocation_failed("developer", state, exc)
 
-        # Save output
         record_agent_result("developer", state, output, duration_ms)
 
         # Save lessons
@@ -221,14 +357,24 @@ def create_multi_agent_graph(
     async def tester_node(state: WorkflowState) -> WorkflowState:
         """Tester agent node."""
         logger.info(
-            f"Tester: Round {state['round']}, Fix attempt {state['fix_attempt']}"
+            "Tester: Round %s, Fix attempt %s",
+            state["round"],
+            state["fix_attempt"],
+            extra={
+                "event": "agent_start",
+                "role": "tester",
+                "round": state["round"],
+                "fix_attempt": state["fix_attempt"],
+                "thread_id": thread_id,
+                "model": config.tester_model,
+            },
         )
 
-        # Load previous outputs
+        _record_agent_started("tester", state)
+
         plan = storage.load_agent_output("planner") or ""
         dev_output = storage.load_agent_output("developer") or ""
 
-        # Build prompt using template
         prompt = template_manager.render_tester(
             requirement=requirement,
             plan=plan,
@@ -236,12 +382,25 @@ def create_multi_agent_graph(
             lessons=state["lessons_learned"],
         )
 
-        # Invoke agent
-        started_at = time.monotonic()
-        output = await tester.invoke(prompt, state.get("tester_session_id"))
-        duration_ms = int((time.monotonic() - started_at) * 1000)
+        try:
+            async with trace_agent(
+                "tester",
+                model=config.tester_model,
+                thread_id=thread_id,
+                round_=state["round"],
+                fix_attempt=state["fix_attempt"],
+            ) as span:
+                started_at = time.monotonic()
+                output = await tester.invoke(prompt, state.get("tester_session_id"))
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
+                span.set_attribute(
+                    "zeperion.test_status",
+                    getattr(output.test_status, "value", str(output.test_status)),
+                )
+        except AgentInvocationError as exc:
+            return _agent_invocation_failed("tester", state, exc)
 
-        # Save output
         record_agent_result("tester", state, output, duration_ms)
 
         # Save lessons
@@ -262,6 +421,26 @@ def create_multi_agent_graph(
 
         return updates
 
+    def _is_blocked(state: WorkflowState) -> bool:
+        """True when an agent invocation tripped the fallback-chain bail-out."""
+        return state.get("global_status") == GlobalStatus.BLOCKED
+
+    def route_after_planner(
+        state: WorkflowState,
+    ) -> Literal["developer", "blocked"]:
+        """Short-circuit to ``blocked`` if Planner exhausted its fallback chain."""
+        if _is_blocked(state):
+            return "blocked"
+        return "developer"
+
+    def route_after_developer(
+        state: WorkflowState,
+    ) -> Literal["tester", "blocked"]:
+        """Short-circuit to ``blocked`` if Developer exhausted its fallback chain."""
+        if _is_blocked(state):
+            return "blocked"
+        return "tester"
+
     def route_after_tester(
         state: WorkflowState,
     ) -> Literal["developer", "planner", "pr_pipeline", "blocked", "end"]:
@@ -280,6 +459,10 @@ def create_multi_agent_graph(
         fix_attempt = state["fix_attempt"]
         round_num = state["round"]
         global_status = state["global_status"]
+
+        # Defensive: Tester itself may have hit the fallback-chain bail-out.
+        if _is_blocked(state):
+            return "blocked"
 
         if test_status in (TestStatus.FAIL, TestStatus.ERROR):
             if fix_attempt >= config.max_fix_attempts:
@@ -347,6 +530,18 @@ def create_multi_agent_graph(
 
         logger.info("=== PR Pipeline: auto-entering from multi-agent workflow ===")
 
+        # IMPORTANT: ``pr_title`` must be inherited from the upstream
+        # state, NOT overwritten with ``task_id``. A previous version
+        # did ``"pr_title": state.get("task_id")``, which silently
+        # clobbered the Planner-proposed PR title (e.g.
+        # ``"feat: add GET /uptime endpoint"``) with a bare task_id
+        # (e.g. ``"task_001"``). Result: the commit subject and the
+        # GitHub PR title both became ``task_001`` even when the
+        # Planner did its job. This was the *second* leak point of the
+        # same class of bug; the first was in ``create_or_update_pr_node``
+        # (already fixed). Both must agree on the rule: ``state["pr_title"]``
+        # is the source of truth, only the Planner writes it, never
+        # synthesise a fallback INTO state.
         pr_state: PRPipelineState = {
             **state,
             "pr_phase": PRPhase.INIT,
@@ -354,15 +549,17 @@ def create_multi_agent_graph(
             "pr_target_branch": config.pr_target_branch,
             "pr_number": None,
             "pr_url": None,
-            "pr_title": state.get("task_id"),
+            "pr_title": state.get("pr_title"),
             "github_repo": config.github_repo or "",
             "github_token": config.github_token or "",
             "codex_status": CodexStatus.PENDING,
             "codex_thumbs_count": 0,
             "codex_comments_count": 0,
             "codex_reviewed_commit": None,
+            "last_codex_review_request_commit": None,
             "commit_sha": None,
             "merge_enabled": False,
+            "pr_fixer_attempts": 0,
         }
 
         # Nested checkpointing is awkward; resumable PR runs should be
@@ -424,19 +621,36 @@ def create_multi_agent_graph(
     workflow.add_node("blocked", block_workflow)
     workflow.add_node("pr_pipeline", pr_pipeline_subgraph_node)
 
-    # Add edges
     workflow.set_entry_point("planner")
-    workflow.add_edge("planner", "developer")
-    workflow.add_edge("developer", "tester")
 
-    # Conditional routing after tester
+    # Each agent node may now return a BLOCKED state when its entire
+    # fallback model chain failed. The conditional edge below routes
+    # that case straight to the "blocked" terminal node, skipping
+    # downstream agents that would otherwise run on missing inputs.
+    workflow.add_conditional_edges(
+        "planner",
+        route_after_planner,
+        {
+            "developer": "developer",
+            "blocked": "blocked",
+        },
+    )
+    workflow.add_conditional_edges(
+        "developer",
+        route_after_developer,
+        {
+            "tester": "tester",
+            "blocked": "blocked",
+        },
+    )
+
     workflow.add_conditional_edges(
         "tester",
         route_after_tester,
         {
             "developer": "increment_fix",
             "planner": "increment_round",
-            "pr_pipeline": "pr_pipeline",  # Auto-enter PR Pipeline
+            "pr_pipeline": "pr_pipeline",
             "blocked": "blocked",
             "end": END,
         },

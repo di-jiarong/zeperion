@@ -4,7 +4,48 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
-from zeperion.parsers.section_parser import SectionParser
+from zeperion.parsers.section_parser import SectionParser, _strip_decorations
+
+# Conservative upper bound for PR titles — GitHub itself accepts much
+# longer ones, but we truncate to keep PR lists scannable and to avoid
+# multi-line commit subjects when the title is reused as a commit
+# message.
+_PR_TITLE_MAX_LEN = 72
+
+
+def _clean_pr_title(value: Optional[str]) -> Optional[str]:
+    """Normalise a Planner-proposed PR title.
+
+    - Strips Markdown decorations and surrounding quotes (LLMs frequently
+      emit ``"feat: add foo"`` or ``**feat: add foo**``).
+    - Collapses internal whitespace and forces single-line output.
+    - Truncates to ``_PR_TITLE_MAX_LEN`` characters with an ellipsis,
+      preferring to break at the last space when possible.
+    - Returns ``None`` for empty or placeholder values so downstream code
+      can fall back to ``task_id`` / "chore: zeperion automated commit".
+    """
+    if not value:
+        return None
+
+    cleaned = _strip_decorations(value).strip()
+    if not cleaned:
+        return None
+
+    # PR_TITLE must be a single line.
+    cleaned = " ".join(cleaned.split())
+
+    # Treat common placeholder tokens as "no title".
+    if cleaned.lower() in {"none", "n/a", "tbd", "todo", "task_xxx"}:
+        return None
+
+    if len(cleaned) > _PR_TITLE_MAX_LEN:
+        # Try to break on the last whitespace within budget.
+        cut = cleaned.rfind(" ", 0, _PR_TITLE_MAX_LEN - 1)
+        if cut <= 0:
+            cut = _PR_TITLE_MAX_LEN - 1
+        cleaned = cleaned[:cut].rstrip(" -:") + "..."
+
+    return cleaned
 
 
 SYSTEM_PROMPT_BY_ROLE: dict[AgentRole, str] = {
@@ -83,6 +124,7 @@ class BaseAgent(ABC):
         parser = SectionParser(raw_output)
 
         task_id = parser.extract_field("TASK_ID")
+        pr_title = _clean_pr_title(parser.extract_field("PR_TITLE"))
         test_status = parser.extract_enum(
             "TEST_STATUS", TestStatus, TestStatus.PENDING
         )
@@ -98,6 +140,7 @@ class BaseAgent(ABC):
 
         return AgentOutput(
             task_id=task_id,
+            pr_title=pr_title,
             test_status=test_status,
             global_status=global_status,
             lessons=lessons,

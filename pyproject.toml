@@ -32,6 +32,10 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0.0",
     "jinja2>=3.1.0",
+    # OpenTelemetry API only — extremely small (no exporters, no SDK).
+    # Without ``opentelemetry-sdk`` (see [project.optional-dependencies].tracing)
+    # all spans collapse to no-ops, so this is pay-for-what-you-use.
+    "opentelemetry-api>=1.25.0",
 ]
 
 [project.optional-dependencies]
@@ -42,8 +46,20 @@ claude-code = []
 github = [
     "PyGithub>=2.3.0",
 ]
+# Observability is opt-in: install ``zeperion[tracing]`` to enable
+# OpenTelemetry trace export, or just install the SDK separately. With
+# only the API installed (default below) all instrumentation reduces to
+# no-op spans, so the import is safe even without an OTEL collector.
+tracing = [
+    # NOTE: we depend on ``opentelemetry-api`` *unconditionally* below
+    # so callers can import the API without installing the SDK.
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp>=1.25.0",
+]
 dev = [
     "anthropic>=0.34.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "black>=24.0.0",

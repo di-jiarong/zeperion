@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from zeperion.agents import ClaudeCodeAgent
+from zeperion.agents.base import _clean_pr_title
 from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
 
 
@@ -150,6 +151,41 @@ NEXT_SECTION: content
         assert result.task_id == "task-789"
         assert result.lessons == []
 
+    def test_parse_output_pr_title_planner(self):
+        """Planner-style output exposes PR_TITLE on AgentOutput."""
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+
+        raw_output = """
+TASK_ID: task-add-version
+PR_TITLE: feat: add /version endpoint with package.json read
+GLOBAL_STATUS: CONTINUE
+LESSONS:
+- prefer async fs
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.task_id == "task-add-version"
+        assert result.pr_title == "feat: add /version endpoint with package.json read"
+
+    def test_parse_output_pr_title_handles_decorations(self):
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        raw_output = """
+TASK_ID: t1
+PR_TITLE: **feat: tidy up `/health`**
+GLOBAL_STATUS: CONTINUE
+"""
+        result = agent.parse_output(raw_output)
+        assert result.pr_title == "feat: tidy up `/health`"
+
+    def test_parse_output_pr_title_missing_falls_back_to_none(self):
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        raw_output = """
+TASK_ID: t1
+GLOBAL_STATUS: CONTINUE
+"""
+        result = agent.parse_output(raw_output)
+        assert result.pr_title is None
+
     def test_agent_initialization(self):
         """Test agent initialization with custom config."""
         agent = ClaudeCodeAgent(
@@ -246,6 +282,59 @@ NEXT_SECTION: content
         assert result.lessons == ["ok"]
 
     @pytest.mark.asyncio
+    async def test_invoke_runs_in_temporary_worktree_when_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        """Claude CLI can run in a detached worktree instead of the main checkout."""
+        captured: dict = {"git_calls": [], "claude_calls": []}
+
+        class FakeGitProcess:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"Preparing worktree\n", b""
+
+        class FakeClaudeProcess:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"GLOBAL_STATUS: CONTINUE\nLESSONS:\n- sandbox ok\n", b""
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            if cmd[0] == "git":
+                captured["git_calls"].append(cmd)
+                return FakeGitProcess()
+            captured["claude_calls"].append((cmd, kwargs))
+            return FakeClaudeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+            use_worktree=True,
+            keep_worktree=True,
+        )
+        result = await agent.invoke("Do work safely")
+
+        assert result.lessons == ["sandbox ok"]
+        assert agent.last_worktree_dir is not None
+        assert agent.last_worktree_dir != tmp_path.resolve()
+        assert captured["git_calls"][0][:5] == (
+            "git",
+            "-C",
+            str(tmp_path.resolve()),
+            "worktree",
+            "add",
+        )
+
+        claude_cmd, claude_kwargs = captured["claude_calls"][0]
+        assert claude_kwargs["cwd"] == str(agent.last_worktree_dir)
+        add_dir = claude_cmd[claude_cmd.index("--add-dir") + 1]
+        assert add_dir == str(agent.last_worktree_dir)
+
+    @pytest.mark.asyncio
     async def test_invoke_non_zero_exit_raises_with_details(
         self, tmp_path, monkeypatch
     ):
@@ -302,3 +391,35 @@ NEXT_SECTION: content
 
         with pytest.raises(AgentInvocationError, match="empty output"):
             await agent.invoke("hi")
+
+
+class TestCleanPRTitle:
+    """Unit tests for the helper that normalises Planner-emitted titles."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, None),
+            ("", None),
+            ("   ", None),
+            ("feat: add foo", "feat: add foo"),
+            ('"feat: add foo"', "feat: add foo"),
+            ("**feat: add foo**", "feat: add foo"),
+            ("`feat: add foo`", "feat: add foo"),
+            ("feat: add foo.", "feat: add foo"),
+            ("none", None),
+            ("N/A", None),
+            ("task_xxx", None),
+            ("feat:   add\nfoo", "feat: add foo"),
+        ],
+    )
+    def test_clean_pr_title_normalisation(self, raw, expected):
+        assert _clean_pr_title(raw) == expected
+
+    def test_clean_pr_title_truncates_at_word_boundary(self):
+        long_title = "feat: " + "abcde " * 13 + "tail"
+        cleaned = _clean_pr_title(long_title)
+        assert cleaned is not None
+        assert len(cleaned) <= 72
+        assert cleaned.endswith("...")
+        assert "  " not in cleaned

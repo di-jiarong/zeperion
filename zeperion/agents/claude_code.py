@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +37,9 @@ class ClaudeCodeAgent(BaseAgent):
         project_dir: str = ".",
         permission_mode: str = "bypassPermissions",
         extra_args: Optional[list[str]] = None,
+        use_worktree: bool = False,
+        worktree_parent: Optional[str] = None,
+        keep_worktree: bool = True,
         # Kept for backward compatibility with old configs/tests; ignored
         # because the real CLI does not use these flags.
         cli_model_flag: Optional[str] = None,
@@ -58,6 +63,12 @@ class ClaudeCodeAgent(BaseAgent):
                 middle ground.
             extra_args: Optional additional CLI arguments appended after the
                 built-in flags (e.g. ``["--debug"]``).
+            use_worktree: If true, run the CLI inside a detached temporary
+                Git worktree created from ``project_dir``.
+            worktree_parent: Optional parent directory for temporary worktrees.
+            keep_worktree: Keep the temporary worktree after invocation so
+                changes can be inspected or merged manually. When false the
+                worktree is removed after the invocation exits.
             cli_model_flag, cli_input_flag, cli_output_flag, cli_log_flag:
                 Legacy keyword arguments retained for backward compatibility
                 with stored configurations and old tests. They are accepted
@@ -70,21 +81,26 @@ class ClaudeCodeAgent(BaseAgent):
         self.project_dir = Path(project_dir).resolve()
         self.permission_mode = permission_mode
         self.extra_args = list(extra_args) if extra_args else []
+        self.use_worktree = use_worktree
+        self.worktree_parent = Path(worktree_parent).resolve() if worktree_parent else None
+        self.keep_worktree = keep_worktree
+        self.last_worktree_dir: Optional[Path] = None
         # Legacy attributes (preserved for introspection / tests only).
         self.cli_model_flag = cli_model_flag
         self.cli_input_flag = cli_input_flag
         self.cli_output_flag = cli_output_flag
         self.cli_log_flag = cli_log_flag
 
-    def build_command(self) -> list[str]:
+    def build_command(self, project_dir: Optional[Path] = None) -> list[str]:
         """Assemble the CLI argv list for one invocation."""
+        active_project_dir = (project_dir or self.project_dir).resolve()
         cmd = [
             self.cli_tool,
             "--print",
             "--model",
             self.model,
             "--add-dir",
-            str(self.project_dir),
+            str(active_project_dir),
         ]
         if self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
@@ -117,7 +133,8 @@ class ClaudeCodeAgent(BaseAgent):
                 f"Project path is not a directory: {self.project_dir}"
             )
 
-        cmd = self.build_command()
+        execution_dir = await self._prepare_execution_dir()
+        cmd = self.build_command(execution_dir)
         # Session reuse is optional; only valid UUIDs are accepted by the CLI.
         if session_id and _looks_like_uuid(session_id):
             cmd.extend(["--session-id", session_id])
@@ -128,7 +145,7 @@ class ClaudeCodeAgent(BaseAgent):
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(self.project_dir),
+                cwd=str(execution_dir),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -139,16 +156,20 @@ class ClaudeCodeAgent(BaseAgent):
             ) from exc
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=prompt.encode("utf-8")),
-                timeout=self.timeout,
-            )
-        except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise AgentInvocationError(
-                f"{self.role.value} invocation timed out after {self.timeout}s"
-            ) from exc
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=prompt.encode("utf-8")),
+                    timeout=self.timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                process.kill()
+                await process.wait()
+                raise AgentInvocationError(
+                    f"{self.role.value} invocation timed out after {self.timeout}s"
+                ) from exc
+        finally:
+            if self.use_worktree and not self.keep_worktree:
+                await self._remove_worktree(execution_dir)
 
         if process.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()
@@ -167,6 +188,65 @@ class ClaudeCodeAgent(BaseAgent):
             )
 
         return self.parse_output(raw_output)
+
+    async def _prepare_execution_dir(self) -> Path:
+        """Return the directory where the Claude CLI should run."""
+        if not self.use_worktree:
+            self.last_worktree_dir = None
+            return self.project_dir
+
+        if self.worktree_parent:
+            self.worktree_parent.mkdir(parents=True, exist_ok=True)
+        worktree_dir = Path(
+            tempfile.mkdtemp(
+                prefix="zeperion-claude-worktree-",
+                dir=str(self.worktree_parent) if self.worktree_parent else None,
+            )
+        ).resolve()
+
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(self.project_dir),
+            "worktree",
+            "add",
+            "--detach",
+            str(worktree_dir),
+            "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+            err = stderr.decode("utf-8", errors="replace").strip()
+            out = stdout.decode("utf-8", errors="replace").strip()
+            raise AgentInvocationError(
+                "Failed to create Claude CLI worktree "
+                f"from {self.project_dir}: {err or out or 'unknown error'}"
+            )
+
+        self.last_worktree_dir = worktree_dir
+        logger.info("Created Claude CLI worktree: %s", worktree_dir)
+        return worktree_dir
+
+    async def _remove_worktree(self, worktree_dir: Path) -> None:
+        """Best-effort removal of a temporary worktree."""
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(self.project_dir),
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await process.communicate()
+        if process.returncode != 0:
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+        self.last_worktree_dir = None
 
 
 def _looks_like_uuid(value: str) -> bool:

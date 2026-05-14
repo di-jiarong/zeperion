@@ -9,6 +9,7 @@
 
 输出格式（严格）：
 TASK_ID: task_xxx
+PR_TITLE: <一行简短的中/英文 PR 标题，≤72 字符，使用 Conventional Commits 风格前缀（feat/fix/chore/refactor/docs/test）。例：`feat: add /version endpoint`。该字段会被 PR Pipeline 用作 PR 标题和 commit subject。>
 GLOBAL_STATUS: CONTINUE | DONE | BLOCKED
 PLAN:
 - [P1] 子任务描述（验收标准）

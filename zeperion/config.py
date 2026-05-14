@@ -65,6 +65,9 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "state_dir": config.state_dir,
         "claude_cli_tool": config.claude_cli_tool,
         "claude_cli_timeout": config.claude_cli_timeout,
+        "claude_cli_use_worktree": config.claude_cli_use_worktree,
+        "claude_cli_worktree_parent": config.claude_cli_worktree_parent,
+        "claude_cli_keep_worktree": config.claude_cli_keep_worktree,
         "pr_target_branch": config.pr_target_branch,
         "pr_auto_merge": config.pr_auto_merge,
     }
@@ -102,4 +105,7 @@ def get_default_config() -> Dict[str, Any]:
         "state_dir": ".zeperion/state",
         "claude_cli_tool": "claude",
         "claude_cli_timeout": 600,
+        "claude_cli_use_worktree": False,
+        "claude_cli_worktree_parent": None,
+        "claude_cli_keep_worktree": True,
     }

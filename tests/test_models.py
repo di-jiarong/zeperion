@@ -66,6 +66,9 @@ class TestWorkflowConfig:
         assert config.state_dir == ".zeperion/state"
         assert config.claude_cli_tool == "claude"
         assert config.claude_cli_timeout == 600
+        assert config.claude_cli_use_worktree is False
+        assert config.claude_cli_worktree_parent is None
+        assert config.claude_cli_keep_worktree is True
 
     def test_config_custom_values(self):
         """Test config with custom values."""
@@ -84,6 +87,9 @@ class TestWorkflowConfig:
             prompts_dir="./custom/prompts",
             claude_cli_tool="custom-claude",
             claude_cli_timeout=1200,
+            claude_cli_use_worktree=True,
+            claude_cli_worktree_parent="./worktrees",
+            claude_cli_keep_worktree=False,
         )
 
         assert config.requirement_file == "./custom.txt"
@@ -100,6 +106,9 @@ class TestWorkflowConfig:
         assert config.prompts_dir == "./custom/prompts"
         assert config.claude_cli_tool == "custom-claude"
         assert config.claude_cli_timeout == 1200
+        assert config.claude_cli_use_worktree is True
+        assert config.claude_cli_worktree_parent == "./worktrees"
+        assert config.claude_cli_keep_worktree is False
 
     def test_config_validation_max_rounds(self):
         """Test config validation for max_rounds."""

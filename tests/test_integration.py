@@ -59,6 +59,10 @@ def temp_project_dir():
 @pytest.fixture
 def test_config(temp_project_dir):
     """Create a test configuration."""
+    # Explicitly clear github_* so a developer with ``GITHUB_TOKEN`` set
+    # in their shell doesn't accidentally trigger the auto-PR-pipeline
+    # branch — which would then run real ``git commit`` against the
+    # *zeperion* repo (the test's CWD) and dirty the working tree.
     config = WorkflowConfig(
         requirement_file=str(temp_project_dir / "requirement.txt"),
         planner_model="claude-opus-4-7",
@@ -72,6 +76,8 @@ def test_config(temp_project_dir):
         state_dir=str(temp_project_dir / ".zeperion" / "state"),
         prompts_dir="zeperion/prompts/templates",
         project_dir=str(temp_project_dir),
+        github_repo=None,
+        github_token=None,
     )
     return config
 
@@ -226,6 +232,9 @@ class TestWorkflowGraph:
             prompts_dir=test_config.prompts_dir,
             claude_cli_tool="custom-claude",
             claude_cli_timeout=123,
+            claude_cli_use_worktree=True,
+            claude_cli_worktree_parent=str(Path(test_config.project_dir) / "worktrees"),
+            claude_cli_keep_worktree=False,
         )
 
         agent = _create_agent(
@@ -239,6 +248,11 @@ class TestWorkflowGraph:
         assert agent.cli_tool == "custom-claude"
         assert agent.timeout == 123
         assert str(agent.project_dir) == str(Path(test_config.project_dir).resolve())
+        assert agent.use_worktree is True
+        assert str(agent.worktree_parent) == str(
+            (Path(test_config.project_dir) / "worktrees").resolve()
+        )
+        assert agent.keep_worktree is False
 
     @pytest.mark.asyncio
     async def test_graph_creation(self, test_config):
@@ -286,8 +300,16 @@ class TestWorkflowGraph:
             json.loads(line)
             for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        assert [event["role"] for event in events] == ["planner", "developer", "tester"]
-        assert all("duration_ms" in event for event in events)
+        # Each agent emits a started + completed pair (the started
+        # event is what powers ``zeperion status``' in-flight detection).
+        # We assert on the *completion* sequence — that's the canonical
+        # ordering of round work and the only thing other modules care
+        # about.
+        completed = [e for e in events if e["event"] == "agent_completed"]
+        started = [e for e in events if e["event"] == "agent_started"]
+        assert [e["role"] for e in completed] == ["planner", "developer", "tester"]
+        assert [e["role"] for e in started] == ["planner", "developer", "tester"]
+        assert all("duration_ms" in e for e in completed)
 
     @pytest.mark.asyncio
     async def test_retry_on_test_failure(self, test_config, mock_agent_outputs):
@@ -384,4 +406,7 @@ class TestCLIIntegration:
         assert loaded_config.project_dir == test_config.project_dir
         assert loaded_config.claude_cli_tool == test_config.claude_cli_tool
         assert loaded_config.claude_cli_timeout == test_config.claude_cli_timeout
+        assert loaded_config.claude_cli_use_worktree == test_config.claude_cli_use_worktree
+        assert loaded_config.claude_cli_worktree_parent == test_config.claude_cli_worktree_parent
+        assert loaded_config.claude_cli_keep_worktree == test_config.claude_cli_keep_worktree
         assert loaded_config.max_rounds == test_config.max_rounds

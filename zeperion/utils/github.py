@@ -358,7 +358,19 @@ class GitHubClient:
             pr_number: PR number
 
         Returns:
-            Dict with thumbs_count, comments_count, reviewed_commit
+            Dict with:
+
+            - ``thumbs_count``: total Codex 👍 reactions (PR + issue/review
+              comments).
+            - ``inline_comments_count``: comments tied to a file/line — these
+              are almost always actionable code review remarks.
+            - ``issue_comments_count``: top-level PR thread comments by
+              Codex — frequently summary/LGTM noise, do *not* treat as
+              actionable on their own.
+            - ``comments_count``: legacy sum kept for backwards compatibility
+              with state files / dashboards.
+            - ``reviewed_commit``: SHA of the commit Codex looked at, or
+              ``None`` if Codex hasn't reviewed yet.
         """
         pr_info = await self.run_gh([
             "api", f"repos/{repo}/pulls/{pr_number}"
@@ -409,11 +421,17 @@ class GitHubClient:
                     if reaction.get("content") == "+1":
                         codex_thumbs += 1
 
-        codex_comments = sum(
+        inline_codex_comments = sum(
             1
-            for c in issue_comments + review_comments
+            for c in review_comments
             if self.is_codex_user(c.get("user", {}).get("login"))
         )
+        issue_codex_comments = sum(
+            1
+            for c in issue_comments
+            if self.is_codex_user(c.get("user", {}).get("login"))
+        )
+        codex_comments = inline_codex_comments + issue_codex_comments
 
         # Latest Codex review on the latest commit wins.
         reviewed_commit = None
@@ -427,6 +445,8 @@ class GitHubClient:
         return {
             "thumbs_count": codex_thumbs,
             "comments_count": codex_comments,
+            "inline_comments_count": inline_codex_comments,
+            "issue_comments_count": issue_codex_comments,
             "reviewed_commit": reviewed_commit,
         }
 
