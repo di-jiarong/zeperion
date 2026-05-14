@@ -1,0 +1,25 @@
+# Configuration for ZEPERION workflow
+
+# Model configuration
+models:
+  planner: claude-opus-4-7
+  developer: claude-sonnet-4-6
+  tester: claude-opus-4-7
+
+# Workflow configuration
+workflow:
+  max_rounds: 30
+  max_fix_attempts: 3
+
+# CLI configuration (for Claude CLI)
+cli:
+  command: claude
+  model_flag: --model
+  resume_flag: --resume
+  timeout: 600  # seconds
+
+# Paths
+paths:
+  requirement_file: ./requirement.txt
+  state_dir: ./.zeperion/state
+  prompts_dir: ./zeperion/prompts/templates

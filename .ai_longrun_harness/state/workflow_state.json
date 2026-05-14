@@ -1,0 +1,12 @@
+{
+  "status": "running",
+  "phase": "codex_review",
+  "round": 8,
+  "task_id": "task_003_owner_delete",
+  "fix_attempt": 7,
+  "pr_number": "5",
+  "pr_url": "https://github.com/topsun-bot/dijia-test/pull/5",
+  "cron_job_id": "52e6077f",
+  "last_commit": "65583e4",
+  "updated_at": "2026-05-13T08:24:00Z"
+}

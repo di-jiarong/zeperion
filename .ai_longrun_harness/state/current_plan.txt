@@ -1,0 +1,31 @@
+TASK_ID: task_003_owner_delete
+DESCRIPTION: 仅数据创建者可删除自己的数据
+
+PLAN:
+- [P1] 数据库迁移：experiences/pitfalls/config_files 增加 user_id 列
+  验收标准：schema.sql 加列+外键、PRAGMA foreign_keys=ON、幂等 ALTER TABLE 兼容旧库、test_helper 同步
+
+- [P2] 模型 Struct 加 UserID + Repository Create 支持 user_id 参数
+  验收标准：三个模型加 UserID 字段、Create 方法新增 userID 参数、所有 SQL 查询同步更新
+
+- [P3] Create/Upload Handler 从 context 获取 user_id 传到 Repository
+  验收标准：三个 Create handler 用 c.Get("user_id") 获取并传入 repo.Create
+
+- [P4] Delete Handler 增加所有权验证
+  验收标准：GetByID 拿到记录后比较 record.UserID vs c.Get("user_id")，不一致返回 403
+
+- [P5] 集成测试修复 + 新增所有权测试
+  验收标准：token 用真实 userID、测试用户A删自己的(200)、用户B删用户A的(403)、未认证(401)
+
+- [P6] 模型单元测试兼容
+  验收标准：内联 SQL 加 user_id、Create 传参、go test ./... 全通过
+
+RISKS:
+- 旧数据库无 user_id 列需幂等迁移（PRAGMA table_info 检查）
+- 现有数据 user_id 为 NULL，建议允许 NULL + 代码保证非空
+- SQLite 默认外键关闭，需 PRAGMA foreign_keys=ON
+
+HANDOFF_TO_DEVELOPER:
+- 修改顺序：schema → db.go → models → handlers → tests
+- context key: c.Get("user_id")，断言为 string
+- 403: middleware.RespondWithError(c, http.StatusForbidden, "你不能删除其他人的数据")

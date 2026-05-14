@@ -1,0 +1,114 @@
+"""Tests for prompt templates."""
+
+import pytest
+from pathlib import Path
+
+from zeperion.prompts import PromptTemplate, get_template_manager
+
+
+class TestPromptTemplate:
+    """Test prompt template rendering."""
+
+    def test_init_default_dir(self):
+        """Test initialization with default templates directory."""
+        manager = PromptTemplate()
+        assert manager.templates_dir.exists()
+        assert (manager.templates_dir / "planner.txt").exists()
+        assert (manager.templates_dir / "developer.txt").exists()
+        assert (manager.templates_dir / "tester.txt").exists()
+
+    def test_render_planner_minimal(self):
+        """Test planner prompt with minimal context."""
+        manager = PromptTemplate()
+        prompt = manager.render_planner(
+            requirement="Build a REST API",
+            round_num=1,
+        )
+
+        assert "计划智能体" in prompt
+        assert "Build a REST API" in prompt
+        assert "第 1 轮" in prompt
+        assert "TASK_ID:" in prompt
+        assert "GLOBAL_STATUS:" in prompt
+
+    def test_render_planner_with_context(self):
+        """Test planner prompt with full context."""
+        manager = PromptTemplate()
+        prompt = manager.render_planner(
+            requirement="Build a REST API",
+            current_plan="Previous plan content",
+            test_report="Test failed: missing auth",
+            lessons=["Always validate input", "Use async handlers"],
+            round_num=3,
+        )
+
+        assert "Build a REST API" in prompt
+        assert "Previous plan content" in prompt
+        assert "Test failed: missing auth" in prompt
+        assert "Always validate input" in prompt
+        assert "Use async handlers" in prompt
+        assert "第 3 轮" in prompt
+
+    def test_render_developer_first_implementation(self):
+        """Test developer prompt for first implementation."""
+        manager = PromptTemplate()
+        prompt = manager.render_developer(
+            requirement="Build a REST API",
+            plan="Implement user authentication",
+            fix_attempt=0,
+        )
+
+        assert "开发智能体" in prompt
+        assert "Build a REST API" in prompt
+        assert "Implement user authentication" in prompt
+        assert "首次实现" in prompt
+        assert "GLOBAL_STATUS:" in prompt
+        assert "CHANGES:" in prompt
+
+    def test_render_developer_fixing_bugs(self):
+        """Test developer prompt when fixing bugs."""
+        manager = PromptTemplate()
+        prompt = manager.render_developer(
+            requirement="Build a REST API",
+            plan="Implement user authentication",
+            test_report="Test failed: password not hashed",
+            lessons=["Use bcrypt for passwords"],
+            fix_attempt=2,
+        )
+
+        assert "Build a REST API" in prompt
+        assert "Implement user authentication" in prompt
+        assert "Test failed: password not hashed" in prompt
+        assert "Use bcrypt for passwords" in prompt
+        assert "第 2 次" in prompt
+        assert "修复尝试" in prompt
+
+    def test_render_tester(self):
+        """Test tester prompt."""
+        manager = PromptTemplate()
+        prompt = manager.render_tester(
+            requirement="Build a REST API",
+            plan="Implement user authentication",
+            dev_output="Implemented JWT authentication",
+            lessons=["Check edge cases"],
+        )
+
+        assert "测试智能体" in prompt
+        assert "Build a REST API" in prompt
+        assert "Implement user authentication" in prompt
+        assert "Implemented JWT authentication" in prompt
+        assert "Check edge cases" in prompt
+        assert "TEST_STATUS:" in prompt
+        assert "TEST_CASES:" in prompt
+
+    def test_get_template_manager_singleton(self):
+        """Test global template manager is singleton."""
+        manager1 = get_template_manager()
+        manager2 = get_template_manager()
+        assert manager1 is manager2
+
+    def test_get_template_manager_custom_dir(self):
+        """Test global template manager with custom directory."""
+        custom_dir = Path("/tmp/custom_templates")
+        manager = get_template_manager(custom_dir)
+        assert manager.templates_dir == custom_dir

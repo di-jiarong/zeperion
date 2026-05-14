@@ -1,0 +1,13 @@
+{
+  "status": "in_review",
+  "phase": "waiting_codex",
+  "pr_branch": "feat/owner-only-delete",
+  "pr_number": "5",
+  "pr_url": "https://github.com/topsun-bot/dijia-test/pull/5",
+  "review_round": 8,
+  "cron_job_id": "52e6077f",
+  "last_commit": "65583e4",
+  "total_comments": 28,
+  "baseline": {"review_comments": 28, "reviews": 7, "issue_comments": 12},
+  "updated_at": "2026-05-13T08:24:00Z"
+}
