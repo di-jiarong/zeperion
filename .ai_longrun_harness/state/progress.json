@@ -1,9 +1,0 @@
-{
-  "task_id": "task_003_owner_delete",
-  "total_phases": 6,
-  "completed_phases": 6,
-  "codex_review_rounds": 5,
-  "current_phase": "WAITING_CODEX",
-  "start_time": "2026-05-13T06:00:00Z",
-  "updated_at": "2026-05-13T09:45:00Z"
-}
