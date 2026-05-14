@@ -5,25 +5,54 @@ import json
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CODEX_LOGINS: tuple[str, ...] = (
+    "chatgpt-codex-connector",
+    "chatgpt-codex-connector[bot]",
+    "codex",
+    "codex[bot]",
+)
 
 
 class GitHubClient:
     """GitHub operations wrapper using gh CLI."""
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        codex_logins: Optional[Iterable[str]] = None,
+    ):
         """
         Initialize GitHub client.
 
         Args:
             token: GitHub token (defaults to GITHUB_TOKEN env var)
+            codex_logins: GitHub login names that should be treated as the
+                Codex review bot. Defaults to the historically observed
+                identities. Any login ending with ``[bot]`` containing
+                "codex" is also recognised.
         """
         self.token = token or os.environ.get("GITHUB_TOKEN")
         if self.token:
             os.environ["GITHUB_TOKEN"] = self.token
+
+        self._codex_logins: set[str] = {
+            login.lower() for login in (codex_logins or DEFAULT_CODEX_LOGINS)
+        }
+
+    def is_codex_user(self, login: Optional[str]) -> bool:
+        """Return True when the GitHub login matches a Codex bot."""
+        if not login:
+            return False
+        normalized = login.lower()
+        if normalized in self._codex_logins:
+            return True
+        return normalized.endswith("[bot]") and "codex" in normalized
 
     async def run_gh(self, args: list[str]) -> str:
         """
@@ -243,18 +272,15 @@ class GitHubClient:
         Returns:
             PR URL
         """
-        # Write body to temp file
-        body_file = Path("/tmp/zeperion_pr_body.md")
-        body_file.write_text(body)
-
-        pr_url = await self.run_gh([
-            "pr", "create",
-            "--repo", repo,
-            "--base", base,
-            "--head", head,
-            "--title", title,
-            "--body-file", str(body_file),
-        ])
+        with _temporary_body_file(body) as body_file:
+            pr_url = await self.run_gh([
+                "pr", "create",
+                "--repo", repo,
+                "--base", base,
+                "--head", head,
+                "--title", title,
+                "--body-file", str(body_file),
+            ])
 
         return pr_url
 
@@ -268,9 +294,10 @@ class GitHubClient:
             args.extend(["--title", title])
 
         if body:
-            body_file = Path("/tmp/zeperion_pr_body.md")
-            body_file.write_text(body)
-            args.extend(["--body-file", str(body_file)])
+            with _temporary_body_file(body) as body_file:
+                args.extend(["--body-file", str(body_file)])
+                await self.run_gh(args)
+            return
 
         await self.run_gh(args)
 
@@ -334,74 +361,69 @@ class GitHubClient:
         Returns:
             Dict with thumbs_count, comments_count, reviewed_commit
         """
-        # Get PR info
         pr_info = await self.run_gh([
             "api", f"repos/{repo}/pulls/{pr_number}"
         ])
         pr_data = json.loads(pr_info)
         latest_commit = pr_data["head"]["sha"]
 
-        # Get all reactions (PR level)
-        pr_reactions = await self._get_reactions(
+        pr_reactions = await self._get_paginated(
             f"repos/{repo}/issues/{pr_number}/reactions"
         )
 
-        # Get issue comments
         issue_comments = await self._get_paginated(
             f"repos/{repo}/issues/{pr_number}/comments"
         )
 
-        # Get review comments
         review_comments = await self._get_paginated(
             f"repos/{repo}/pulls/{pr_number}/comments"
         )
 
-        # Get reviews
         reviews = await self._get_paginated(
             f"repos/{repo}/pulls/{pr_number}/reviews"
         )
 
-        # Count Codex thumbs
         codex_thumbs = 0
 
-        # PR reactions
         for reaction in pr_reactions:
-            if reaction.get("user", {}).get("login") == "codex" and reaction.get("content") == "+1":
+            if (
+                self.is_codex_user(reaction.get("user", {}).get("login"))
+                and reaction.get("content") == "+1"
+            ):
                 codex_thumbs += 1
 
-        # Issue comment reactions
         for comment in issue_comments:
-            if comment.get("user", {}).get("login") == "codex":
-                comment_reactions = await self._get_reactions(
+            if self.is_codex_user(comment.get("user", {}).get("login")):
+                comment_reactions = await self._get_paginated(
                     f"repos/{repo}/issues/comments/{comment['id']}/reactions"
                 )
                 for reaction in comment_reactions:
                     if reaction.get("content") == "+1":
                         codex_thumbs += 1
 
-        # Review comment reactions
         for comment in review_comments:
-            if comment.get("user", {}).get("login") == "codex":
-                comment_reactions = await self._get_reactions(
+            if self.is_codex_user(comment.get("user", {}).get("login")):
+                comment_reactions = await self._get_paginated(
                     f"repos/{repo}/pulls/comments/{comment['id']}/reactions"
                 )
                 for reaction in comment_reactions:
                     if reaction.get("content") == "+1":
                         codex_thumbs += 1
 
-        # Count Codex comments
         codex_comments = sum(
-            1 for c in issue_comments + review_comments
-            if c.get("user", {}).get("login") == "codex"
+            1
+            for c in issue_comments + review_comments
+            if self.is_codex_user(c.get("user", {}).get("login"))
         )
 
-        # Check if Codex reviewed latest commit
+        # Latest Codex review on the latest commit wins.
         reviewed_commit = None
         for review in reviews:
-            if review.get("user", {}).get("login") == "codex":
-                reviewed_commit = review.get("commit_id")
-                if reviewed_commit == latest_commit:
-                    break
+            if not self.is_codex_user(review.get("user", {}).get("login")):
+                continue
+            reviewed_commit = review.get("commit_id")
+            if reviewed_commit == latest_commit:
+                break
 
         return {
             "thumbs_count": codex_thumbs,
@@ -410,20 +432,45 @@ class GitHubClient:
         }
 
     async def _get_paginated(self, endpoint: str) -> list:
-        """Get paginated API results."""
-        try:
-            output = await self.run_gh(["api", "--paginate", endpoint])
-            return json.loads(output) if output else []
-        except RuntimeError:
-            return []
+        """Get paginated API results.
 
-    async def _get_reactions(self, endpoint: str) -> list:
-        """Get reactions for a resource."""
-        try:
-            output = await self.run_gh(["api", endpoint])
-            return json.loads(output) if output else []
-        except RuntimeError:
-            return []
+        ``gh api --paginate`` concatenates the JSON document from each page;
+        for list-typed endpoints that means multiple ``[...]`` arrays glued
+        back-to-back, which is not a single valid JSON document. We instead
+        walk pages explicitly and merge the results.
+        """
+        items: list = []
+        page = 1
+        while True:
+            paged = _with_page(endpoint, page)
+            try:
+                output = await self.run_gh(["api", paged])
+            except RuntimeError as exc:
+                logger.warning("gh api %s failed: %s", paged, exc)
+                break
+
+            if not output:
+                break
+
+            try:
+                data = json.loads(output)
+            except json.JSONDecodeError as exc:
+                logger.warning("Invalid JSON from %s: %s", paged, exc)
+                break
+
+            if isinstance(data, list):
+                if not data:
+                    break
+                items.extend(data)
+                if len(data) < 100:
+                    break
+                page += 1
+            else:
+                if isinstance(data, dict):
+                    items.append(data)
+                break
+
+        return items
 
     async def enable_auto_merge(self, pr_url: str) -> None:
         """Enable auto-merge for PR."""
@@ -441,3 +488,38 @@ class GitHubClient:
             "--repo", repo,
             "--body", body,
         ])
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _with_page(endpoint: str, page: int, per_page: int = 100) -> str:
+    """Append/replace the page/per_page query parameters on a gh endpoint."""
+    separator = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{separator}per_page={per_page}&page={page}"
+
+
+class _temporary_body_file:
+    """Context manager yielding a temp file populated with ``body``."""
+
+    def __init__(self, body: str):
+        self.body = body
+        self._path: Optional[Path] = None
+
+    def __enter__(self) -> Path:
+        fd, path = tempfile.mkstemp(prefix="zeperion_pr_body_", suffix=".md")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(self.body)
+        except Exception:
+            Path(path).unlink(missing_ok=True)
+            raise
+        self._path = Path(path)
+        return self._path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._path is not None:
+            self._path.unlink(missing_ok=True)
+            self._path = None

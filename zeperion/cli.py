@@ -1,17 +1,17 @@
 """CLI interface for ZEPERION."""
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 import typer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
-from zeperion.config import load_config_from_yaml, get_default_config
+from zeperion.config import load_config_from_yaml
 from zeperion.models import WorkflowConfig
 from zeperion.storage import StateStorage
 
@@ -38,7 +38,7 @@ def init(
 
     Creates:
     - .zeperion/config.yaml
-    - .ai_longrun_harness/state/
+    - .zeperion/state/
     - requirement.txt (if not exists)
     """
     project_path = Path(project_dir).resolve()
@@ -46,7 +46,7 @@ def init(
 
     # Create directories
     config_dir = project_path / ".zeperion"
-    state_dir = project_path / ".ai_longrun_harness" / "state"
+    state_dir = project_path / ".zeperion" / "state"
 
     for dir_path in [config_dir, state_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -145,19 +145,16 @@ def run(
         console.print(f"[red]Error:[/red] Failed to load config: {e}")
         raise typer.Exit(1)
 
-    # Create graph based on mode
     console.print(f"[bold]Mode:[/bold] {mode}")
+
+    thread_id = thread_id or "main"
+    config_obj = {"configurable": {"thread_id": thread_id}}
+    checkpoint_path = Path(config.state_dir) / "checkpoints.db"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
     if mode == "multi_agent":
         from zeperion.graphs import create_multi_agent_graph
         from zeperion.models import create_initial_state
-
-        console.print("[bold]Creating multi-agent workflow graph...[/bold]")
-        graph = create_multi_agent_graph(config)
-
-        # Prepare initial state
-        thread_id = thread_id or "main"
-        config_obj = {"configurable": {"thread_id": thread_id}}
 
         if resume:
             console.print(f"[bold]Resuming from checkpoint:[/bold] {thread_id}")
@@ -166,16 +163,16 @@ def run(
             console.print("[bold]Starting new workflow[/bold]")
             initial_state = create_initial_state(config)
 
+        def build_graph(checkpointer):
+            return create_multi_agent_graph(
+                config,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+            )
+
     elif mode == "pr_pipeline":
         from zeperion.graphs import create_pr_pipeline_graph
         from zeperion.models import create_initial_pr_state
-
-        console.print("[bold]Creating PR pipeline workflow graph...[/bold]")
-        graph = create_pr_pipeline_graph(config)
-
-        # Prepare initial state
-        thread_id = thread_id or "main"
-        config_obj = {"configurable": {"thread_id": thread_id}}
 
         if resume:
             console.print(f"[bold]Resuming from checkpoint:[/bold] {thread_id}")
@@ -184,35 +181,40 @@ def run(
             console.print("[bold]Starting new PR pipeline[/bold]")
             initial_state = create_initial_pr_state(config)
 
+        def build_graph(checkpointer):
+            return create_pr_pipeline_graph(config, checkpointer=checkpointer)
+
     else:
         console.print(f"[red]Error:[/red] Mode '{mode}' not yet implemented")
         console.print("Supported modes: multi_agent, pr_pipeline")
         raise typer.Exit(1)
 
-    # Run workflow
     console.print("\n[bold green]Starting workflow execution...[/bold green]\n")
 
     async def run_workflow():
         try:
-            async for event in graph.astream(initial_state, config_obj):
-                # Display progress
-                for node_name, node_state in event.items():
-                    console.print(f"[cyan]→ {node_name}[/cyan]")
-                    if "phase" in node_state:
-                        console.print(f"  Phase: {node_state['phase']}")
-                    if "round" in node_state:
-                        console.print(f"  Round: {node_state['round']}")
-                    if "test_status" in node_state:
-                        console.print(f"  Test: {node_state['test_status']}")
-                    console.print()
+            async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+                graph = build_graph(saver)
+                async for event in graph.astream(initial_state, config_obj):
+                    for node_name, node_state in event.items():
+                        console.print(f"[cyan]→ {node_name}[/cyan]")
+                        if "phase" in node_state:
+                            console.print(f"  Phase: {node_state['phase']}")
+                        if "round" in node_state:
+                            console.print(f"  Round: {node_state['round']}")
+                        if "test_status" in node_state:
+                            console.print(f"  Test: {node_state['test_status']}")
+                        console.print()
 
-            console.print("[bold green]✓ Workflow completed![/bold green]")
+            console.print("[bold green]\u2713 Workflow completed![/bold green]")
 
         except KeyboardInterrupt:
-            console.print("\n[yellow]⚠ Workflow interrupted[/yellow]")
-            console.print(f"Resume with: zeperion run --resume --thread-id {thread_id}")
+            console.print("\n[yellow]\u26a0 Workflow interrupted[/yellow]")
+            console.print(
+                f"Resume with: zeperion run --resume --thread-id {thread_id}"
+            )
         except Exception as e:
-            console.print(f"\n[red]✗ Workflow failed:[/red] {e}")
+            console.print(f"\n[red]\u2717 Workflow failed:[/red] {e}")
             raise typer.Exit(1)
 
     asyncio.run(run_workflow())
@@ -250,10 +252,7 @@ def status(
         console.print(f"[red]Error:[/red] Failed to load config: {e}")
         raise typer.Exit(1)
 
-    # Initialize storage
-    storage = StateStorage(Path(config.state_dir))
-
-    # Load workflow state
+    storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
     workflow_state = storage.load_workflow_state()
 
     if not workflow_state:
@@ -271,25 +270,36 @@ def status(
         f"Task ID: [cyan]{workflow_state.get('task_id', 'none')}[/cyan]",
     ]
 
-    # Show PR Pipeline status if available
-    pr_phase = workflow_state.get('pr_phase')
-    if pr_phase:
+    if workflow_state.get("global_status") == "BLOCKED" or workflow_state.get("phase") == "blocked":
+        status_lines.append("")
+        status_lines.append("[bold red]Human intervention required.[/bold red]")
+        last_error = workflow_state.get("last_error")
+        if last_error:
+            status_lines.append(f"Reason: [red]{last_error}[/red]")
+
+    pipeline_state = storage.load_pipeline_state()
+    if pipeline_state:
         status_lines.append("")
         status_lines.append("[bold]PR Pipeline:[/bold]")
-        status_lines.append(f"  PR Phase: [cyan]{pr_phase}[/cyan]")
-        pr_num = workflow_state.get('pr_number')
+        if pipeline_state.get("thread_id"):
+            status_lines.append(
+                f"  Thread ID: [cyan]{pipeline_state['thread_id']}[/cyan]"
+            )
+        pr_phase = pipeline_state.get("pr_phase")
+        if pr_phase:
+            status_lines.append(f"  PR Phase: [cyan]{pr_phase}[/cyan]")
+        pr_num = pipeline_state.get("pr_number")
         if pr_num:
             status_lines.append(f"  PR Number: [cyan]#{pr_num}[/cyan]")
-        pr_url = workflow_state.get('pr_url')
+        pr_url = pipeline_state.get("pr_url")
         if pr_url:
             status_lines.append(f"  PR URL: [link={pr_url}]{pr_url}[/link]")
-        codex = workflow_state.get('codex_status')
+        codex = pipeline_state.get("codex_status")
         if codex:
             status_lines.append(f"  Codex Status: [cyan]{codex}[/cyan]")
-        merged = workflow_state.get('merge_enabled')
-        if merged:
-            status_lines.append(f"  Auto-merge: [green]Enabled[/green]")
-        pr_error = workflow_state.get('pr_error')
+        if pipeline_state.get("merge_enabled"):
+            status_lines.append("  Auto-merge: [green]Enabled[/green]")
+        pr_error = pipeline_state.get("pr_error")
         if pr_error:
             status_lines.append(f"  Error: [red]{pr_error}[/red]")
 
@@ -346,7 +356,6 @@ def list(
 
     Shows all thread IDs with their current state, allowing you to resume any run.
     """
-    # Load config
     config_path = Path(config_file)
     if not config_path.exists():
         console.print(f"[red]Error:[/red] Config file not found: {config_path}")
@@ -358,115 +367,69 @@ def list(
         console.print(f"[red]Error:[/red] Failed to load config: {e}")
         raise typer.Exit(1)
 
-    # Check checkpoint database
-    checkpoint_path = Path(".ai_longrun_harness/state/checkpoints.db")
+    checkpoint_path = Path(config.state_dir) / "checkpoints.db"
     if not checkpoint_path.exists():
         console.print("[yellow]No checkpoints found[/yellow]")
         console.print("Run 'zeperion run' to start a workflow")
         return
 
-    # Query checkpoints from SQLite
-    import sqlite3
     from datetime import datetime
 
+    async def collect() -> list[tuple[str, dict]]:
+        results: dict[str, dict] = {}
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+            async for snapshot in saver.alist(None):
+                cfg = snapshot.config.get("configurable", {})
+                thread_id = cfg.get("thread_id")
+                if not thread_id or thread_id in results:
+                    continue
+                values = snapshot.checkpoint.get("channel_values", {}) or {}
+                results[thread_id] = values
+        return list(results.items())
+
     try:
-        conn = sqlite3.connect(str(checkpoint_path))
-        cursor = conn.cursor()
-
-        # Get all unique thread_ids with their latest checkpoint
-        cursor.execute("""
-            SELECT
-                thread_id,
-                MAX(checkpoint_id) as latest_checkpoint,
-                MAX(checkpoint_ns) as latest_ns
-            FROM checkpoints
-            GROUP BY thread_id
-            ORDER BY latest_checkpoint DESC
-        """)
-
-        threads = cursor.fetchall()
-
-        if not threads:
-            console.print("[yellow]No workflow runs found[/yellow]")
-            conn.close()
-            return
-
-        # Create table
-        table = Table(title="Workflow Runs", show_header=True, header_style="bold cyan")
-        table.add_column("Thread ID", style="cyan", no_wrap=True)
-        table.add_column("Phase", style="yellow")
-        table.add_column("Round", justify="right")
-        table.add_column("Test Status", style="magenta")
-        table.add_column("Global Status", style="green")
-        table.add_column("Updated", style="dim")
-
-        for thread_id, checkpoint_id, checkpoint_ns in threads:
-            # Get the latest state for this thread
-            cursor.execute("""
-                SELECT channel_values
-                FROM checkpoints
-                WHERE thread_id = ? AND checkpoint_id = ?
-            """, (thread_id, checkpoint_id))
-
-            result = cursor.fetchone()
-            if result:
-                import pickle
-                try:
-                    # Deserialize the state
-                    state_data = pickle.loads(result[0])
-
-                    # Extract state fields (handle different serialization formats)
-                    if isinstance(state_data, dict):
-                        state = state_data
-                    else:
-                        # LangGraph may wrap state differently
-                        state = {}
-
-                    phase = state.get('phase', 'unknown')
-                    round_num = state.get('round', 0)
-                    test_status = state.get('test_status', 'PENDING')
-                    global_status = state.get('global_status', 'CONTINUE')
-                    updated_at = state.get('updated_at', 'unknown')
-
-                    # Format timestamp
-                    if updated_at != 'unknown':
-                        try:
-                            dt = datetime.fromisoformat(updated_at)
-                            updated_at = dt.strftime('%Y-%m-%d %H:%M')
-                        except:
-                            pass
-
-                    table.add_row(
-                        thread_id,
-                        str(phase),
-                        str(round_num),
-                        str(test_status),
-                        str(global_status),
-                        updated_at,
-                    )
-                except Exception as e:
-                    # Fallback if deserialization fails
-                    table.add_row(
-                        thread_id,
-                        "unknown",
-                        "-",
-                        "-",
-                        "-",
-                        f"checkpoint #{checkpoint_id}",
-                    )
-
-        conn.close()
-
-        console.print(table)
-        console.print(f"\n[dim]Total runs: {len(threads)}[/dim]")
-        console.print("\n[bold]Resume a run:[/bold]")
-        console.print("  zeperion run --resume --thread-id <THREAD_ID>")
-        console.print("\n[bold]Check detailed status:[/bold]")
-        console.print("  zeperion status --thread-id <THREAD_ID>")
-
-    except sqlite3.Error as e:
-        console.print(f"[red]Error:[/red] Failed to read checkpoints: {e}")
+        threads = asyncio.run(collect())
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Failed to read checkpoints: {exc}")
         raise typer.Exit(1)
+
+    if not threads:
+        console.print("[yellow]No workflow runs found[/yellow]")
+        return
+
+    table = Table(title="Workflow Runs", show_header=True, header_style="bold cyan")
+    table.add_column("Thread ID", style="cyan", no_wrap=True)
+    table.add_column("Phase", style="yellow")
+    table.add_column("Round", justify="right")
+    table.add_column("Test Status", style="magenta")
+    table.add_column("Global Status", style="green")
+    table.add_column("PR Phase", style="blue")
+    table.add_column("Updated", style="dim")
+
+    for thread_id, state in threads:
+        updated_at = state.get("updated_at", "")
+        if updated_at:
+            try:
+                updated_at = datetime.fromisoformat(updated_at).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+
+        table.add_row(
+            thread_id,
+            str(state.get("phase", "unknown")),
+            str(state.get("round", "-")),
+            str(state.get("test_status", "-")),
+            str(state.get("global_status", "-")),
+            str(state.get("pr_phase", "-")),
+            updated_at or "-",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Total runs: {len(threads)}[/dim]")
+    console.print("\n[bold]Resume a run:[/bold]")
+    console.print("  zeperion run --resume --thread-id <THREAD_ID>")
+    console.print("\n[bold]Check detailed status:[/bold]")
+    console.print("  zeperion status --thread-id <THREAD_ID>")
 
 
 

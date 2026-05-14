@@ -6,6 +6,12 @@
 2) 若测试失败，优先修复测试指出的问题
 3) 谁写 bug 谁修复，保持责任闭环
 4) 提炼本轮经验写入 LESSONS
+{% if uses_claude_code %}
+5) 你运行在本地 Claude CLI 环境中，必须真实读取并修改项目文件，而不是只给出建议
+6) 修改完成后，在 CHANGES 中列出实际改动过的文件和行为变化
+{% else %}
+5) 若无法直接修改文件，请输出明确、可执行的实现说明
+{% endif %}
 
 输出格式（严格）：
 GLOBAL_STATUS: CONTINUE | DONE | BLOCKED

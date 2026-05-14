@@ -367,7 +367,7 @@ class OllamaAgent(BaseAgent):
 ```python
 from langgraph.graph import StateGraph
 from zeperion.models import WorkflowState
-from zeperion.agents import ClaudeAgent
+from zeperion.agents import ClaudeCodeAgent
 
 # 创建自定义图
 workflow = StateGraph(WorkflowState)
@@ -385,52 +385,63 @@ app = workflow.compile()
 ### 使用 Python API
 
 ```python
+import asyncio
+
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 from zeperion.graphs.multi_agent import create_multi_agent_graph
 from zeperion.models import WorkflowConfig, create_initial_state
 
-# 创建配置
-config = WorkflowConfig(
-    requirement_file="./requirement.txt",
-    planner_model="claude-opus-4-7",
-    developer_model="claude-sonnet-4-6",
-    tester_model="claude-opus-4-7",
-    max_rounds=50,
-    max_fix_attempts=3,
-)
 
-# 创建图（默认使用 AnthropicAgent）
-graph = create_multi_agent_graph(config)
+async def main():
+    config = WorkflowConfig(
+        requirement_file="./requirement.txt",
+        planner_model="claude-opus-4-7",
+        developer_model="claude-sonnet-4-6",
+        tester_model="claude-opus-4-7",
+        max_rounds=50,
+        max_fix_attempts=3,
+    )
 
-# 运行
-initial_state = create_initial_state()
-result = await graph.ainvoke(
-    initial_state,
-    config={"configurable": {"thread_id": "my-run-001"}}
-)
+    async with AsyncSqliteSaver.from_conn_string(".zeperion/state/checkpoints.db") as saver:
+        graph = create_multi_agent_graph(
+            config,
+            checkpointer=saver,
+            thread_id="my-run-001",
+        )
+        initial_state = create_initial_state(config)
+        await graph.ainvoke(
+            initial_state,
+            {"configurable": {"thread_id": "my-run-001"}},
+        )
 
-# 使用自定义 Agent
-from zeperion.agents import ClaudeCodeAgent
 
-# 修改 graphs/multi_agent.py 中的 Agent 初始化
-planner = ClaudeCodeAgent(role=AgentRole.PLANNER, model=config.planner_model)
+asyncio.run(main())
 ```
 
 ## 状态管理
 
-ZEPERION 使用 LangGraph 的检查点机制自动持久化状态：
+ZEPERION 使用 LangGraph 的 SQLite 检查点机制持久化状态，每个 `thread_id` 一份历史。
+
+```bash
+# 列出所有 thread_id 及当前阶段
+zeperion list
+
+# 查看单个 thread 的详细状态（含 PR Pipeline）
+zeperion status --thread-id feature-auth
+
+# 从检查点恢复
+zeperion run --resume --thread-id feature-auth
+```
+
+需要在脚本里直接读 checkpoint，可以使用 LangGraph 的官方 API：
 
 ```python
-# 查看所有运行
-from zeperion.storage import list_runs
-runs = list_runs()
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-# 恢复特定运行
-from zeperion.storage import load_checkpoint
-state = load_checkpoint(run_id="abc123")
-
-# 清理旧运行
-from zeperion.storage import cleanup_old_runs
-cleanup_old_runs(days=7)
+async with AsyncSqliteSaver.from_conn_string(".zeperion/state/checkpoints.db") as saver:
+    async for snapshot in saver.alist(None):
+        print(snapshot.config["configurable"]["thread_id"], snapshot.checkpoint["channel_values"])
 ```
 
 ## 测试
@@ -491,16 +502,24 @@ rm -rf .zeperion/state/
 zeperion run
 ```
 
-## 与 Bash 版本的区别
+## 与 Bash 旧版本的区别
 
-| 特性 | Bash 版本 | LangGraph 版本 |
-|------|----------|---------------|
-| 类型安全 | ❌ | ✅ Pydantic |
-| 容错解析 | ❌ 严格匹配 | ✅ 宽松匹配 |
-| 状态持久化 | 手动 JSON | 自动检查点 |
-| 并发安全 | ❌ 文件竞争 | ✅ 原子更新 |
-| 可测试性 | ❌ | ✅ 单元测试 |
-| 错误恢复 | 手动 | 自动重试 |
+历史上 ZEPERION 曾有一份 bash 实现（`.ai_longrun_harness/`），现已迁出主线，仅保留在 `legacy/bash-harness` 分支供查阅。新功能不再向 bash 版同步。
+
+| 特性 | Bash 旧版（legacy 分支） | LangGraph Python 版（main） |
+|------|-----------------------|-----------------------------|
+| 类型安全 | 无 | 有，基于 Pydantic |
+| 输出解析 | awk/grep 严格匹配 | `SectionParser` 宽松匹配 |
+| 状态持久化 | 手写 JSON 文件 | LangGraph SQLite 检查点 |
+| 多任务并行 | 共享文件易冲突 | 按 `thread_id` 分目录隔离 |
+| 可测试性 | 无 | `pytest` 覆盖核心路径 |
+| 错误恢复 | 人工干预 | `zeperion run --resume` 续跑 |
+
+如需查看旧实现：
+
+```bash
+git show legacy/bash-harness:.ai_longrun_harness/run_multi_agent_loop.sh
+```
 
 ## 贡献
 

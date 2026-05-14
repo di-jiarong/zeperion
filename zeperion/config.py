@@ -56,11 +56,22 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "planner_model": config.planner_model,
         "developer_model": config.developer_model,
         "tester_model": config.tester_model,
+        "planner_agent_type": config.planner_agent_type,
+        "developer_agent_type": config.developer_agent_type,
+        "tester_agent_type": config.tester_agent_type,
         "max_rounds": config.max_rounds,
         "max_fix_attempts": config.max_fix_attempts,
+        "project_dir": config.project_dir,
         "state_dir": config.state_dir,
-        "prompts_dir": config.prompts_dir,
+        "claude_cli_tool": config.claude_cli_tool,
+        "claude_cli_timeout": config.claude_cli_timeout,
+        "pr_target_branch": config.pr_target_branch,
+        "pr_auto_merge": config.pr_auto_merge,
     }
+    if config.prompts_dir is not None:
+        config_dict["prompts_dir"] = config.prompts_dir
+    if config.github_repo is not None:
+        config_dict["github_repo"] = config.github_repo
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -82,8 +93,13 @@ def get_default_config() -> Dict[str, Any]:
         "planner_model": "claude-opus-4-7",
         "developer_model": "claude-sonnet-4-6",
         "tester_model": "claude-opus-4-7",
+        "planner_agent_type": "anthropic",
+        "developer_agent_type": "anthropic",
+        "tester_agent_type": "anthropic",
         "max_rounds": 50,
         "max_fix_attempts": 3,
-        "state_dir": ".ai_longrun_harness/state",
-        "prompts_dir": "zeperion/prompts/templates",
+        "project_dir": ".",
+        "state_dir": ".zeperion/state",
+        "claude_cli_tool": "claude",
+        "claude_cli_timeout": 600,
     }

@@ -1,12 +1,13 @@
 """State models for ZEPERION workflow."""
 
 import os
-from datetime import datetime
 from enum import Enum
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
+
+from zeperion.utils.time import iso_now
 
 
 class AgentRole(str, Enum):
@@ -22,6 +23,7 @@ class PhaseType(str, Enum):
     DEVELOPMENT = "development"
     TESTING = "testing"
     COMPLETED = "completed"
+    BLOCKED = "blocked"
     FAILED = "failed"
 
 
@@ -131,11 +133,25 @@ class WorkflowConfig(BaseModel):
     developer_model: str = Field(default="claude-sonnet-4-6")
     tester_model: str = Field(default="claude-opus-4-7")
 
+    planner_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
+    developer_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
+    tester_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
+
     max_rounds: int = Field(default=50, ge=1)
     max_fix_attempts: int = Field(default=3, ge=0)
 
-    state_dir: str = Field(default=".ai_longrun_harness/state")
-    prompts_dir: str = Field(default=".ai_longrun_harness/prompts")
+    project_dir: str = Field(default=".")
+    state_dir: str = Field(default=".zeperion/state")
+    prompts_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Override directory for prompt templates. When unset, the "
+            "packaged templates shipped with zeperion.prompts are used."
+        ),
+    )
+
+    claude_cli_tool: str = Field(default="claude")
+    claude_cli_timeout: int = Field(default=600, ge=1)
 
     # GitHub PR Pipeline configuration
     github_repo: Optional[str] = Field(default=None, description="GitHub repo (owner/repo)")
@@ -177,7 +193,7 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
         planner_session_id=None,
         developer_session_id=None,
         tester_session_id=None,
-        updated_at=datetime.utcnow().isoformat(),
+        updated_at=iso_now(),
     )
 
 
@@ -219,7 +235,7 @@ def create_initial_pr_state(
             planner_session_id=None,
             developer_session_id=None,
             tester_session_id=None,
-            updated_at=datetime.utcnow().isoformat(),
+            updated_at=iso_now(),
             pr_phase=PRPhase.INIT,
             pr_branch="",
             pr_target_branch=config.pr_target_branch,

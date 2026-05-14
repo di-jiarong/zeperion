@@ -180,10 +180,17 @@ class SectionParser:
             return []
 
         items = []
+        saw_blank_after_items = False
         for line in content.split("\n"):
             line = line.strip()
             if not line:
+                if items:
+                    saw_blank_after_items = True
                 continue
+
+            # A blank line after list items usually means following prose is outside the list.
+            if saw_blank_after_items:
+                break
 
             if strip_bullets:
                 # Remove common bullet markers

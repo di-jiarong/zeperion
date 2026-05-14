@@ -1,14 +1,15 @@
 """Multi-agent workflow graph."""
 
 import logging
-from datetime import datetime
+import time
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, Type
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
-from zeperion.agents import AnthropicAgent
+from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
+from zeperion.agents.base import BaseAgent
 from zeperion.models import (
     AgentRole,
     GlobalStatus,
@@ -19,16 +20,51 @@ from zeperion.models import (
 )
 from zeperion.prompts import get_template_manager
 from zeperion.storage import StateStorage
+from zeperion.utils.time import iso_now
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_agent_class(agent_type: str) -> Type[BaseAgent]:
+    """Resolve a configured agent type to its implementation class."""
+    normalized = agent_type.strip().lower().replace("-", "_")
+    if normalized == "anthropic":
+        return AnthropicAgent
+    if normalized == "claude_code":
+        return ClaudeCodeAgent
+    raise ValueError(f"Unsupported agent type: {agent_type}")
+
+
+def _create_agent(
+    agent_type: str,
+    role: AgentRole,
+    model: str,
+    config: WorkflowConfig,
+) -> BaseAgent:
+    """Create an agent instance from role-specific configuration."""
+    agent_class = _resolve_agent_class(agent_type)
+    if agent_class is ClaudeCodeAgent:
+        return ClaudeCodeAgent(
+            role=role,
+            model=model,
+            cli_tool=config.claude_cli_tool,
+            timeout=config.claude_cli_timeout,
+            project_dir=config.project_dir,
+        )
+
+    return agent_class(role=role, model=model)
+
+
 def create_multi_agent_graph(
     config: WorkflowConfig,
-    checkpoint_path: str = ".ai_longrun_harness/state/checkpoints.db",
+    *,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
+    agent_class: Optional[Type[BaseAgent]] = None,
+    thread_id: str = "main",
+    enable_checkpoint: Optional[bool] = None,
+    checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
 ) -> StateGraph:
-    """
-    Create multi-agent workflow graph.
+    """Create multi-agent workflow graph.
 
     Workflow:
     1. Planner: Break down requirements into tasks
@@ -37,34 +73,97 @@ def create_multi_agent_graph(
     4. Repeat until done or max rounds reached
 
     Args:
-        config: Workflow configuration
-        checkpoint_path: Path to SQLite checkpoint database
+        config: Workflow configuration.
+        checkpointer: Optional LangGraph checkpointer. The caller is
+            responsible for the checkpointer's lifecycle (e.g. opening it
+            inside ``async with AsyncSqliteSaver.from_conn_string(...)``).
+        agent_class: Optional test override used by every workflow role.
+        thread_id: Workflow thread ID used for local artifact filenames.
+        enable_checkpoint: Deprecated; pass ``checkpointer`` instead. When
+            ``False`` the graph is compiled without persistence.
+        checkpoint_path: Deprecated; ignored. Kept to avoid breaking older
+            call sites until they are migrated.
 
     Returns:
-        Compiled StateGraph
+        Compiled StateGraph.
     """
+    if checkpoint_path is not None:
+        logger.warning(
+            "create_multi_agent_graph(checkpoint_path=...) is deprecated and "
+            "ignored; pass an explicit checkpointer instead."
+        )
+    if enable_checkpoint is False and checkpointer is not None:
+        raise ValueError(
+            "enable_checkpoint=False is incompatible with an explicit checkpointer"
+        )
+
     # Initialize agents
-    planner = AnthropicAgent(
-        role=AgentRole.PLANNER,
-        model=config.planner_model,
-    )
-    developer = AnthropicAgent(
-        role=AgentRole.DEVELOPER,
-        model=config.developer_model,
-    )
-    tester = AnthropicAgent(
-        role=AgentRole.TESTER,
-        model=config.tester_model,
-    )
+    if agent_class:
+        planner = agent_class(role=AgentRole.PLANNER, model=config.planner_model)
+        developer = agent_class(role=AgentRole.DEVELOPER, model=config.developer_model)
+        tester = agent_class(role=AgentRole.TESTER, model=config.tester_model)
+    else:
+        planner = _create_agent(
+            config.planner_agent_type,
+            AgentRole.PLANNER,
+            config.planner_model,
+            config,
+        )
+        developer = _create_agent(
+            config.developer_agent_type,
+            AgentRole.DEVELOPER,
+            config.developer_model,
+            config,
+        )
+        tester = _create_agent(
+            config.tester_agent_type,
+            AgentRole.TESTER,
+            config.tester_model,
+            config,
+        )
+
+    developer_uses_claude_code = isinstance(developer, ClaudeCodeAgent)
 
     # Get template manager
-    template_manager = get_template_manager(Path(config.prompts_dir))
+    template_manager = get_template_manager(
+        Path(config.prompts_dir) if config.prompts_dir else None
+    )
 
-    # Initialize storage
-    storage = StateStorage(Path(config.state_dir))
+    # Initialize storage, isolated per workflow thread.
+    storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
 
     # Load requirement
     requirement = Path(config.requirement_file).read_text()
+
+    def record_agent_result(
+        agent_name: str,
+        state: WorkflowState,
+        output,
+        duration_ms: int,
+    ) -> None:
+        """Persist the latest output, per-round artifact, and structured event."""
+        storage.save_agent_output(
+            agent_name,
+            output.raw_output,
+            thread_id=thread_id,
+            round_num=state["round"],
+            fix_attempt=state.get("fix_attempt"),
+        )
+        storage.append_event(
+            thread_id,
+            {
+                "event": "agent_completed",
+                "role": agent_name,
+                "round": state["round"],
+                "fix_attempt": state.get("fix_attempt"),
+                "phase": state.get("phase"),
+                "task_id": output.task_id,
+                "test_status": output.test_status,
+                "global_status": output.global_status,
+                "duration_ms": duration_ms,
+                "output_chars": len(output.raw_output),
+            },
+        )
 
     # Define nodes
     async def planner_node(state: WorkflowState) -> WorkflowState:
@@ -85,23 +184,23 @@ def create_multi_agent_graph(
         )
 
         # Invoke agent
+        started_at = time.monotonic()
         output = await planner.invoke(prompt, state.get("planner_session_id"))
+        duration_ms = int((time.monotonic() - started_at) * 1000)
 
         # Save output
-        storage.save_agent_output("planner", output.raw_output)
+        record_agent_result("planner", state, output, duration_ms)
 
         # Save lessons
         for lesson in output.lessons:
             storage.append_lesson(lesson)
 
-        # Update state
         return {
             "phase": PhaseType.DEVELOPMENT,
             "task_id": output.task_id,
             "global_status": output.global_status,
             "lessons_learned": output.lessons,
-            "planner_session_id": output.task_id,  # Use task_id as session
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
     async def developer_node(state: WorkflowState) -> WorkflowState:
@@ -121,24 +220,26 @@ def create_multi_agent_graph(
             test_report=test_report,
             lessons=state["lessons_learned"],
             fix_attempt=state["fix_attempt"],
+            uses_claude_code=developer_uses_claude_code,
         )
 
         # Invoke agent
+        started_at = time.monotonic()
         output = await developer.invoke(prompt, state.get("developer_session_id"))
+        duration_ms = int((time.monotonic() - started_at) * 1000)
 
         # Save output
-        storage.save_agent_output("developer", output.raw_output)
+        record_agent_result("developer", state, output, duration_ms)
 
         # Save lessons
         for lesson in output.lessons:
             storage.append_lesson(lesson)
 
-        # Update state
+        # Developer never advances global_status — only Planner/Tester own it.
         return {
             "phase": PhaseType.TESTING,
             "lessons_learned": output.lessons,
-            "developer_session_id": state["task_id"],  # Use task_id as session
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
     async def tester_node(state: WorkflowState) -> WorkflowState:
@@ -160,21 +261,22 @@ def create_multi_agent_graph(
         )
 
         # Invoke agent
+        started_at = time.monotonic()
         output = await tester.invoke(prompt, state.get("tester_session_id"))
+        duration_ms = int((time.monotonic() - started_at) * 1000)
 
         # Save output
-        storage.save_agent_output("tester", output.raw_output)
+        record_agent_result("tester", state, output, duration_ms)
 
         # Save lessons
         for lesson in output.lessons:
             storage.append_lesson(lesson)
 
-        # Update state
         updates = {
             "test_status": output.test_status,
+            "global_status": output.global_status,
             "lessons_learned": output.lessons,
-            "tester_session_id": state["task_id"],
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
         # Capture error if test failed
@@ -187,7 +289,7 @@ def create_multi_agent_graph(
     # Define routing logic
     def route_after_tester(
         state: WorkflowState,
-    ) -> Literal["developer", "planner", "pr_pipeline", "end"]:
+    ) -> Literal["developer", "planner", "pr_pipeline", "blocked", "end"]:
         """
         Route after tester node.
 
@@ -201,8 +303,17 @@ def create_multi_agent_graph(
         round_num = state["round"]
         global_status = state["global_status"]
 
-        # Test passed or max fix attempts reached
-        if test_status == TestStatus.PASS or fix_attempt >= config.max_fix_attempts:
+        if test_status in (TestStatus.FAIL, TestStatus.ERROR):
+            if fix_attempt >= config.max_fix_attempts:
+                logger.warning("Max fix attempts reached, blocking workflow")
+                return "blocked"
+
+            # Test failed, retry developer
+            logger.info(f"Test failed, retry fix attempt {fix_attempt + 1}")
+            return "developer"
+
+        # Test passed or no retryable failure remains
+        if test_status == TestStatus.PASS:
             # Workflow is DONE → auto-enter PR Pipeline (if GitHub configured)
             if global_status == GlobalStatus.DONE:
                 if config.github_repo or config.github_token:
@@ -219,10 +330,9 @@ def create_multi_agent_graph(
             else:
                 logger.info(f"Moving to round {round_num + 1}")
                 return "planner"
-        else:
-            # Test failed, retry developer
-            logger.info(f"Test failed, retry fix attempt {fix_attempt + 1}")
-            return "developer"
+
+        logger.warning(f"Unexpected test status {test_status}, blocking workflow")
+        return "blocked"
 
     def increment_round(state: WorkflowState) -> WorkflowState:
         """Increment round counter and reset fix attempt."""
@@ -230,7 +340,7 @@ def create_multi_agent_graph(
             "round": state["round"] + 1,
             "fix_attempt": 0,
             "phase": PhaseType.PLANNING,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
     def increment_fix_attempt(state: WorkflowState) -> WorkflowState:
@@ -238,7 +348,19 @@ def create_multi_agent_graph(
         return {
             "fix_attempt": state["fix_attempt"] + 1,
             "phase": PhaseType.DEVELOPMENT,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
+        }
+
+    def block_workflow(state: WorkflowState) -> WorkflowState:
+        """Stop the workflow when automated fixing is exhausted."""
+        return {
+            "phase": PhaseType.BLOCKED,
+            "global_status": GlobalStatus.BLOCKED,
+            "last_error": (
+                state.get("last_error")
+                or "Max fix attempts reached. Human intervention required."
+            ),
+            "updated_at": iso_now(),
         }
 
     # PR Pipeline subgraph node — called when multi-agent work is done
@@ -249,7 +371,6 @@ def create_multi_agent_graph(
 
         logger.info("=== PR Pipeline: auto-entering from multi-agent workflow ===")
 
-        # Build PR Pipeline initial state from workflow state
         pr_state: PRPipelineState = {
             **state,
             "pr_phase": PRPhase.INIT,
@@ -268,35 +389,41 @@ def create_multi_agent_graph(
             "merge_enabled": False,
         }
 
-        # Create and run PR Pipeline subgraph
-        pr_graph = create_pr_pipeline_graph(config)
+        # Nested checkpointing is awkward; resumable PR runs should be
+        # started via ``zeperion run --mode pr_pipeline`` instead.
+        pr_graph = create_pr_pipeline_graph(config, checkpointer=None)
+        pr_thread_id = f"{thread_id}-pr"
+        pr_config = {"configurable": {"thread_id": pr_thread_id}}
 
-        # Use same thread_id so checkpoints are contiguous
         try:
-            result_state = await pr_graph.ainvoke(pr_state)
-
+            result_state = await pr_graph.ainvoke(pr_state, pr_config)
             logger.info(f"=== PR Pipeline complete: {result_state['pr_phase']} ===")
-
-            # Save PR results to storage for later inspection
-            current_state = storage.load_workflow_state() or {}
-            current_state["pr_phase"] = str(result_state.get("pr_phase", PRPhase.FAILED))
-            current_state["pr_number"] = result_state.get("pr_number")
-            current_state["pr_url"] = result_state.get("pr_url")
-            current_state["codex_status"] = str(result_state.get("codex_status", CodexStatus.PENDING))
-            current_state["merge_enabled"] = result_state.get("merge_enabled", False)
-            storage.save_workflow_state(current_state)
+            pipeline_record = {
+                "thread_id": pr_thread_id,
+                "pr_phase": str(result_state.get("pr_phase", PRPhase.FAILED)),
+                "pr_number": result_state.get("pr_number"),
+                "pr_url": result_state.get("pr_url"),
+                "codex_status": str(
+                    result_state.get("codex_status", CodexStatus.PENDING)
+                ),
+                "merge_enabled": result_state.get("merge_enabled", False),
+                "updated_at": iso_now(),
+            }
         except Exception as e:
             logger.error(f"PR Pipeline failed: {e}")
-            current_state = storage.load_workflow_state() or {}
-            current_state["pr_phase"] = "failed"
-            current_state["pr_error"] = str(e)
-            storage.save_workflow_state(current_state)
+            pipeline_record = {
+                "thread_id": pr_thread_id,
+                "pr_phase": "failed",
+                "pr_error": str(e),
+                "updated_at": iso_now(),
+            }
 
-        # Return only WorkflowState-compatible fields
+        storage.save_pipeline_state(pipeline_record)
+
         return {
             "phase": PhaseType.COMPLETED,
             "last_error": None,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
     # Build graph
@@ -308,6 +435,7 @@ def create_multi_agent_graph(
     workflow.add_node("tester", tester_node)
     workflow.add_node("increment_round", increment_round)
     workflow.add_node("increment_fix", increment_fix_attempt)
+    workflow.add_node("blocked", block_workflow)
     workflow.add_node("pr_pipeline", pr_pipeline_subgraph_node)
 
     # Add edges
@@ -323,22 +451,20 @@ def create_multi_agent_graph(
             "developer": "increment_fix",
             "planner": "increment_round",
             "pr_pipeline": "pr_pipeline",  # Auto-enter PR Pipeline
+            "blocked": "blocked",
             "end": END,
         },
     )
 
     # PR Pipeline → END
     workflow.add_edge("pr_pipeline", END)
+    workflow.add_edge("blocked", END)
 
     # Connect increment nodes back to main flow
     workflow.add_edge("increment_fix", "developer")
     workflow.add_edge("increment_round", "planner")
 
-    # Setup checkpointing
-    checkpoint_path_obj = Path(checkpoint_path)
-    checkpoint_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    if checkpointer is not None:
+        return workflow.compile(checkpointer=checkpointer)
 
-    memory = AsyncSqliteSaver.from_conn_string(str(checkpoint_path_obj))
-
-    # Compile
-    return workflow.compile(checkpointer=memory)
+    return workflow.compile()

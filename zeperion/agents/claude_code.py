@@ -2,20 +2,13 @@
 
 import asyncio
 import logging
-import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
-from zeperion.agents.base import (
-    AgentError,
-    AgentInvocationError,
-    AgentParseError,
-    BaseAgent,
-)
-from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
-from zeperion.parsers import SectionParser
+from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.models import AgentOutput, AgentRole
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +26,7 @@ class ClaudeCodeAgent(BaseAgent):
         cli_output_flag: Optional[str] = "--output",
         cli_log_flag: Optional[str] = None,
         timeout: int = 600,
+        project_dir: str = ".",
     ):
         """
         Initialize Claude Code agent.
@@ -46,6 +40,7 @@ class ClaudeCodeAgent(BaseAgent):
             cli_output_flag: Flag for output file
             cli_log_flag: Flag for log file (optional)
             timeout: Command timeout in seconds
+            project_dir: Directory where the CLI should operate
         """
         super().__init__(role, model)
         self.cli_tool = cli_tool
@@ -54,6 +49,20 @@ class ClaudeCodeAgent(BaseAgent):
         self.cli_output_flag = cli_output_flag
         self.cli_log_flag = cli_log_flag
         self.timeout = timeout
+        self.project_dir = Path(project_dir).resolve()
+
+    def build_command(self, prompt_file: Path, output_file: Path, log_file: Path) -> list[str]:
+        """Build the Claude CLI command for a single invocation."""
+        cmd = [self.cli_tool]
+        if self.cli_model_flag:
+            cmd.extend([self.cli_model_flag, self.model])
+        if self.cli_input_flag:
+            cmd.extend([self.cli_input_flag, str(prompt_file)])
+        if self.cli_output_flag:
+            cmd.extend([self.cli_output_flag, str(output_file)])
+        if self.cli_log_flag:
+            cmd.extend([self.cli_log_flag, str(log_file)])
+        return cmd
 
     async def invoke(
         self,
@@ -73,6 +82,15 @@ class ClaudeCodeAgent(BaseAgent):
         Raises:
             AgentInvocationError: If CLI invocation fails
         """
+        if not self.project_dir.exists():
+            raise AgentInvocationError(
+                f"Project directory does not exist: {self.project_dir}"
+            )
+        if not self.project_dir.is_dir():
+            raise AgentInvocationError(
+                f"Project path is not a directory: {self.project_dir}"
+            )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             prompt_file = tmp_path / "prompt.txt"
@@ -83,13 +101,7 @@ class ClaudeCodeAgent(BaseAgent):
             prompt_file.write_text(prompt, encoding="utf-8")
 
             # Build command
-            cmd = [self.cli_tool]
-            if self.cli_model_flag:
-                cmd.extend([self.cli_model_flag, self.model])
-            if self.cli_input_flag:
-                cmd.extend([self.cli_input_flag, str(prompt_file)])
-            if self.cli_output_flag:
-                cmd.extend([self.cli_output_flag, str(output_file)])
+            cmd = self.build_command(prompt_file, output_file, log_file)
 
             # Execute
             try:
@@ -97,9 +109,9 @@ class ClaudeCodeAgent(BaseAgent):
                 logger.debug(f"Command: {' '.join(cmd)}")
 
                 if self.cli_log_flag:
-                    cmd.extend([self.cli_log_flag, str(log_file)])
                     result = await asyncio.create_subprocess_exec(
                         *cmd,
+                        cwd=str(self.project_dir),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -107,6 +119,7 @@ class ClaudeCodeAgent(BaseAgent):
                     with open(log_file, "w") as log_f:
                         result = await asyncio.create_subprocess_exec(
                             *cmd,
+                            cwd=str(self.project_dir),
                             stdout=asyncio.subprocess.PIPE,
                             stderr=log_f,
                         )
@@ -127,7 +140,7 @@ class ClaudeCodeAgent(BaseAgent):
                 # Read output
                 if not output_file.exists():
                     raise AgentInvocationError(
-                        f"Output file not created: {output_file}"
+                        f"Claude CLI did not create output file: {output_file}"
                     )
 
                 raw_output = output_file.read_text(encoding="utf-8")
@@ -140,42 +153,12 @@ class ClaudeCodeAgent(BaseAgent):
                 raise AgentInvocationError(
                     f"{self.role.value} invocation timed out after {self.timeout}s"
                 )
+            except FileNotFoundError as e:
+                raise AgentInvocationError(
+                    f"Claude CLI command not found: {self.cli_tool}"
+                ) from e
             except subprocess.SubprocessError as e:
                 raise AgentInvocationError(
                     f"{self.role.value} invocation failed: {e}"
                 )
 
-    def parse_output(self, raw_output: str) -> AgentOutput:
-        """
-        Parse agent output with lenient matching.
-
-        Extracts:
-        - TASK_ID: <value>
-        - TEST_STATUS: PASS|FAIL|ERROR|PENDING
-        - GLOBAL_STATUS: CONTINUE|DONE|BLOCKED
-        - LESSONS: <multi-line content>
-
-        Args:
-            raw_output: Raw agent output
-
-        Returns:
-            Parsed agent output
-        """
-        parser = SectionParser(raw_output)
-
-        task_id = parser.extract_field("TASK_ID")
-        test_status = parser.extract_enum(
-            "TEST_STATUS", TestStatus, TestStatus.PENDING
-        )
-        global_status = parser.extract_enum(
-            "GLOBAL_STATUS", GlobalStatus, GlobalStatus.CONTINUE
-        )
-        lessons = parser.extract_list("LESSONS", strip_bullets=True)
-
-        return AgentOutput(
-            task_id=task_id,
-            test_status=test_status,
-            global_status=global_status,
-            lessons=lessons,
-            raw_output=raw_output,
-        )

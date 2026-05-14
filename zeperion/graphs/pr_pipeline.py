@@ -1,11 +1,9 @@
 """PR Pipeline workflow graph."""
 
 import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
 from zeperion.models import (
@@ -15,6 +13,7 @@ from zeperion.models import (
     WorkflowConfig,
 )
 from zeperion.utils.github import GitHubClient
+from zeperion.utils.time import iso_now
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ async def validate_git_node(state: PRPipelineState) -> dict:
         "pr_phase": PRPhase.INIT,
         "pr_branch": branch,
         "github_repo": repo,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
@@ -69,7 +68,7 @@ async def commit_changes_node(state: PRPipelineState) -> dict:
         logger.info("No changes to commit, using existing branch state")
         return {
             "pr_phase": PRPhase.COMMIT,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
     # Generate commit message
@@ -98,7 +97,7 @@ async def commit_changes_node(state: PRPipelineState) -> dict:
     return {
         "pr_phase": PRPhase.COMMIT,
         "commit_sha": commit_sha,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
@@ -114,7 +113,7 @@ async def push_branch_node(state: PRPipelineState) -> dict:
 
     return {
         "pr_phase": PRPhase.PUSH,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
@@ -146,7 +145,7 @@ async def create_or_update_pr_node(state: PRPipelineState) -> dict:
             "pr_phase": PRPhase.CREATE_PR,
             "pr_number": pr_number,
             "pr_url": pr_url,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
     else:
         # Create new PR
@@ -165,7 +164,7 @@ async def create_or_update_pr_node(state: PRPipelineState) -> dict:
             "pr_number": pr_number,
             "pr_url": pr_url,
             "pr_title": pr_title,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
 
@@ -207,7 +206,7 @@ async def check_codex_review_node(state: PRPipelineState) -> dict:
         "codex_thumbs_count": thumbs_count,
         "codex_comments_count": comments_count,
         "codex_reviewed_commit": reviewed_commit,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
@@ -239,7 +238,7 @@ async def auto_merge_node(state: PRPipelineState) -> dict:
     return {
         "pr_phase": PRPhase.AUTO_MERGE,
         "merge_enabled": True,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
@@ -261,16 +260,18 @@ async def wait_for_review_node(state: PRPipelineState) -> dict:
 
     return {
         "pr_phase": PRPhase.CHECK_REVIEW,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": iso_now(),
     }
 
 
 def create_pr_pipeline_graph(
     config: WorkflowConfig,
-    checkpoint_path: str = ".ai_longrun_harness/state/checkpoints.db",
+    *,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
+    enable_checkpoint: Optional[bool] = None,
+    checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
 ) -> StateGraph:
-    """
-    Create PR Pipeline workflow graph.
+    """Create PR Pipeline workflow graph.
 
     Workflow:
     1. Validate Git/GitHub environment
@@ -281,18 +282,25 @@ def create_pr_pipeline_graph(
     6. Auto-merge (if approved) or wait for review
 
     Args:
-        config: Workflow configuration
-        checkpoint_path: Path to SQLite checkpoint database
-
-    Returns:
-        Compiled StateGraph
+        config: Workflow configuration.
+        checkpointer: Optional LangGraph checkpointer; caller-managed.
+        enable_checkpoint: Deprecated; pass ``checkpointer`` instead.
+        checkpoint_path: Deprecated; ignored.
     """
+    if checkpoint_path is not None:
+        logger.warning(
+            "create_pr_pipeline_graph(checkpoint_path=...) is deprecated and ignored; "
+            "pass an explicit checkpointer instead."
+        )
+    if enable_checkpoint is False and checkpointer is not None:
+        raise ValueError(
+            "enable_checkpoint=False is incompatible with an explicit checkpointer"
+        )
+
     logger.info("Creating PR Pipeline graph")
 
-    # Create state graph
     workflow = StateGraph(PRPipelineState)
 
-    # Add nodes
     workflow.add_node("validate_git", validate_git_node)
     workflow.add_node("commit_changes", commit_changes_node)
     workflow.add_node("push_branch", push_branch_node)
@@ -301,14 +309,12 @@ def create_pr_pipeline_graph(
     workflow.add_node("auto_merge", auto_merge_node)
     workflow.add_node("wait_for_review", wait_for_review_node)
 
-    # Define edges
     workflow.set_entry_point("validate_git")
     workflow.add_edge("validate_git", "commit_changes")
     workflow.add_edge("commit_changes", "push_branch")
     workflow.add_edge("push_branch", "create_or_update_pr")
     workflow.add_edge("create_or_update_pr", "check_codex_review")
 
-    # Conditional routing after check_codex_review
     workflow.add_conditional_edges(
         "check_codex_review",
         decide_next_action,
@@ -322,12 +328,6 @@ def create_pr_pipeline_graph(
     workflow.add_edge("auto_merge", END)
     workflow.add_edge("wait_for_review", END)
 
-    # Setup checkpointing
-    checkpoint_path_obj = Path(checkpoint_path)
-    checkpoint_path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-    memory = AsyncSqliteSaver.from_conn_string(str(checkpoint_path_obj))
-
-    logger.info(f"PR Pipeline graph created with checkpoint: {checkpoint_path}")
-
-    return workflow.compile(checkpointer=memory)
+    if checkpointer is not None:
+        return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile()

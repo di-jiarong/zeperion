@@ -1,7 +1,6 @@
 """Tests for state models."""
 
 import pytest
-from datetime import datetime
 
 from zeperion.models import (
     AgentRole,
@@ -12,6 +11,7 @@ from zeperion.models import (
     WorkflowState,
     create_initial_state,
 )
+from zeperion.utils.time import iso_now
 
 
 class TestEnums:
@@ -29,6 +29,7 @@ class TestEnums:
         assert PhaseType.DEVELOPMENT.value == "development"
         assert PhaseType.TESTING.value == "testing"
         assert PhaseType.COMPLETED.value == "completed"
+        assert PhaseType.BLOCKED.value == "blocked"
         assert PhaseType.FAILED.value == "failed"
 
     def test_test_status_values(self):
@@ -56,8 +57,15 @@ class TestWorkflowConfig:
         assert config.planner_model == "claude-opus-4-7"
         assert config.developer_model == "claude-sonnet-4-6"
         assert config.tester_model == "claude-opus-4-7"
+        assert config.planner_agent_type == "anthropic"
+        assert config.developer_agent_type == "anthropic"
+        assert config.tester_agent_type == "anthropic"
         assert config.max_rounds == 50
         assert config.max_fix_attempts == 3
+        assert config.project_dir == "."
+        assert config.state_dir == ".zeperion/state"
+        assert config.claude_cli_tool == "claude"
+        assert config.claude_cli_timeout == 600
 
     def test_config_custom_values(self):
         """Test config with custom values."""
@@ -66,20 +74,32 @@ class TestWorkflowConfig:
             planner_model="custom-planner",
             developer_model="custom-developer",
             tester_model="custom-tester",
+            planner_agent_type="anthropic",
+            developer_agent_type="claude_code",
+            tester_agent_type="anthropic",
             max_rounds=100,
             max_fix_attempts=5,
+            project_dir="./project",
             state_dir="./custom/state",
             prompts_dir="./custom/prompts",
+            claude_cli_tool="custom-claude",
+            claude_cli_timeout=1200,
         )
 
         assert config.requirement_file == "./custom.txt"
         assert config.planner_model == "custom-planner"
         assert config.developer_model == "custom-developer"
         assert config.tester_model == "custom-tester"
+        assert config.planner_agent_type == "anthropic"
+        assert config.developer_agent_type == "claude_code"
+        assert config.tester_agent_type == "anthropic"
         assert config.max_rounds == 100
         assert config.max_fix_attempts == 5
+        assert config.project_dir == "./project"
         assert config.state_dir == "./custom/state"
         assert config.prompts_dir == "./custom/prompts"
+        assert config.claude_cli_tool == "custom-claude"
+        assert config.claude_cli_timeout == 1200
 
     def test_config_validation_max_rounds(self):
         """Test config validation for max_rounds."""
@@ -128,6 +148,8 @@ class TestWorkflowState:
 
     def test_state_updated_at_format(self):
         """Test updated_at is ISO format."""
+        from datetime import datetime
+
         config = WorkflowConfig(requirement_file="./requirement.txt")
         state = create_initial_state(config)
 
@@ -151,7 +173,7 @@ class TestWorkflowState:
             "planner_session_id": None,
             "developer_session_id": None,
             "tester_session_id": None,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": iso_now(),
         }
 
         # Verify structure

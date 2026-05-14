@@ -3,7 +3,28 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from zeperion.models import AgentOutput, AgentRole
+from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
+from zeperion.parsers.section_parser import SectionParser
+
+
+SYSTEM_PROMPT_BY_ROLE: dict[AgentRole, str] = {
+    AgentRole.PLANNER: (
+        "You are the Planner agent in a multi-agent software workflow. "
+        "Produce concise, actionable plans and ALWAYS emit the requested "
+        "machine-readable fields verbatim (TASK_ID, GLOBAL_STATUS, ...)."
+    ),
+    AgentRole.DEVELOPER: (
+        "You are the Developer agent. Implement the current plan exactly and "
+        "ALWAYS emit the requested machine-readable fields verbatim "
+        "(GLOBAL_STATUS, CHANGES, VERIFY_HINTS, BLOCKERS, LESSONS). Do not "
+        "set GLOBAL_STATUS: DONE — only the Planner or Tester may do that."
+    ),
+    AgentRole.TESTER: (
+        "You are the Tester agent. Verify the implementation against the "
+        "plan and ALWAYS emit the requested machine-readable fields verbatim "
+        "(TEST_STATUS, GLOBAL_STATUS, ...)."
+    ),
+}
 
 
 class BaseAgent(ABC):
@@ -41,18 +62,40 @@ class BaseAgent(ABC):
         """
         pass
 
-    @abstractmethod
+    def system_prompt(self) -> str:
+        """Return the system prompt for this agent's role."""
+        return SYSTEM_PROMPT_BY_ROLE.get(self.role, "")
+
     def parse_output(self, raw_output: str) -> AgentOutput:
-        """
-        Parse raw agent output into structured format.
+        """Parse raw agent output into structured format.
 
-        Args:
-            raw_output: Raw text output from agent
-
-        Returns:
-            Parsed agent output
+        The same parsing logic is shared by every backend so a given LLM
+        response is interpreted identically regardless of which Agent
+        implementation produced it.
         """
-        pass
+        parser = SectionParser(raw_output)
+
+        task_id = parser.extract_field("TASK_ID")
+        test_status = parser.extract_enum(
+            "TEST_STATUS", TestStatus, TestStatus.PENDING
+        )
+        global_status = parser.extract_enum(
+            "GLOBAL_STATUS", GlobalStatus, GlobalStatus.CONTINUE
+        )
+        lessons = parser.extract_list("LESSONS", strip_bullets=True)
+
+        # Developer must not unilaterally finish the workflow; collapse any
+        # such claim back to CONTINUE so only Planner/Tester can signal DONE.
+        if self.role == AgentRole.DEVELOPER and global_status == GlobalStatus.DONE:
+            global_status = GlobalStatus.CONTINUE
+
+        return AgentOutput(
+            task_id=task_id,
+            test_status=test_status,
+            global_status=global_status,
+            lessons=lessons,
+            raw_output=raw_output,
+        )
 
 
 class AgentError(Exception):

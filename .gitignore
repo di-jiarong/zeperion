@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ZEPERION Claude Code config (contains API tokens)
+.claude
+
+# Scratch / working notes that should not be committed
+temp/
+.zeperion/state/
+.zeperion/checkpoints.db*

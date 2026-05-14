@@ -83,6 +83,18 @@ class TestPromptTemplate:
         assert "第 2 次" in prompt
         assert "修复尝试" in prompt
 
+    def test_render_developer_claude_code_mode(self):
+        """Test developer prompt for Claude CLI mode."""
+        manager = PromptTemplate()
+        prompt = manager.render_developer(
+            requirement="Build a REST API",
+            plan="Implement user authentication",
+            uses_claude_code=True,
+        )
+
+        assert "必须真实读取并修改项目文件" in prompt
+        assert "实际改动过的文件" in prompt
+
     def test_render_tester(self):
         """Test tester prompt."""
         manager = PromptTemplate()

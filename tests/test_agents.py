@@ -1,17 +1,19 @@
 """Tests for Agent implementations."""
 
+import asyncio
+
 import pytest
 
-from zeperion.agents import ClaudeAgent
+from zeperion.agents import ClaudeCodeAgent
 from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
 
 
-class TestClaudeAgent:
-    """Test ClaudeAgent functionality."""
+class TestClaudeCodeAgent:
+    """Test ClaudeCodeAgent functionality."""
 
     def test_parse_output_basic(self):
         """Test basic output parsing."""
-        agent = ClaudeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
 
         raw_output = """
 TASK_ID: task-123
@@ -31,7 +33,7 @@ LESSONS:
 
     def test_parse_output_test_status(self):
         """Test parsing with test status."""
-        agent = ClaudeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
 
         raw_output = """
 TEST_STATUS: PASS
@@ -46,7 +48,7 @@ All tests passed successfully.
 
     def test_parse_output_missing_fields(self):
         """Test parsing with missing optional fields."""
-        agent = ClaudeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
+        agent = ClaudeCodeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
 
         raw_output = """
 Implementation complete.
@@ -60,7 +62,7 @@ Implementation complete.
 
     def test_parse_output_case_insensitive(self):
         """Test parsing is case-insensitive."""
-        agent = ClaudeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
 
         raw_output = """
 task_id: task-456
@@ -75,7 +77,7 @@ test_status: pass
 
     def test_parse_output_with_extra_content(self):
         """Test parsing with extra content around markers."""
-        agent = ClaudeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
 
         raw_output = """
 I've analyzed the requirements and here's my plan:
@@ -101,7 +103,7 @@ That's my recommendation.
 
     def test_parse_output_invalid_enum_uses_default(self):
         """Test invalid enum values use defaults."""
-        agent = ClaudeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
 
         raw_output = """
 TEST_STATUS: INVALID_STATUS
@@ -114,7 +116,7 @@ GLOBAL_STATUS: INVALID_STATUS
 
     def test_parse_output_lessons_various_formats(self):
         """Test lessons parsing with various bullet formats."""
-        agent = ClaudeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
+        agent = ClaudeCodeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
 
         raw_output = """
 LESSONS:
@@ -135,7 +137,7 @@ Plain lesson without marker
 
     def test_parse_output_empty_lessons(self):
         """Test parsing with empty lessons section."""
-        agent = ClaudeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
 
         raw_output = """
 TASK_ID: task-789
@@ -150,12 +152,13 @@ NEXT_SECTION: content
 
     def test_agent_initialization(self):
         """Test agent initialization with custom config."""
-        agent = ClaudeAgent(
+        agent = ClaudeCodeAgent(
             role=AgentRole.DEVELOPER,
             model="claude-sonnet-4-6",
             cli_tool="custom-cli",
             cli_model_flag="--model-name",
             timeout=300,
+            project_dir="/tmp",
         )
 
         assert agent.role == AgentRole.DEVELOPER
@@ -163,3 +166,66 @@ NEXT_SECTION: content
         assert agent.cli_tool == "custom-cli"
         assert agent.cli_model_flag == "--model-name"
         assert agent.timeout == 300
+        assert str(agent.project_dir) == "/tmp"
+
+    def test_build_command(self, tmp_path):
+        """Test Claude CLI command construction."""
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            cli_tool="custom-cli",
+            cli_model_flag="--model-name",
+            cli_input_flag="--input-file",
+            cli_output_flag="--output-file",
+            cli_log_flag="--log-file",
+        )
+
+        prompt_file = tmp_path / "prompt.txt"
+        output_file = tmp_path / "output.txt"
+        log_file = tmp_path / "log.txt"
+
+        assert agent.build_command(prompt_file, output_file, log_file) == [
+            "custom-cli",
+            "--model-name",
+            "claude-sonnet-4-6",
+            "--input-file",
+            str(prompt_file),
+            "--output-file",
+            str(output_file),
+            "--log-file",
+            str(log_file),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_invoke_uses_project_dir_without_real_cli(self, tmp_path, monkeypatch):
+        """Test invoke passes project_dir as cwd without calling a real CLI."""
+        calls = {}
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            calls["cmd"] = cmd
+            calls["cwd"] = kwargs.get("cwd")
+            output_file = cmd[cmd.index("--output") + 1]
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write("GLOBAL_STATUS: CONTINUE\nLESSONS:\n- ok\n")
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+        )
+
+        result = await agent.invoke("Do work")
+
+        assert calls["cwd"] == str(tmp_path.resolve())
+        assert calls["cmd"][0] == "claude"
+        assert result.global_status == GlobalStatus.CONTINUE
+        assert result.lessons == ["ok"]

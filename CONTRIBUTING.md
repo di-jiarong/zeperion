@@ -89,18 +89,22 @@ open htmlcov/index.html
 
 ```python
 import pytest
-from zeperion.agents import ClaudeAgent
+from unittest.mock import patch
+
+from zeperion.agents import ClaudeCodeAgent
+from zeperion.models import AgentRole, GlobalStatus
+
 
 @pytest.mark.asyncio
 async def test_agent_invoke(mock_cli_output):
-    agent = ClaudeAgent(role=AgentRole.PLANNER)
-    state = create_test_state()
-    
-    with patch('zeperion.agents.claude.subprocess') as mock_subprocess:
-        mock_subprocess.run.return_value.stdout = mock_cli_output
-        result = await agent.invoke(state)
-    
-    assert result.status == GlobalStatus.CONTINUE
+    agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+
+    with patch("asyncio.create_subprocess_exec") as mock_proc:
+        mock_proc.return_value.communicate.return_value = (mock_cli_output, b"")
+        mock_proc.return_value.returncode = 0
+        result = await agent.invoke("Plan something")
+
+    assert result.global_status == GlobalStatus.CONTINUE
 ```
 
 ## 添加新功能
@@ -155,16 +159,18 @@ Closes #123
 ```
 zeperion/
 ├── zeperion/           # 主包
-│   ├── agents/         # Agent 实现
-│   ├── graphs/         # LangGraph 工作流
-│   ├── models/         # 状态模型
-│   ├── parsers/        # 输出解析器
-│   ├── prompts/        # Prompt 模板
-│   ├── storage/        # 状态存储
+│   ├── agents/         # Agent 基类与 Anthropic / Claude Code 实现
+│   ├── graphs/         # LangGraph 工作流（multi_agent, pr_pipeline）
+│   ├── models/         # 状态模型与 WorkflowConfig
+│   ├── parsers/        # SectionParser
+│   ├── prompts/        # Jinja2 模板与渲染器
+│   ├── storage/        # 文件级状态持久化（按 thread_id 隔离）
+│   ├── utils/          # GitHub 封装 / 时间工具
 │   └── cli.py          # CLI 入口
-├── tests/              # 测试
+├── tests/              # pytest 测试
 ├── examples/           # 示例项目
 ├── docs/               # 文档
+├── .ai_longrun_harness/  # 旧 bash 版本（参考用，按计划逐步退役）
 └── pyproject.toml      # 项目配置
 ```
 
@@ -173,14 +179,23 @@ zeperion/
 1. 继承 `BaseAgent`：
 
 ```python
-from zeperion.agents import BaseAgent
-from zeperion.models import WorkflowState, AgentOutput
+from typing import Optional
+
+from zeperion.agents.base import BaseAgent
+from zeperion.models import AgentOutput, AgentRole
+
 
 class MyAgent(BaseAgent):
-    async def invoke(self, state: WorkflowState) -> AgentOutput:
-        # 实现逻辑
-        return AgentOutput(...)
+    async def invoke(
+        self,
+        prompt: str,
+        session_id: Optional[str] = None,
+    ) -> AgentOutput:
+        raw_output = await self._call_my_llm(prompt)
+        return self.parse_output(raw_output)
 ```
+
+`BaseAgent.parse_output` 由所有子类共用，会按规则提取 `TASK_ID` / `TEST_STATUS` / `GLOBAL_STATUS` / `LESSONS`，并阻止 Developer 角色单方面设置 `GLOBAL_STATUS=DONE`。
 
 2. 添加测试：
 

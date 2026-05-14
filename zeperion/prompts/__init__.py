@@ -3,25 +3,41 @@
 from pathlib import Path
 from typing import Optional
 
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
+
+
+PACKAGED_TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def resolve_templates_dir(templates_dir: Optional[Path | str] = None) -> Path:
+    """Resolve the prompt templates directory.
+
+    - If ``templates_dir`` is provided, it is returned as-is (even if it does
+      not yet exist) so callers can fail loudly via Jinja2 when their
+      configuration is wrong.
+    - If ``templates_dir`` is ``None``, the packaged
+      ``zeperion/prompts/templates`` directory is used. This works regardless
+      of the process working directory (relevant after ``pip install``).
+    """
+    if templates_dir is not None:
+        return Path(templates_dir)
+    return PACKAGED_TEMPLATES_DIR
 
 
 class PromptTemplate:
     """Manages prompt templates for agents."""
 
-    def __init__(self, templates_dir: Optional[Path] = None):
+    def __init__(self, templates_dir: Optional[Path | str] = None):
         """Initialize prompt template manager.
 
         Args:
-            templates_dir: Directory containing template files.
-                          Defaults to zeperion/prompts/templates/
+            templates_dir: Directory containing template files. When omitted
+                or missing on disk, the packaged ``templates/`` directory
+                shipped with ``zeperion.prompts`` is used.
         """
-        if templates_dir is None:
-            templates_dir = Path(__file__).parent / "templates"
-
-        self.templates_dir = templates_dir
+        self.templates_dir = resolve_templates_dir(templates_dir)
         self.env = Environment(
-            loader=FileSystemLoader(str(templates_dir)),
+            loader=FileSystemLoader(str(self.templates_dir)),
             trim_blocks=True,
             lstrip_blocks=True,
         )
@@ -75,6 +91,7 @@ class PromptTemplate:
         test_report: Optional[str] = None,
         lessons: Optional[list[str]] = None,
         fix_attempt: int = 0,
+        uses_claude_code: bool = False,
     ) -> str:
         """Render developer prompt.
 
@@ -84,6 +101,7 @@ class PromptTemplate:
             test_report: Test report (if fixing bugs)
             lessons: Lessons learned so far
             fix_attempt: Current fix attempt number (0 = first implementation)
+            uses_claude_code: Whether the agent can directly edit project files
 
         Returns:
             Rendered developer prompt
@@ -96,6 +114,7 @@ class PromptTemplate:
             lessons=lessons or [],
             fix_attempt=fix_attempt,
             is_fixing=fix_attempt > 0,
+            uses_claude_code=uses_claude_code,
         )
 
     def render_tester(

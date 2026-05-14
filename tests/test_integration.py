@@ -1,22 +1,39 @@
 """Integration tests for ZEPERION workflow."""
 
-import asyncio
+import json
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from zeperion.config import save_config_to_yaml
+from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
 from zeperion.graphs import create_multi_agent_graph
+from zeperion.graphs.multi_agent import _create_agent, _resolve_agent_class
 from zeperion.models import (
     AgentOutput,
+    AgentRole,
     GlobalStatus,
     TestStatus,
     WorkflowConfig,
     create_initial_state,
 )
 from zeperion.storage import StateStorage
+
+
+class FakeAgent:
+    """Test agent that returns pre-seeded outputs without external API calls."""
+
+    outputs: list[AgentOutput] = []
+
+    def __init__(self, role, model):
+        self.role = role
+        self.model = model
+
+    async def invoke(self, prompt, session_id=None):
+        if not self.outputs:
+            raise AssertionError("No fake agent outputs left")
+        return self.outputs.pop(0)
 
 
 @pytest.fixture
@@ -30,7 +47,7 @@ def temp_project_dir():
         requirement_file.write_text("Build a simple calculator with add and subtract functions.")
 
         # Create state directory
-        state_dir = project_path / ".ai_longrun_harness" / "state"
+        state_dir = project_path / ".zeperion" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
 
         yield project_path
@@ -44,10 +61,14 @@ def test_config(temp_project_dir):
         planner_model="claude-opus-4-7",
         developer_model="claude-sonnet-4-6",
         tester_model="claude-opus-4-7",
+        planner_agent_type="anthropic",
+        developer_agent_type="anthropic",
+        tester_agent_type="anthropic",
         max_rounds=3,
         max_fix_attempts=2,
-        state_dir=str(temp_project_dir / ".ai_longrun_harness" / "state"),
+        state_dir=str(temp_project_dir / ".zeperion" / "state"),
         prompts_dir="zeperion/prompts/templates",
+        project_dir=str(temp_project_dir),
     )
     return config
 
@@ -112,12 +133,41 @@ class TestStateStorage:
         output_text = "TASK_ID: test_task\nGLOBAL_STATUS: CONTINUE"
 
         # Save output
-        storage.save_agent_output("planner", output_text)
+        storage.save_agent_output(
+            "planner",
+            output_text,
+            thread_id="test/thread",
+            round_num=1,
+        )
 
         # Load output
         loaded_output = storage.load_agent_output("planner")
 
         assert loaded_output == output_text
+        artifact = (
+            Path(test_config.state_dir)
+            / "runs"
+            / "test_thread"
+            / "round_001_planner.txt"
+        )
+        assert artifact.read_text(encoding="utf-8") == output_text
+
+    def test_append_event(self, temp_project_dir, test_config):
+        """Test appending structured JSONL events."""
+        storage = StateStorage(Path(test_config.state_dir))
+
+        storage.append_event("test-thread", {"event": "agent_completed", "role": "planner"})
+
+        event_file = Path(test_config.state_dir) / "runs" / "test-thread" / "events.jsonl"
+        events = [
+            json.loads(line)
+            for line in event_file.read_text(encoding="utf-8").splitlines()
+        ]
+
+        assert len(events) == 1
+        assert events[0]["event"] == "agent_completed"
+        assert events[0]["role"] == "planner"
+        assert "timestamp" in events[0]
 
     def test_append_and_load_lessons(self, temp_project_dir, test_config):
         """Test appending and loading lessons."""
@@ -153,69 +203,119 @@ class TestStateStorage:
 class TestWorkflowGraph:
     """Test workflow graph execution."""
 
+    def test_resolve_agent_class(self):
+        """Test resolving configured agent types."""
+        assert _resolve_agent_class("anthropic") is AnthropicAgent
+        assert _resolve_agent_class("claude_code") is ClaudeCodeAgent
+        assert _resolve_agent_class("claude-code") is ClaudeCodeAgent
+
+        with pytest.raises(ValueError):
+            _resolve_agent_class("unknown")
+
+    def test_create_claude_code_agent_from_config(self, test_config):
+        """Test creating ClaudeCodeAgent with configured CLI settings."""
+        config = WorkflowConfig(
+            requirement_file=test_config.requirement_file,
+            developer_agent_type="claude_code",
+            developer_model="claude-sonnet-4-6",
+            project_dir=test_config.project_dir,
+            state_dir=test_config.state_dir,
+            prompts_dir=test_config.prompts_dir,
+            claude_cli_tool="custom-claude",
+            claude_cli_timeout=123,
+        )
+
+        agent = _create_agent(
+            config.developer_agent_type,
+            role=AgentRole.DEVELOPER,
+            model=config.developer_model,
+            config=config,
+        )
+
+        assert isinstance(agent, ClaudeCodeAgent)
+        assert agent.cli_tool == "custom-claude"
+        assert agent.timeout == 123
+        assert str(agent.project_dir) == str(Path(test_config.project_dir).resolve())
+
     @pytest.mark.asyncio
     async def test_graph_creation(self, test_config):
         """Test graph creation."""
-        graph = create_multi_agent_graph(test_config)
+        graph = create_multi_agent_graph(
+            test_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
         assert graph is not None
 
     @pytest.mark.asyncio
     async def test_single_round_success(self, test_config, mock_agent_outputs):
         """Test a single successful round."""
-        with patch("zeperion.agents.claude.ClaudeAgent.invoke") as mock_invoke:
-            # Mock agent responses
-            mock_invoke.side_effect = [
-                mock_agent_outputs["planner"],
-                mock_agent_outputs["developer"],
-                mock_agent_outputs["tester_pass"],
-            ]
+        FakeAgent.outputs = [
+            mock_agent_outputs["planner"],
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["tester_pass"],
+        ]
 
-            graph = create_multi_agent_graph(test_config)
-            initial_state = create_initial_state(test_config)
+        graph = create_multi_agent_graph(
+            test_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(test_config)
 
-            # Run workflow
-            config_obj = {"configurable": {"thread_id": "test"}}
-            final_state = None
+        # Run workflow
+        config_obj = {"configurable": {"thread_id": "test"}}
+        final_state = None
+        merged_state = dict(initial_state)
 
-            async for event in graph.astream(initial_state, config_obj):
-                for node_name, node_state in event.items():
-                    final_state = node_state
+        async for event in graph.astream(initial_state, config_obj):
+            for node_name, node_state in event.items():
+                merged_state.update(node_state)
+                final_state = node_state
 
-            # Verify final state
-            assert final_state is not None
-            assert final_state["test_status"] == TestStatus.PASS
-            assert final_state["global_status"] == GlobalStatus.DONE
+        # Verify final state
+        assert final_state is not None
+        assert merged_state["test_status"] == TestStatus.PASS
+        assert merged_state["global_status"] == GlobalStatus.DONE
+
+        run_dir = Path(test_config.state_dir) / "runs" / "main"
+        assert (run_dir / "round_001_planner.txt").exists()
+        assert (run_dir / "round_001_developer.txt").exists()
+        assert (run_dir / "round_001_tester.txt").exists()
+
+        events = [
+            json.loads(line)
+            for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert [event["role"] for event in events] == ["planner", "developer", "tester"]
+        assert all("duration_ms" in event for event in events)
 
     @pytest.mark.asyncio
     async def test_retry_on_test_failure(self, test_config, mock_agent_outputs):
         """Test retry logic when tests fail."""
-        with patch("zeperion.agents.claude.ClaudeAgent.invoke") as mock_invoke:
-            # Mock agent responses: fail first, pass second
-            mock_invoke.side_effect = [
-                mock_agent_outputs["planner"],
-                mock_agent_outputs["developer"],
-                mock_agent_outputs["tester_fail"],  # First attempt fails
-                mock_agent_outputs["developer"],
-                mock_agent_outputs["tester_pass"],  # Second attempt passes
-            ]
+        FakeAgent.outputs = [
+            mock_agent_outputs["planner"],
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["tester_fail"],  # First attempt fails
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["tester_pass"],  # Second attempt passes
+        ]
 
-            graph = create_multi_agent_graph(test_config)
-            initial_state = create_initial_state(test_config)
+        graph = create_multi_agent_graph(
+            test_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(test_config)
 
-            # Run workflow
-            config_obj = {"configurable": {"thread_id": "test_retry"}}
-            final_state = None
-            event_count = 0
+        # Run workflow
+        config_obj = {"configurable": {"thread_id": "test_retry"}}
+        final_state = None
+        merged_state = dict(initial_state)
 
-            async for event in graph.astream(initial_state, config_obj):
-                event_count += 1
-                for node_name, node_state in event.items():
-                    final_state = node_state
+        async for event in graph.astream(initial_state, config_obj):
+            for node_name, node_state in event.items():
+                merged_state.update(node_state)
+                final_state = node_state
 
-            # Verify retry happened
-            assert final_state is not None
-            assert final_state["fix_attempt"] >= 1
-            assert final_state["test_status"] == TestStatus.PASS
+        # Verify retry happened
+        assert final_state is not None
+        assert merged_state["fix_attempt"] >= 1
+        assert merged_state["test_status"] == TestStatus.PASS
 
     @pytest.mark.asyncio
     async def test_max_rounds_limit(self, test_config, mock_agent_outputs):
@@ -232,31 +332,34 @@ class TestWorkflowGraph:
             prompts_dir=test_config.prompts_dir,
         )
 
-        with patch("zeperion.agents.claude.ClaudeAgent.invoke") as mock_invoke:
-            # Always return CONTINUE to test max_rounds limit
-            continue_output = AgentOutput(
-                task_id="task",
-                test_status=TestStatus.PASS,
-                global_status=GlobalStatus.CONTINUE,
-                lessons=["Continue"],
-                raw_output="GLOBAL_STATUS: CONTINUE",
-            )
-            mock_invoke.return_value = continue_output
+        # Always return CONTINUE to test max_rounds limit
+        continue_output = AgentOutput(
+            task_id="task",
+            test_status=TestStatus.PASS,
+            global_status=GlobalStatus.CONTINUE,
+            lessons=["Continue"],
+            raw_output="GLOBAL_STATUS: CONTINUE",
+        )
+        FakeAgent.outputs = [continue_output] * 6
 
-            graph = create_multi_agent_graph(test_config)
-            initial_state = create_initial_state(test_config)
+        graph = create_multi_agent_graph(
+            test_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(test_config)
 
-            # Run workflow
-            config_obj = {"configurable": {"thread_id": "test_max_rounds"}}
-            final_state = None
+        # Run workflow
+        config_obj = {"configurable": {"thread_id": "test_max_rounds"}}
+        final_state = None
+        merged_state = dict(initial_state)
 
-            async for event in graph.astream(initial_state, config_obj):
-                for node_name, node_state in event.items():
-                    final_state = node_state
+        async for event in graph.astream(initial_state, config_obj):
+            for node_name, node_state in event.items():
+                merged_state.update(node_state)
+                final_state = node_state
 
-            # Verify stopped at max rounds
-            assert final_state is not None
-            assert final_state["round"] <= test_config.max_rounds
+        # Verify stopped at max rounds
+        assert final_state is not None
+        assert merged_state["round"] <= test_config.max_rounds
 
 
 class TestCLIIntegration:
@@ -272,4 +375,10 @@ class TestCLIIntegration:
         loaded_config = load_config_from_yaml(config_file)
 
         assert loaded_config.planner_model == test_config.planner_model
+        assert loaded_config.planner_agent_type == test_config.planner_agent_type
+        assert loaded_config.developer_agent_type == test_config.developer_agent_type
+        assert loaded_config.tester_agent_type == test_config.tester_agent_type
+        assert loaded_config.project_dir == test_config.project_dir
+        assert loaded_config.claude_cli_tool == test_config.claude_cli_tool
+        assert loaded_config.claude_cli_timeout == test_config.claude_cli_timeout
         assert loaded_config.max_rounds == test_config.max_rounds
