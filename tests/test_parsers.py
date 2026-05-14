@@ -220,3 +220,51 @@ Next steps will be implementation.
         assert "JWT signatures" in lessons[0]
         assert "bcrypt" in lessons[1]
         assert "rate limiting" in lessons[2]
+
+
+class TestEnumDecorationTolerance:
+    """Real LLM output sometimes wraps enum values in markdown / quotes.
+
+    These cases come straight from observed Claude outputs (see commit notes).
+    """
+
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [
+            ("PASS", TestStatus.PASS),
+            ("**PASS**", TestStatus.PASS),
+            ("*PASS*", TestStatus.PASS),
+            ("__PASS__", TestStatus.PASS),
+            ("`PASS`", TestStatus.PASS),
+            ("```PASS```", TestStatus.PASS),
+            ('"PASS"', TestStatus.PASS),
+            ("'PASS'", TestStatus.PASS),
+            ("**pass**", TestStatus.PASS),
+            ("PASS.", TestStatus.PASS),
+            ("**PASS**.", TestStatus.PASS),
+            ("  **PASS**  ", TestStatus.PASS),
+        ],
+    )
+    def test_decorated_test_status_resolves_to_enum(self, raw_value, expected):
+        parser = SectionParser(f"TEST_STATUS: {raw_value}\n")
+        assert parser.extract_enum("TEST_STATUS", TestStatus, TestStatus.PENDING) == expected
+
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [
+            ("DONE", GlobalStatus.DONE),
+            ("**DONE**", GlobalStatus.DONE),
+            ("`CONTINUE`", GlobalStatus.CONTINUE),
+            ("**BLOCKED**", GlobalStatus.BLOCKED),
+        ],
+    )
+    def test_decorated_global_status_resolves(self, raw_value, expected):
+        parser = SectionParser(f"GLOBAL_STATUS: {raw_value}\n")
+        assert parser.extract_enum("GLOBAL_STATUS", GlobalStatus, GlobalStatus.CONTINUE) == expected
+
+    def test_unrecognised_value_still_falls_back_to_default(self):
+        parser = SectionParser("TEST_STATUS: **NOT_A_REAL_STATUS**\n")
+        assert (
+            parser.extract_enum("TEST_STATUS", TestStatus, TestStatus.PENDING)
+            == TestStatus.PENDING
+        )

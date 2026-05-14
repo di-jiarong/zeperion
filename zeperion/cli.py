@@ -88,6 +88,38 @@ def init(
         requirement_file.write_text(requirement_content)
         console.print(f"✓ Created requirement template: {requirement_file.name}")
 
+    # Ensure .zeperion runtime artifacts are never committed by the
+    # PR pipeline. This is a hard requirement after observing leaked
+    # checkpoints.db / per-thread agent outputs in real-world PRs.
+    gitignore_path = project_path / ".gitignore"
+    gitignore_entries = [
+        ".zeperion/state/",
+        ".zeperion/logs/",
+    ]
+    existing = (
+        gitignore_path.read_text(encoding="utf-8").splitlines()
+        if gitignore_path.exists()
+        else []
+    )
+    existing_set = {line.strip() for line in existing}
+    new_lines = [entry for entry in gitignore_entries if entry not in existing_set]
+    if new_lines:
+        header = (
+            ["", "# ZEPERION runtime artifacts (do not commit)"]
+            if existing and not existing[-1] == ""
+            else ["# ZEPERION runtime artifacts (do not commit)"]
+        )
+        with gitignore_path.open("a", encoding="utf-8") as fh:
+            if existing:
+                fh.write("\n")
+            for line in header:
+                fh.write(line + "\n")
+            for line in new_lines:
+                fh.write(line + "\n")
+        console.print(
+            f"✓ Updated .gitignore (added {len(new_lines)} entry/entries)"
+        )
+
     console.print("\n[bold green]✓ Initialization complete![/bold green]")
     console.print("\nNext steps:")
     console.print("1. Edit requirement.txt with your project requirements")

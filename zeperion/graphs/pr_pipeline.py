@@ -59,44 +59,99 @@ async def validate_git_node(state: PRPipelineState) -> dict:
     }
 
 
+# Paths under .zeperion/ that the PR pipeline must never include in a
+# commit. These are runtime artifacts (SQLite checkpoints, agent stdout
+# dumps, per-thread state) that leak workflow internals if pushed.
+#
+# We defend in two layers:
+#   1. ``zeperion init`` writes these into .gitignore for new projects.
+#   2. ``commit_changes_node`` still runs ``git reset HEAD -- <path>``
+#      after staging, in case the user's .gitignore is stale or missing.
+ZEPERION_INTERNAL_PATHS: tuple[str, ...] = (
+    ".zeperion/state",
+    ".zeperion/logs",
+)
+
+
+async def _unstage_zeperion_internals(github: "GitHubClient") -> None:
+    """Best-effort un-stage of zeperion's own runtime artifacts.
+
+    Failures are tolerated: missing paths or unborn HEAD just mean there
+    was nothing to unstage.
+    """
+    for path in ZEPERION_INTERNAL_PATHS:
+        try:
+            await github.run_git(["reset", "HEAD", "--", path])
+        except RuntimeError as exc:
+            logger.debug("reset HEAD -- %s skipped: %s", path, exc)
+
+
+def _derive_commit_subject(state: PRPipelineState) -> str:
+    """Pick a sensible commit subject for an automated push.
+
+    Priority:
+      1. Explicit ``pr_title`` carried in state.
+      2. ``feat: <task_id>`` when the planner produced an id.
+      3. Generic ``chore: zeperion automated commit`` — intentionally not
+         the previous commit's subject (which previously caused stale,
+         misleading messages on every run).
+    """
+    pr_title = (state.get("pr_title") or "").strip()
+    if pr_title:
+        return pr_title
+    task_id = (state.get("task_id") or "").strip()
+    if task_id:
+        return f"feat: {task_id}"
+    return "chore: zeperion automated commit"
+
+
 async def commit_changes_node(state: PRPipelineState) -> dict:
-    """Commit code changes."""
+    """Stage business changes and commit; deliberately ignore zeperion's
+    own runtime artifacts so they never leak into the PR.
+    """
     logger.info("Committing changes")
 
     github = GitHubClient(state["github_token"])
 
-    # Check if there are changes
-    has_changes = await github.check_git_changes()
-
-    if not has_changes:
+    if not await github.check_git_changes():
         logger.info("No changes to commit, using existing branch state")
         return {
             "pr_phase": PRPhase.COMMIT,
             "updated_at": iso_now(),
         }
 
-    # Generate commit message
-    commit_msg = state.get("pr_title") or state.get("task_id") or await github.get_last_commit_subject()
+    # Stage all working-tree changes (gitignored paths are skipped by git).
+    await github.run_git(["add", "-A"])
+    # Defensive un-stage for projects whose .gitignore isn't updated yet.
+    await _unstage_zeperion_internals(github)
 
-    # List changed files
-    changed_files = await github.get_changed_files()
-    logger.info(f"Changed files: {len(changed_files)}")
+    # If after the exclusion there is nothing staged, bail out gracefully.
+    diff_cached = await github.run_git(["diff", "--cached", "--name-only"])
+    staged_files = [line for line in diff_cached.splitlines() if line.strip()]
+    if not staged_files:
+        logger.info("Nothing to commit after excluding zeperion internals")
+        return {
+            "pr_phase": PRPhase.COMMIT,
+            "updated_at": iso_now(),
+        }
 
-    # Build commit body
-    body_parts = ["Changed files:"]
-    for file in changed_files[:20]:  # Limit to 20 files
-        body_parts.append(f"- {file}")
-    if len(changed_files) > 20:
-        body_parts.append(f"- ... and {len(changed_files) - 20} more files")
+    commit_subject = _derive_commit_subject(state)
 
-    # Add Co-Authored-By footer
+    body_parts: list[str] = ["Changed files:"]
+    for path in staged_files[:20]:
+        body_parts.append(f"- {path}")
+    if len(staged_files) > 20:
+        body_parts.append(f"- ... and {len(staged_files) - 20} more files")
     body_parts.append("\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>")
-
     commit_body = "\n".join(body_parts)
 
-    # Commit
-    commit_sha = await github.commit_changes(commit_msg, commit_body)
-    logger.info(f"Committed: {commit_sha[:8]} - {commit_msg}")
+    full_message = f"{commit_subject}\n\n{commit_body}"
+    await github.run_git(["commit", "-m", full_message])
+    commit_sha = await github.run_git(["rev-parse", "HEAD"])
+
+    logger.info(
+        f"Committed: {commit_sha[:8]} - {commit_subject} ({len(staged_files)} files)"
+    )
 
     return {
         "pr_phase": PRPhase.COMMIT,
@@ -333,12 +388,30 @@ def _build_pr_fixer_node(config: WorkflowConfig):
                 "updated_at": iso_now(),
             }
 
+        # Same two-step staging as commit_changes_node so we never leak
+        # zeperion's own state into the fix commit either.
+        await github.run_git(["add", "-A"])
+        await _unstage_zeperion_internals(github)
+        diff_cached = await github.run_git(["diff", "--cached", "--name-only"])
+        staged_files = [line for line in diff_cached.splitlines() if line.strip()]
+        if not staged_files:
+            logger.info(
+                "pr_fixer: agent's edits all fell in excluded paths; nothing to commit"
+            )
+            return {
+                "pr_phase": PRPhase.CHECK_REVIEW,
+                "updated_at": iso_now(),
+            }
+
         commit_subject = f"fix(pr): address Codex feedback on PR #{pr_number}"
         commit_body = (
             f"Automated by ZEPERION PR Fixer.\n"
             f"Codex comments processed: {len(comments)}.\n"
         )
-        commit_sha = await github.commit_changes(commit_subject, commit_body)
+        await github.run_git(
+            ["commit", "-m", f"{commit_subject}\n\n{commit_body}"]
+        )
+        commit_sha = await github.run_git(["rev-parse", "HEAD"])
         await github.push_branch(pr_branch)
         logger.info(
             f"pr_fixer: pushed {commit_sha[:8]} addressing {len(comments)} comments"

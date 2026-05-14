@@ -168,51 +168,126 @@ NEXT_SECTION: content
         assert agent.timeout == 300
         assert str(agent.project_dir) == "/tmp"
 
-    def test_build_command(self, tmp_path):
-        """Test Claude CLI command construction."""
+    def test_build_command_matches_real_cli_surface(self, tmp_path):
+        """``build_command`` must emit the flags the real ``claude`` CLI accepts."""
         agent = ClaudeCodeAgent(
             role=AgentRole.DEVELOPER,
             model="claude-sonnet-4-6",
             cli_tool="custom-cli",
-            cli_model_flag="--model-name",
-            cli_input_flag="--input-file",
-            cli_output_flag="--output-file",
-            cli_log_flag="--log-file",
+            project_dir=str(tmp_path),
+            permission_mode="acceptEdits",
+            extra_args=["--debug"],
         )
 
-        prompt_file = tmp_path / "prompt.txt"
-        output_file = tmp_path / "output.txt"
-        log_file = tmp_path / "log.txt"
-
-        assert agent.build_command(prompt_file, output_file, log_file) == [
-            "custom-cli",
-            "--model-name",
-            "claude-sonnet-4-6",
-            "--input-file",
-            str(prompt_file),
-            "--output-file",
-            str(output_file),
-            "--log-file",
-            str(log_file),
+        cmd = agent.build_command()
+        assert cmd[0] == "custom-cli"
+        assert "--print" in cmd
+        assert ["--model", "claude-sonnet-4-6"] == cmd[cmd.index("--model") : cmd.index("--model") + 2]
+        assert ["--add-dir", str(tmp_path.resolve())] == cmd[
+            cmd.index("--add-dir") : cmd.index("--add-dir") + 2
         ]
+        assert ["--permission-mode", "acceptEdits"] == cmd[
+            cmd.index("--permission-mode") : cmd.index("--permission-mode") + 2
+        ]
+        assert cmd[-1] == "--debug"
+
+    def test_legacy_cli_flag_kwargs_are_accepted_for_back_compat(self, tmp_path):
+        """Old configs and tests may still pass cli_*_flag kwargs; accept and ignore."""
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+            cli_model_flag="--ignored",
+            cli_input_flag="--ignored",
+            cli_output_flag="--ignored",
+            cli_log_flag="--ignored",
+        )
+        # These attributes are stored verbatim but must NOT leak into the command.
+        cmd = agent.build_command()
+        assert "--ignored" not in cmd
 
     @pytest.mark.asyncio
-    async def test_invoke_uses_project_dir_without_real_cli(self, tmp_path, monkeypatch):
-        """Test invoke passes project_dir as cwd without calling a real CLI."""
-        calls = {}
+    async def test_invoke_pipes_prompt_to_stdin_and_returns_stdout(
+        self, tmp_path, monkeypatch
+    ):
+        """``invoke`` must write the prompt to stdin and parse stdout output."""
+        captured: dict = {}
 
         class FakeProcess:
             returncode = 0
 
-            async def communicate(self):
+            async def communicate(self, input=None):
+                captured["stdin"] = input
+                return (
+                    b"GLOBAL_STATUS: CONTINUE\nLESSONS:\n- ok\n",
+                    b"",
+                )
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["cwd"] = kwargs.get("cwd")
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+        )
+        result = await agent.invoke("Do work")
+
+        assert captured["cwd"] == str(tmp_path.resolve())
+        assert captured["cmd"][0] == "claude"
+        assert "--print" in captured["cmd"]
+        # Prompt arrived via stdin, not the command line.
+        assert captured["stdin"] == b"Do work"
+        assert result.global_status == GlobalStatus.CONTINUE
+        assert result.lessons == ["ok"]
+
+    @pytest.mark.asyncio
+    async def test_invoke_non_zero_exit_raises_with_details(
+        self, tmp_path, monkeypatch
+    ):
+        """When the CLI fails we surface stderr (and a stdout tail) for diagnosis."""
+
+        class FakeProcess:
+            returncode = 7
+
+            async def communicate(self, input=None):
+                return b"partial output\n", b"boom: invalid model\n"
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="bogus-model",
+            project_dir=str(tmp_path),
+        )
+
+        from zeperion.agents.base import AgentInvocationError
+
+        with pytest.raises(AgentInvocationError) as exc_info:
+            await agent.invoke("hi")
+        msg = str(exc_info.value)
+        assert "exit=7" in msg
+        assert "boom: invalid model" in msg
+        assert "partial output" in msg
+
+    @pytest.mark.asyncio
+    async def test_invoke_empty_stdout_raises(self, tmp_path, monkeypatch):
+        """Empty CLI output is treated as a hard failure rather than a silent pass."""
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self, input=None):
                 return b"", b""
 
         async def fake_create_subprocess_exec(*cmd, **kwargs):
-            calls["cmd"] = cmd
-            calls["cwd"] = kwargs.get("cwd")
-            output_file = cmd[cmd.index("--output") + 1]
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write("GLOBAL_STATUS: CONTINUE\nLESSONS:\n- ok\n")
             return FakeProcess()
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
@@ -223,9 +298,7 @@ NEXT_SECTION: content
             project_dir=str(tmp_path),
         )
 
-        result = await agent.invoke("Do work")
+        from zeperion.agents.base import AgentInvocationError
 
-        assert calls["cwd"] == str(tmp_path.resolve())
-        assert calls["cmd"][0] == "claude"
-        assert result.global_status == GlobalStatus.CONTINUE
-        assert result.lessons == ["ok"]
+        with pytest.raises(AgentInvocationError, match="empty output"):
+            await agent.invoke("hi")

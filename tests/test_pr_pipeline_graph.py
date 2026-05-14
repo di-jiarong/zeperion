@@ -76,6 +76,28 @@ def _make_github_mock(
     client.commit_changes.return_value = "deadbeef" * 5
     client.push_branch.return_value = None
 
+    # commit_changes_node now talks to run_git directly. Stub the script
+    # of replies in the exact order the node will issue them:
+    #   1) git add -A -- <pathspecs>
+    #   2) git diff --cached --name-only
+    #   3) git commit -m ...
+    #   4) git rev-parse HEAD
+    # When pr_fixer is invoked the same sequence repeats (minus the first
+    # add if there are no changes); set side_effect to a generous list so
+    # any number of calls works.
+    def _git_responder(args: list[str]) -> str:
+        sub = args[0] if args else ""
+        if sub == "diff" and "--cached" in args:
+            return "server.js\nserver.test.js\n"
+        if sub == "rev-parse":
+            return "deadbeef" * 5
+        return ""
+
+    async def _async_run_git(args: list[str]) -> str:
+        return _git_responder(args)
+
+    client.run_git.side_effect = _async_run_git
+
     client.find_existing_pr.return_value = existing_pr
     client.update_pr.return_value = None
     client.generate_pr_body.return_value = "## Commits\n- abc subject"
@@ -124,7 +146,11 @@ class TestPipelineHappyPath:
         assert final["commit_sha"].startswith("deadbeef")
 
         client.is_git_repo.assert_awaited()
-        client.commit_changes.assert_awaited_once()
+        # commit_changes_node now drives git through run_git directly.
+        assert any(
+            "commit" == (call.args[0][0] if call.args else None)
+            for call in client.run_git.await_args_list
+        ), "expected at least one `git commit` invocation"
         client.push_branch.assert_awaited_once_with("feature/widget")
         client.create_pr.assert_awaited_once()
         client.enable_auto_merge.assert_awaited_once_with(
@@ -180,9 +206,14 @@ class TestPipelineNeedsFixes:
         # The pr_fixer flow specifically calls these:
         client.get_codex_comments.assert_awaited_once_with("owner/repo", 77)
         fake_agent.invoke.assert_awaited_once()
-        # commit_changes is invoked twice: once at the start, once by pr_fixer.
-        assert client.commit_changes.await_count == 2
-        # push_branch is also invoked twice for the same reason.
+        commit_calls = [
+            call
+            for call in client.run_git.await_args_list
+            if call.args and call.args[0] and call.args[0][0] == "commit"
+        ]
+        # One commit from commit_changes_node + one from pr_fixer_node.
+        assert len(commit_calls) == 2
+        # push_branch fires once for commit_changes_node and once for pr_fixer.
         assert client.push_branch.await_count == 2
 
 
@@ -255,6 +286,41 @@ class TestPipelineEdgeCases:
         client.update_pr.assert_awaited_once()
         # Auto-merge should still target the existing PR's URL.
         client.enable_auto_merge.assert_awaited_once_with(existing["url"])
+
+    @pytest.mark.asyncio
+    async def test_commit_skips_when_only_zeperion_state_changed(self) -> None:
+        """If git status shows changes but they are all under .zeperion/state,
+        the node must NOT produce a commit (avoids leaking runtime artifacts).
+        """
+        client = _make_github_mock(
+            codex_thumbs=1, codex_reviewed_commit="abc", has_changes=True
+        )
+
+        async def _git(args):
+            sub = args[0] if args else ""
+            if sub == "diff" and "--cached" in args:
+                # After excluding zeperion paths nothing remains staged.
+                return ""
+            if sub == "rev-parse":
+                return "abc" * 8
+            return ""
+
+        client.run_git.side_effect = _git
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+        ):
+            graph = create_pr_pipeline_graph(_config())
+            final = await graph.ainvoke(_initial_state())
+
+        commit_calls = [
+            c
+            for c in client.run_git.await_args_list
+            if c.args and c.args[0] and c.args[0][0] == "commit"
+        ]
+        assert len(commit_calls) == 0
+        # No new commit_sha was produced.
+        assert final["commit_sha"] is None
 
     @pytest.mark.asyncio
     async def test_no_changes_skips_commit_but_still_pushes(self) -> None:
@@ -343,8 +409,13 @@ class TestPipelineFixerEdgeCases:
             final = await graph.ainvoke(_initial_state())
 
         fake_agent.invoke.assert_not_called()
-        # pr_fixer should NOT add a second commit when there is nothing to fix.
-        assert client.commit_changes.await_count == 1
+        commit_calls = [
+            c
+            for c in client.run_git.await_args_list
+            if c.args and c.args[0] and c.args[0][0] == "commit"
+        ]
+        # Only the initial commit_changes_node commit; pr_fixer skipped.
+        assert len(commit_calls) == 1
         assert final["pr_phase"] == PRPhase.CHECK_REVIEW
 
     @pytest.mark.asyncio
@@ -375,8 +446,13 @@ class TestPipelineFixerEdgeCases:
             final = await graph.ainvoke(_initial_state())
 
         fake_agent.invoke.assert_awaited_once()
+        commit_calls = [
+            c
+            for c in client.run_git.await_args_list
+            if c.args and c.args[0] and c.args[0][0] == "commit"
+        ]
         # Only the original commit happened; pr_fixer didn't make a second one.
-        assert client.commit_changes.await_count == 1
+        assert len(commit_calls) == 1
         assert final["pr_phase"] == PRPhase.CHECK_REVIEW
 
     @pytest.mark.asyncio
@@ -404,5 +480,10 @@ class TestPipelineFixerEdgeCases:
             final = await graph.ainvoke(_initial_state())
 
         assert final["pr_phase"] == PRPhase.FAILED
-        # No second commit attempt after the agent crashed.
-        assert client.commit_changes.await_count == 1
+        commit_calls = [
+            c
+            for c in client.run_git.await_args_list
+            if c.args and c.args[0] and c.args[0][0] == "commit"
+        ]
+        # Only the initial commit_changes commit; pr_fixer crashed before commit.
+        assert len(commit_calls) == 1

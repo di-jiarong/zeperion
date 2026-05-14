@@ -61,29 +61,36 @@ class SectionParser:
         enum_class: Type[Any],
         default: Any,
     ) -> Any:
-        """
-        Extract an enum field value with fallback.
+        """Extract an enum field, tolerating common LLM-introduced noise.
+
+        We have observed real Claude responses emit values like
+        ``**PASS**`` (markdown bold), ``"PASS"`` (quoted),
+        ``` `PASS` ``` (code-fenced), or trailing punctuation. All of these
+        should still resolve to ``TestStatus.PASS``.
 
         Args:
-            field_name: Field name
-            enum_class: Enum class
-            default: Default value if not found or invalid
-
-        Returns:
-            Enum value or default
+            field_name: Field name.
+            enum_class: Enum class.
+            default: Default value when not found or unrecognised.
         """
         value = self.extract_field(field_name)
         if not value:
             return default
 
-        # Try exact match
+        # Try exact match before normalisation (cheapest path).
         try:
             return enum_class(value)
         except (ValueError, KeyError):
             pass
 
-        # Try case-insensitive match
-        value_upper = value.upper()
+        normalized = _strip_decorations(value)
+        if normalized:
+            try:
+                return enum_class(normalized)
+            except (ValueError, KeyError):
+                pass
+
+        value_upper = (normalized or value).upper()
         for member in enum_class:
             if member.value.upper() == value_upper:
                 return member
@@ -227,6 +234,40 @@ class SectionParser:
         normalized = section_name.replace("_", r"[\s_]")
         pattern = rf"(?i)^\s*{normalized}\s*:\s*$"
         return re.search(pattern, self.text, re.MULTILINE) is not None
+
+
+_DECORATION_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"^\*\*(.+?)\*\*$"),   # **bold**
+    re.compile(r"^\*(.+?)\*$"),         # *italic*
+    re.compile(r"^__(.+?)__$"),         # __bold__
+    re.compile(r"^_(.+?)_$"),           # _italic_
+    re.compile(r"^`+(.+?)`+$"),         # `code` / ```code```
+    re.compile(r'^"(.+?)"$'),           # "quoted"
+    re.compile(r"^'(.+?)'$"),           # 'quoted'
+)
+
+
+def _strip_decorations(value: str) -> str:
+    """Iteratively peel markdown/quote wrappers off ``value``.
+
+    Returns the inner content with surrounding punctuation cleaned up,
+    or the original value if nothing matched.
+    """
+    cleaned = value.strip()
+    # Drop trailing punctuation that LLMs occasionally append.
+    cleaned = cleaned.rstrip(".,;:!?")
+    # Repeatedly peel decorations until stable; bail after a few rounds to
+    # avoid pathological inputs.
+    for _ in range(5):
+        previous = cleaned
+        for pattern in _DECORATION_PATTERNS:
+            m = pattern.match(cleaned)
+            if m:
+                cleaned = m.group(1).strip()
+                break
+        if cleaned == previous:
+            break
+    return cleaned
 
 
 def parse_agent_output(
