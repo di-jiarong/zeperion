@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,14 @@ from zeperion.utils.threading import default_thread_id
 from zeperion.utils.timeline import (
     derive_in_flight,
     read_events,
+)
+from zeperion.utils.process import (
+    logfile_path,
+    pidfile_path,
+    read_pidfile,
+    spawn_detached,
+    stop_detached,
+    write_pidfile,
 )
 from rich.console import Console
 from rich.panel import Panel
@@ -33,6 +42,91 @@ console = Console()
 from zeperion.utils import configure_logging, ensure_gitignore_entries  # noqa: E402
 
 configure_logging(level=logging.INFO)
+
+
+def _spawn_detached_run(
+    *,
+    config_file: str,
+    mode: str,
+    resume: bool,
+    thread_id: Optional[str],
+    log_format: Optional[str],
+) -> None:
+    """Re-invoke ``zeperion run`` in a detached child process.
+
+    Strategy: build an argv that mirrors the user's flags but omits
+    ``--detach``, then hand off to :func:`spawn_detached`. We use
+    ``sys.executable -m zeperion.cli`` rather than the ``zeperion``
+    entrypoint so the child uses the *same Python interpreter as the
+    parent*, which is what users expect from a venv-installed CLI
+    (otherwise PATH lookup might find a system-wide zeperion).
+
+    The child writes its own pidfile after we know the OS allocated
+    a PID; if that write fails we abandon the spawn rather than
+    leaking a tracking-free background process.
+    """
+    config_path = Path(config_file)
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        raise typer.Exit(1)
+    try:
+        config = load_config_from_yaml(config_path)
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Failed to load config: {exc}")
+        raise typer.Exit(1)
+
+    resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
+    state_dir = Path(config.state_dir)
+
+    # Bail if there's already a running detached job for this thread.
+    # Letting two of them race would corrupt events.jsonl and the
+    # checkpoint DB simultaneously, which is the scariest kind of
+    # corruption to debug.
+    existing = read_pidfile(state_dir, resolved_thread)
+    if existing is not None:
+        from zeperion.utils.process import is_alive  # local import — cheap
+        if is_alive(existing):
+            console.print(
+                f"[red]Error:[/red] A detached run is already active for "
+                f"thread [cyan]{resolved_thread}[/cyan] (pid={existing}).\n"
+                f"Stop it first: zeperion stop -t {resolved_thread}"
+            )
+            raise typer.Exit(1)
+        # Stale pidfile from a crashed run — fine to overwrite.
+
+    argv = [
+        sys.executable,
+        "-m",
+        "zeperion.cli",
+        "run",
+        "--mode",
+        mode,
+        "--config",
+        config_file,
+        "--thread-id",
+        resolved_thread,
+    ]
+    if resume:
+        argv.append("--resume")
+    if log_format:
+        argv.extend(["--log-format", log_format])
+
+    pid = spawn_detached(
+        state_dir=state_dir,
+        thread_id=resolved_thread,
+        argv=argv,
+    )
+    write_pidfile(state_dir, resolved_thread, pid)
+
+    log_path = logfile_path(state_dir, resolved_thread)
+    console.print(
+        f"[bold green]\u2713[/bold green] Detached run started: "
+        f"pid=[cyan]{pid}[/cyan] thread=[cyan]{resolved_thread}[/cyan]"
+    )
+    console.print(f"  Logs:   [dim]{log_path}[/dim]")
+    console.print(f"  Tail:   zeperion logs -t {resolved_thread} --follow")
+    console.print(f"  Status: zeperion status -t {resolved_thread} --watch")
+    console.print(f"  Stop:   zeperion stop -t {resolved_thread}")
 
 
 def _load_workflow_state_from_checkpoint(
@@ -183,6 +277,17 @@ def run(
         help="Log format: 'text' (default) or 'json'. "
              "Overrides the ZEPERION_LOG_FORMAT env var.",
     ),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        "-d",
+        help=(
+            "Spawn the workflow as a detached background process and "
+            "return to the shell immediately. stdout/stderr go to "
+            "``<state_dir>/runs/<thread_id>/run.log``. Stop it with "
+            "``zeperion stop -t <thread_id>``."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -190,6 +295,21 @@ def run(
     - ``multi_agent``: Planner -> Developer -> Tester loop.
     - ``pr_pipeline``: commit -> push -> PR -> Codex review -> auto-merge.
     """
+    if detach:
+        # ``detach`` is purely a CLI affordance — we just re-spawn the
+        # same command without --detach in a new session. Everything
+        # else (config loading, graph construction, asyncio.run) then
+        # happens in the child; the parent doesn't need to touch any
+        # of it. This keeps the detached path bit-identical to the
+        # foreground path in terms of behaviour.
+        _spawn_detached_run(
+            config_file=config_file,
+            mode=mode,
+            resume=resume,
+            thread_id=thread_id,
+            log_format=log_format,
+        )
+        return
     if log_format:
         configure_logging(level=logging.INFO, log_format=log_format)
     # Load config
@@ -303,6 +423,21 @@ def status(
             "falls back to 'main')"
         ),
     ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        "-w",
+        help=(
+            "Refresh continuously, like ``watch -n N zeperion status``. "
+            "Clears the screen between frames so you see a live panel "
+            "instead of an ever-growing scrollback."
+        ),
+    ),
+    interval: float = typer.Option(
+        2.0,
+        "--interval",
+        help="Refresh interval in seconds when --watch is on.",
+    ),
 ):
     """
     Show workflow status.
@@ -320,6 +455,38 @@ def status(
         console.print(f"[red]Error:[/red] Failed to load config: {e}")
         raise typer.Exit(1)
 
+    if watch:
+        # ``watch`` mode = render the panel once, sleep, clear, repeat.
+        # We deliberately re-read everything on each tick rather than
+        # caching: the panel must reflect the freshest on-disk state,
+        # not a stale closure capture.
+        import time as _time
+        from datetime import datetime as _dt
+
+        try:
+            while True:
+                console.clear()
+                console.print(
+                    f"[dim]Refreshing every {interval}s "
+                    f"(Ctrl-C to exit) — {_dt.now().strftime('%H:%M:%S')}[/dim]"
+                )
+                _render_status_panel(config, thread_id)
+                _time.sleep(interval)
+        except KeyboardInterrupt:
+            console.print("\n[dim]-- stopped --[/dim]")
+            return
+
+    _render_status_panel(config, thread_id)
+
+
+def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> None:
+    """Read state for ``thread_id`` and print the status panel once.
+
+    Extracted from the ``status`` command body so ``--watch`` mode can
+    invoke it on a loop. Side effects: prints to the module-level
+    ``console``; never raises typer.Exit (the watcher needs to keep
+    going across transient missing-state cases).
+    """
     thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
     storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
 
@@ -496,6 +663,15 @@ def list_runs(
         "-c",
         help="Path to config file",
     ),
+    wide: bool = typer.Option(
+        False,
+        "--wide",
+        "-w",
+        help=(
+            "Disable column truncation. Useful when terminal width "
+            "squashes thread IDs / enum values into ellipses."
+        ),
+    ),
 ):
     """
     List all workflow runs and their checkpoints.
@@ -551,34 +727,72 @@ def list_runs(
         console.print("[yellow]No workflow runs found[/yellow]")
         return
 
-    table = Table(title="Workflow Runs", show_header=True, header_style="bold cyan")
+    def _short(value, default: str = "-") -> str:
+        """Render an enum/scalar as a short string for the table.
+
+        Without this, LangGraph-deserialised enums print as
+        ``PhaseType.COMPLETED`` etc., which immediately blows past
+        the column width even on a 200-col terminal. Stripping the
+        ``ClassName.`` prefix gives ``COMPLETED`` and saves ~10
+        chars per column.
+        """
+        if value is None or value == "":
+            return default
+        if hasattr(value, "value"):
+            return str(value.value)
+        return str(value)
+
+    # ``expand=False`` lets the table size itself to its content; in
+    # ``--wide`` mode we additionally disable truncation per column.
+    # In compact mode we keep ``Phase`` / status columns ``no_wrap``
+    # so they fit on a 100-col terminal, but the ID column never
+    # truncates (the user needs it to copy-paste for ``--resume``).
+    table = Table(
+        title="Workflow Runs",
+        show_header=True,
+        header_style="bold cyan",
+        expand=False,
+    )
     table.add_column("Thread ID", style="cyan", no_wrap=True)
-    table.add_column("Phase", style="yellow")
-    table.add_column("Round", justify="right")
-    table.add_column("Test Status", style="magenta")
-    table.add_column("Global Status", style="green")
-    table.add_column("PR Phase", style="blue")
-    table.add_column("Updated", style="dim")
+    table.add_column("Phase", style="yellow", no_wrap=wide)
+    table.add_column("Round", justify="right", no_wrap=True)
+    table.add_column("Test Status", style="magenta", no_wrap=wide)
+    table.add_column("Global Status", style="green", no_wrap=wide)
+    table.add_column("PR Phase", style="blue", no_wrap=wide)
+    table.add_column("Updated", style="dim", no_wrap=True)
+
+    # In ``--wide`` mode we render through a dedicated console that
+    # ignores the auto-detected terminal width (rich would otherwise
+    # truncate cells with ellipses regardless of ``no_wrap``). A
+    # 240-column upper bound is enough for any realistic combination
+    # of thread_id + status fields while still fitting most
+    # 4K-monitor xterms; if the user pipes to ``less -S`` they'll see
+    # everything; piping to a file preserves the full text.
+    render_console = (
+        Console(width=240, soft_wrap=False) if wide else console
+    )
 
     for thread_id, state in threads:
         updated_at = state.get("updated_at", "")
         if updated_at:
             try:
-                updated_at = datetime.fromisoformat(updated_at).strftime("%Y-%m-%d %H:%M")
+                updated_at = datetime.fromisoformat(updated_at).strftime(
+                    "%Y-%m-%d %H:%M:%S" if wide else "%Y-%m-%d %H:%M"
+                )
             except ValueError:
                 pass
 
         table.add_row(
             thread_id,
-            str(state.get("phase", "unknown")),
+            _short(state.get("phase"), "unknown"),
             str(state.get("round", "-")),
-            str(state.get("test_status", "-")),
-            str(state.get("global_status", "-")),
-            str(state.get("pr_phase", "-")),
+            _short(state.get("test_status")),
+            _short(state.get("global_status")),
+            _short(state.get("pr_phase")),
             updated_at or "-",
         )
 
-    console.print(table)
+    render_console.print(table)
     console.print(f"\n[dim]Total runs: {len(threads)}[/dim]")
     console.print("\n[bold]Resume a run:[/bold]")
     console.print("  zeperion run --resume --thread-id <THREAD_ID>")
@@ -714,6 +928,181 @@ def logs(
                 seen = 0
     except KeyboardInterrupt:
         console.print("\n[dim]-- stopped --[/dim]")
+
+
+@app.command()
+def stop(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    thread_id: Optional[str] = typer.Option(
+        None,
+        "--thread-id",
+        "-t",
+        help=(
+            "Thread to stop (default: current git branch, "
+            "falls back to 'main')"
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-9",
+        help="Skip SIGTERM and go straight to SIGKILL.",
+    ),
+    timeout: float = typer.Option(
+        10.0,
+        "--timeout",
+        help="Seconds to wait for graceful shutdown before escalating.",
+    ),
+):
+    """Stop a detached ``zeperion run``.
+
+    Reads ``<state_dir>/runs/<thread_id>/run.pid``, sends SIGTERM,
+    waits up to ``--timeout`` seconds, escalates to SIGKILL if
+    needed. Refuses to kill a process whose ``/proc/<pid>/cmdline``
+    doesn't contain ``zeperion`` (PID-recycling guard).
+
+    A foreground ``zeperion run`` doesn't write a pidfile (the user
+    can just Ctrl-C it), so this command only ever interacts with
+    detached runs.
+    """
+    config_path = Path(config_file)
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        raise typer.Exit(1)
+    try:
+        config = load_config_from_yaml(config_path)
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Failed to load config: {exc}")
+        raise typer.Exit(1)
+
+    resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
+    state_dir = Path(config.state_dir)
+
+    status, pid = stop_detached(
+        state_dir=state_dir,
+        thread_id=resolved_thread,
+        timeout=timeout,
+        force=force,
+    )
+
+    if status == "no_pidfile":
+        console.print(
+            f"[yellow]No detached run found for thread "
+            f"[cyan]{resolved_thread}[/cyan][/yellow]"
+        )
+        console.print(f"  Pidfile path: [dim]{pidfile_path(state_dir, resolved_thread)}[/dim]")
+        raise typer.Exit(1)
+    if status == "not_running":
+        console.print(
+            f"[yellow]Stale pidfile cleared: pid {pid} for thread "
+            f"[cyan]{resolved_thread}[/cyan] was no longer running.[/yellow]"
+        )
+        return
+    if status == "foreign":
+        console.print(
+            f"[red]Refusing to kill pid {pid}: it doesn't look like a zeperion "
+            f"process (PID was likely recycled). Inspect manually:[/red]\n"
+            f"  ps -fp {pid}"
+        )
+        raise typer.Exit(1)
+    if status == "stopped":
+        console.print(
+            f"[green]\u2713[/green] Stopped pid [cyan]{pid}[/cyan] "
+            f"(SIGTERM, graceful) for thread [cyan]{resolved_thread}[/cyan]"
+        )
+        return
+    if status == "killed":
+        console.print(
+            f"[yellow]\u2713[/yellow] Killed pid [cyan]{pid}[/cyan] "
+            f"(SIGKILL, did not respond to SIGTERM) for thread "
+            f"[cyan]{resolved_thread}[/cyan]"
+        )
+        return
+    if status == "timeout":
+        console.print(
+            f"[red]Failed to stop pid {pid} within {timeout}s, even with "
+            f"SIGKILL. The process may be stuck in uninterruptible sleep "
+            f"(D-state) or owned by a different user.[/red]"
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
+def serve(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help=(
+            "Bind address. Default is localhost-only; pass 0.0.0.0 to "
+            "expose on the network (no auth, do this only on trusted LANs)."
+        ),
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        "-p",
+        help="Port to bind. Default 8765 to avoid clashing with most dev servers.",
+    ),
+    poll_interval: float = typer.Option(
+        2.0,
+        "--poll-interval",
+        help="Seconds between events.jsonl polls for SSE.",
+    ),
+):
+    """Start a local web UI for inspecting workflow threads.
+
+    Requires the ``[web]`` extra: ``pip install 'zeperion[web]'``.
+    Opens at http://127.0.0.1:<port>/ — list of threads, drill-down
+    detail page with a live SSE event stream.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        console.print(
+            "[red]Error:[/red] ``zeperion serve`` requires the [bold]web[/bold] "
+            "extra. Install with:\n"
+            "  [cyan]pip install 'zeperion[web]'[/cyan]"
+        )
+        raise typer.Exit(1)
+
+    config_path = Path(config_file)
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        raise typer.Exit(1)
+
+    from zeperion.web.app import create_app_from_config_file
+
+    try:
+        web_app = create_app_from_config_file(
+            config_file, poll_interval=poll_interval
+        )
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Failed to build web app: {exc}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold green]\u2713 ZEPERION web UI[/bold green]  "
+        f"http://[cyan]{host}[/cyan]:[cyan]{port}[/cyan]/threads"
+    )
+    console.print(f"[dim]Ctrl-C to stop. Logs below:[/dim]\n")
+    uvicorn.run(
+        web_app,
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=False,
+    )
 
 
 if __name__ == "__main__":
