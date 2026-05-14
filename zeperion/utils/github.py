@@ -38,8 +38,9 @@ class GitHubClient:
                 "codex" is also recognised.
         """
         self.token = token or os.environ.get("GITHUB_TOKEN")
-        if self.token:
-            os.environ["GITHUB_TOKEN"] = self.token
+        # The token is propagated to ``gh`` per-subprocess via ``run_gh`` so we
+        # avoid mutating the process-wide environment (which previously caused
+        # test cross-contamination — see PR babysit notes).
 
         self._codex_logins: set[str] = {
             login.lower() for login in (codex_logins or DEFAULT_CODEX_LOGINS)
@@ -55,25 +56,23 @@ class GitHubClient:
         return normalized.endswith("[bot]") and "codex" in normalized
 
     async def run_gh(self, args: list[str]) -> str:
-        """
-        Run gh CLI command.
+        """Run a ``gh`` CLI command.
 
-        Args:
-            args: Command arguments (without 'gh' prefix)
-
-        Returns:
-            Command stdout
-
-        Raises:
-            RuntimeError: If command fails
+        The instance's token (if any) is injected into the subprocess
+        environment so we don't mutate ``os.environ`` globally.
         """
         cmd = ["gh"] + args
         logger.debug(f"Running: {' '.join(cmd)}")
+
+        env = os.environ.copy()
+        if self.token:
+            env["GITHUB_TOKEN"] = self.token
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await process.communicate()
 
@@ -430,6 +429,52 @@ class GitHubClient:
             "comments_count": codex_comments,
             "reviewed_commit": reviewed_commit,
         }
+
+    async def get_codex_comments(
+        self, repo: str, pr_number: int
+    ) -> list[dict]:
+        """Return Codex review comments suitable for feeding the PR Fixer.
+
+        Each item carries:
+            - ``id``: the GitHub comment ID
+            - ``body``: the text Codex wrote
+            - ``path``: optional file path (review comments only)
+            - ``line``: optional 1-based line number (review comments only)
+            - ``kind``: ``"issue"`` (general PR comment) or ``"review"``
+              (inline comment)
+        """
+        issue_comments = await self._get_paginated(
+            f"repos/{repo}/issues/{pr_number}/comments"
+        )
+        review_comments = await self._get_paginated(
+            f"repos/{repo}/pulls/{pr_number}/comments"
+        )
+
+        out: list[dict] = []
+        for c in issue_comments:
+            if self.is_codex_user(c.get("user", {}).get("login")):
+                out.append(
+                    {
+                        "id": c.get("id"),
+                        "body": c.get("body", ""),
+                        "path": None,
+                        "line": None,
+                        "kind": "issue",
+                    }
+                )
+        for c in review_comments:
+            if self.is_codex_user(c.get("user", {}).get("login")):
+                out.append(
+                    {
+                        "id": c.get("id"),
+                        "body": c.get("body", ""),
+                        "path": c.get("path"),
+                        # GitHub uses ``line`` for the most recent diff position.
+                        "line": c.get("line") or c.get("original_line"),
+                        "kind": "review",
+                    }
+                )
+        return out
 
     async def _get_paginated(self, endpoint: str) -> list:
         """Get paginated API results.

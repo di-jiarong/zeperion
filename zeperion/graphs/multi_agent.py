@@ -11,6 +11,7 @@ from langgraph.types import RetryPolicy
 
 from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
 from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.factory import create_agent as _create_agent_factory
 from zeperion.models import (
     AgentRole,
     GlobalStatus,
@@ -26,34 +27,8 @@ from zeperion.utils.time import iso_now
 logger = logging.getLogger(__name__)
 
 
-def _resolve_agent_class(agent_type: str) -> Type[BaseAgent]:
-    """Resolve a configured agent type to its implementation class."""
-    normalized = agent_type.strip().lower().replace("-", "_")
-    if normalized == "anthropic":
-        return AnthropicAgent
-    if normalized == "claude_code":
-        return ClaudeCodeAgent
-    raise ValueError(f"Unsupported agent type: {agent_type}")
-
-
-def _create_agent(
-    agent_type: str,
-    role: AgentRole,
-    model: str,
-    config: WorkflowConfig,
-) -> BaseAgent:
-    """Create an agent instance from role-specific configuration."""
-    agent_class = _resolve_agent_class(agent_type)
-    if agent_class is ClaudeCodeAgent:
-        return ClaudeCodeAgent(
-            role=role,
-            model=model,
-            cli_tool=config.claude_cli_tool,
-            timeout=config.claude_cli_timeout,
-            project_dir=config.project_dir,
-        )
-
-    return agent_class(role=role, model=model)
+# Re-exported for backward compatibility with internal callers/tests.
+_create_agent = _create_agent_factory
 
 
 def create_multi_agent_graph(

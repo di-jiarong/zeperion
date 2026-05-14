@@ -15,6 +15,7 @@ class AgentRole(str, Enum):
     PLANNER = "planner"
     DEVELOPER = "developer"
     TESTER = "tester"
+    PR_FIXER = "pr_fixer"
 
 
 class PhaseType(str, Enum):

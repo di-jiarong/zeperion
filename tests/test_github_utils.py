@@ -17,6 +17,17 @@ from zeperion.utils.github import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_github_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defensive: ensure these tests never leak GITHUB_TOKEN to other suites.
+
+    Even though ``GitHubClient`` no longer writes to ``os.environ``, the
+    constructor still *reads* it. Clearing it here guarantees tests stay
+    hermetic if future code regresses.
+    """
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
 class TestCodexLoginDetection:
     """Codex bot login matching should cover the historically seen names."""
 
@@ -146,3 +157,75 @@ class TestPaginatedCollection:
 
             items = asyncio.run(client._get_paginated("repos/o/r/pulls/1"))
         assert items == [{"id": 42, "title": "PR"}]
+
+
+class TestCollectCodexComments:
+    """``get_codex_comments`` should pick Codex authors out of both endpoints."""
+
+    def test_only_codex_authored_comments_are_returned(self) -> None:
+        client = GitHubClient(token="dummy")
+
+        issue_payload = [
+            {"id": 1, "body": "issue from codex", "user": {"login": "codex"}},
+            {"id": 2, "body": "human comment", "user": {"login": "alice"}},
+        ]
+        review_payload = [
+            {
+                "id": 3,
+                "body": "inline review",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "path": "src/foo.py",
+                "line": 42,
+                "original_line": None,
+            },
+            {
+                "id": 4,
+                "body": "human inline",
+                "user": {"login": "bob"},
+                "path": "src/bar.py",
+                "line": 7,
+            },
+        ]
+
+        async def fake_paginated(endpoint: str) -> list:
+            if "issues" in endpoint:
+                return issue_payload
+            if "pulls" in endpoint:
+                return review_payload
+            return []
+
+        with patch.object(client, "_get_paginated", side_effect=fake_paginated):
+            import asyncio
+
+            result = asyncio.run(client.get_codex_comments("owner/repo", 99))
+
+        # Two Codex comments returned, in stable order: issues first, then review.
+        assert [c["id"] for c in result] == [1, 3]
+        assert result[0]["kind"] == "issue"
+        assert result[0]["path"] is None
+        assert result[1]["kind"] == "review"
+        assert result[1]["path"] == "src/foo.py"
+        assert result[1]["line"] == 42
+
+    def test_falls_back_to_original_line_when_line_missing(self) -> None:
+        client = GitHubClient(token="dummy")
+
+        async def fake_paginated(endpoint: str) -> list:
+            if "issues" in endpoint:
+                return []
+            return [
+                {
+                    "id": 5,
+                    "body": "outdated comment",
+                    "user": {"login": "codex"},
+                    "path": "x.py",
+                    "line": None,
+                    "original_line": 17,
+                },
+            ]
+
+        with patch.object(client, "_get_paginated", side_effect=fake_paginated):
+            import asyncio
+
+            result = asyncio.run(client.get_codex_comments("owner/repo", 1))
+        assert result[0]["line"] == 17

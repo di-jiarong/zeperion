@@ -117,6 +117,36 @@ class PromptTemplate:
             uses_claude_code=uses_claude_code,
         )
 
+    def render_pr_fixer(
+        self,
+        pr_number: int,
+        pr_branch: str,
+        pr_target_branch: str,
+        comments: list[dict],
+        lessons: Optional[list[str]] = None,
+        uses_claude_code: bool = False,
+    ) -> str:
+        """Render PR fixer prompt.
+
+        Args:
+            pr_number: Pull request number.
+            pr_branch: Head branch.
+            pr_target_branch: Base branch.
+            comments: Codex review comments. Each entry should expose
+                ``body`` (required) and optionally ``path`` / ``line``.
+            lessons: Lessons accumulated from previous rounds.
+            uses_claude_code: Whether the agent can directly edit project files.
+        """
+        return self.render(
+            "pr_fixer.txt",
+            pr_number=pr_number,
+            pr_branch=pr_branch,
+            pr_target_branch=pr_target_branch,
+            comments=comments,
+            lessons=lessons or [],
+            uses_claude_code=uses_claude_code,
+        )
+
     def render_tester(
         self,
         requirement: str,

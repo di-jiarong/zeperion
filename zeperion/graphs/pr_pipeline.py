@@ -6,12 +6,16 @@ from typing import Literal, Optional
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
+from zeperion.agents.base import AgentInvocationError
+from zeperion.agents.factory import create_agent
 from zeperion.models import (
+    AgentRole,
     CodexStatus,
     PRPhase,
     PRPipelineState,
     WorkflowConfig,
 )
+from zeperion.prompts import get_template_manager
 from zeperion.utils.github import GitHubClient
 from zeperion.utils.time import iso_now
 
@@ -210,19 +214,29 @@ async def check_codex_review_node(state: PRPipelineState) -> dict:
     }
 
 
-def decide_next_action(state: PRPipelineState) -> Literal["auto_merge", "wait", "end"]:
-    """Decide next action based on Codex review status."""
+def decide_next_action(
+    state: PRPipelineState,
+) -> Literal["auto_merge", "wait", "pr_fixer", "end"]:
+    """Decide the next node after ``check_codex_review``.
+
+    - ``APPROVED``     → ``auto_merge``
+    - ``NEEDS_FIXES``  → ``pr_fixer`` (let the bot address the comments)
+    - ``WAITING`` / ``PENDING`` → ``wait``
+    - Anything else (defensive) → ``end``
+    """
     codex_status = state["codex_status"]
 
     if codex_status == CodexStatus.APPROVED:
         logger.info("→ Proceeding to auto-merge")
         return "auto_merge"
-    elif codex_status == CodexStatus.NEEDS_FIXES:
-        logger.warning("→ Ending workflow (needs fixes)")
-        return "end"
-    else:
+    if codex_status == CodexStatus.NEEDS_FIXES:
+        logger.warning("→ Routing to pr_fixer (Codex left actionable comments)")
+        return "pr_fixer"
+    if codex_status in (CodexStatus.WAITING, CodexStatus.PENDING):
         logger.info("→ Waiting for review")
         return "wait"
+    logger.error(f"Unknown codex_status {codex_status!r}, ending workflow")
+    return "end"
 
 
 async def auto_merge_node(state: PRPipelineState) -> dict:
@@ -240,6 +254,103 @@ async def auto_merge_node(state: PRPipelineState) -> dict:
         "merge_enabled": True,
         "updated_at": iso_now(),
     }
+
+
+def _build_pr_fixer_node(config: WorkflowConfig):
+    """Build a closure that the graph can use as the ``pr_fixer`` node.
+
+    Closing over ``config`` lets us pick the right model/backend without
+    sneaking config into ``PRPipelineState``.
+    """
+
+    async def pr_fixer_node(state: PRPipelineState) -> dict:
+        """Fetch Codex comments, ask an LLM to address them, then commit+push.
+
+        The graph routes here only when ``check_codex_review`` produced
+        ``NEEDS_FIXES``. After fixing we exit to END; the next external
+        trigger of the pipeline will re-enter ``check_codex_review`` to
+        observe Codex's reaction.
+        """
+        repo = state["github_repo"]
+        pr_number = state["pr_number"]
+        pr_branch = state["pr_branch"]
+        pr_target_branch = state["pr_target_branch"]
+
+        if pr_number is None:
+            logger.warning("pr_fixer invoked without pr_number; nothing to do")
+            return {
+                "pr_phase": PRPhase.FAILED,
+                "updated_at": iso_now(),
+            }
+
+        github = GitHubClient(state["github_token"])
+        comments = await github.get_codex_comments(repo, pr_number)
+        logger.info(
+            f"pr_fixer: collected {len(comments)} Codex comments on PR #{pr_number}"
+        )
+        if not comments:
+            logger.info("pr_fixer: no Codex comments to address, skipping")
+            return {
+                "pr_phase": PRPhase.CHECK_REVIEW,
+                "updated_at": iso_now(),
+            }
+
+        template_manager = get_template_manager(config.prompts_dir)
+        uses_claude_code = (
+            (config.developer_agent_type or "").lower().replace("-", "_")
+            == "claude_code"
+        )
+        prompt = template_manager.render_pr_fixer(
+            pr_number=pr_number,
+            pr_branch=pr_branch,
+            pr_target_branch=pr_target_branch,
+            comments=comments,
+            lessons=None,
+            uses_claude_code=uses_claude_code,
+        )
+
+        agent = create_agent(
+            agent_type=config.developer_agent_type,
+            role=AgentRole.PR_FIXER,
+            model=config.developer_model,
+            config=config,
+        )
+        try:
+            await agent.invoke(prompt)
+        except AgentInvocationError as exc:
+            logger.error(f"pr_fixer agent invocation failed: {exc}")
+            return {
+                "pr_phase": PRPhase.FAILED,
+                "updated_at": iso_now(),
+            }
+
+        if not await github.check_git_changes():
+            logger.info(
+                "pr_fixer: agent produced no file changes; nothing to commit"
+            )
+            return {
+                "pr_phase": PRPhase.CHECK_REVIEW,
+                "updated_at": iso_now(),
+            }
+
+        commit_subject = f"fix(pr): address Codex feedback on PR #{pr_number}"
+        commit_body = (
+            f"Automated by ZEPERION PR Fixer.\n"
+            f"Codex comments processed: {len(comments)}.\n"
+        )
+        commit_sha = await github.commit_changes(commit_subject, commit_body)
+        await github.push_branch(pr_branch)
+        logger.info(
+            f"pr_fixer: pushed {commit_sha[:8]} addressing {len(comments)} comments"
+        )
+
+        return {
+            "pr_phase": PRPhase.COMMIT,
+            "commit_sha": commit_sha,
+            "updated_at": iso_now(),
+        }
+
+    return pr_fixer_node
 
 
 async def wait_for_review_node(state: PRPipelineState) -> dict:
@@ -308,6 +419,7 @@ def create_pr_pipeline_graph(
     workflow.add_node("check_codex_review", check_codex_review_node)
     workflow.add_node("auto_merge", auto_merge_node)
     workflow.add_node("wait_for_review", wait_for_review_node)
+    workflow.add_node("pr_fixer", _build_pr_fixer_node(config))
 
     workflow.set_entry_point("validate_git")
     workflow.add_edge("validate_git", "commit_changes")
@@ -321,12 +433,16 @@ def create_pr_pipeline_graph(
         {
             "auto_merge": "auto_merge",
             "wait": "wait_for_review",
+            "pr_fixer": "pr_fixer",
             "end": END,
         },
     )
 
     workflow.add_edge("auto_merge", END)
     workflow.add_edge("wait_for_review", END)
+    # After fixing, exit and let the next external trigger re-enter the graph
+    # to observe Codex's reaction; this avoids busy-waiting inside the node.
+    workflow.add_edge("pr_fixer", END)
 
     if checkpointer is not None:
         return workflow.compile(checkpointer=checkpointer)

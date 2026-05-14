@@ -113,6 +113,46 @@ class TestPromptTemplate:
         assert "TEST_STATUS:" in prompt
         assert "TEST_CASES:" in prompt
 
+    def test_render_pr_fixer_lists_comments_and_format(self):
+        """PR Fixer prompt should embed every Codex comment and the required output markers."""
+        manager = PromptTemplate()
+        prompt = manager.render_pr_fixer(
+            pr_number=42,
+            pr_branch="feature/x",
+            pr_target_branch="main",
+            comments=[
+                {"path": "src/foo.py", "line": 11, "body": "Null check missing"},
+                {"path": None, "line": None, "body": "Add a regression test"},
+            ],
+            lessons=["watch out for off-by-one"],
+        )
+
+        assert "PR Fixer" in prompt
+        assert "PR 编号：42" in prompt
+        assert "feature/x" in prompt
+        assert "main" in prompt
+        # Both comments should be enumerated.
+        assert "Null check missing" in prompt
+        assert "Add a regression test" in prompt
+        assert "src/foo.py" in prompt
+        # General comments should fall back to "(general)" label, not crash.
+        assert "(general)" in prompt
+        assert "watch out for off-by-one" in prompt
+        # Strict output-format markers must survive in the rendered prompt.
+        for marker in ("FIX_STATUS:", "FIXED_ISSUES:", "FALSE_POSITIVES:", "REMAINING:", "LESSONS:"):
+            assert marker in prompt
+
+    def test_render_pr_fixer_claude_code_branch(self):
+        manager = PromptTemplate()
+        prompt = manager.render_pr_fixer(
+            pr_number=1,
+            pr_branch="b",
+            pr_target_branch="main",
+            comments=[{"body": "fix"}],
+            uses_claude_code=True,
+        )
+        assert "本地 Claude CLI 环境" in prompt
+
     def test_get_template_manager_singleton(self):
         """Test global template manager is singleton."""
         manager1 = get_template_manager()

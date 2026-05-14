@@ -24,6 +24,13 @@ SYSTEM_PROMPT_BY_ROLE: dict[AgentRole, str] = {
         "plan and ALWAYS emit the requested machine-readable fields verbatim "
         "(TEST_STATUS, GLOBAL_STATUS, ...)."
     ),
+    AgentRole.PR_FIXER: (
+        "You are the PR Fixer agent. Read the Codex code-review comments "
+        "and address them by editing project files. Stay strictly within "
+        "the scope of the comments; do not refactor unrelated code. ALWAYS "
+        "emit the requested machine-readable fields verbatim "
+        "(FIX_STATUS, FIXED_ISSUES, FALSE_POSITIVES, REMAINING, LESSONS)."
+    ),
 }
 
 

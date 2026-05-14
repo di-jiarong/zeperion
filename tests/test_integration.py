@@ -9,7 +9,10 @@ import pytest
 from zeperion.config import save_config_to_yaml
 from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
 from zeperion.graphs import create_multi_agent_graph
-from zeperion.graphs.multi_agent import _create_agent, _resolve_agent_class
+from zeperion.agents.factory import (
+    create_agent as _create_agent,
+    resolve_agent_class as _resolve_agent_class,
+)
 from zeperion.models import (
     AgentOutput,
     AgentRole,
