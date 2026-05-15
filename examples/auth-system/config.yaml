@@ -1,25 +1,39 @@
-# Configuration for ZEPERION workflow
+# 示例配置：用户认证系统
+#
+# 这是一份扁平的 ZEPERION 配置（直接对应 zeperion.models.WorkflowConfig
+# 的字段）。loader 是 WorkflowConfig(**yaml_dict)，所以**不要**写嵌套
+# 的 ``models:`` / ``cli:`` / ``github:`` block —— 那是历史遗留写法，
+# 在当前版本里不会被读取。
 
-# Model configuration
-models:
-  planner: claude-opus-4-7
-  developer: claude-sonnet-4-6
-  tester: claude-opus-4-7
+requirement_file: ./requirement.txt
+state_dir: ./.zeperion/state
+project_dir: .
 
-# Workflow configuration
-workflow:
-  max_rounds: 30
-  max_fix_attempts: 3
+# Planner / Tester 用 anthropic（只产出文本，正合适）；Developer 用
+# claude_code，让它真的能改文件。详见仓库根目录 README 的黄牌警告。
+planner_agent_type: anthropic
+developer_agent_type: claude_code
+tester_agent_type: anthropic
 
-# CLI configuration (for Claude CLI)
-cli:
-  command: claude
-  model_flag: --model
-  resume_flag: --resume
-  timeout: 600  # seconds
+# 模型
+planner_model: claude-opus-4-7
+developer_model: claude-sonnet-4-6
+tester_model: claude-opus-4-7
 
-# Paths
-paths:
-  requirement_file: ./requirement.txt
-  state_dir: ./.zeperion/state
-  prompts_dir: ./zeperion/prompts/templates
+# 工作流
+max_rounds: 10
+max_fix_attempts: 3
+
+# Claude Code CLI 调谐
+claude_cli_tool: claude
+claude_cli_timeout: 600
+claude_cli_use_worktree: false
+claude_cli_keep_worktree: true
+
+# Anthropic API key 从环境变量读：
+#   export ANTHROPIC_API_KEY=sk-ant-...
+# 不要写在 yaml 里。
+
+# 想让本目录直接进 PR Pipeline 模式，再补：
+# github_repo: owner/repo
+# pr_target_branch: main

@@ -1,0 +1,15 @@
+GLOBAL_STATUS: CONTINUE
+
+CHANGES:
+- 新增 app/routers/auth.py 实现 POST /register。
+- 新增 app/middleware/ratelimit.py，提供 RateLimiter 接口（默认内存实现，预留 Redis 后端）。
+- tests/test_register.py 覆盖正常注册和重复 email 场景。
+
+VERIFY_HINTS:
+- pytest tests/test_register.py 全绿。
+- curl POST /register 应返回 {"user_id": <int>}。
+
+BLOCKERS: NONE
+
+LESSONS:
+- 内存 RateLimiter 适合单元测试，但生产必须用 Redis。

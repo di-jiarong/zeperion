@@ -171,6 +171,23 @@ class WorkflowConfig(BaseModel):
     developer_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
     tester_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
 
+    # Operators occasionally configure ``developer_agent_type=anthropic``
+    # without realising the AnthropicAgent has no tool / file-IO
+    # capability — the workflow runs to completion but the project tree
+    # is never touched. We surface a yellow warning at ``zeperion run``
+    # startup in that case. Setting this flag to True silences the
+    # warning, intended for users who deliberately want a "plan-only"
+    # workflow (e.g. produce a development plan + reviewer feedback
+    # without auto-applying changes).
+    acknowledge_anthropic_developer_no_file_writes: bool = Field(
+        default=False,
+        description=(
+            "Set true to silence the startup warning emitted when "
+            "``developer_agent_type='anthropic'``. AnthropicAgent has "
+            "no file IO; only opt out of the warning if you know that."
+        ),
+    )
+
     # ``max_rounds`` was historically 50, which combined with the
     # parser's previous "missing GLOBAL_STATUS → CONTINUE" fallback
     # could quietly burn 50 expensive Opus rounds when a single

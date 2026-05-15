@@ -1,0 +1,14 @@
+GLOBAL_STATUS: CONTINUE
+
+CHANGES:
+- app/models.py: User.created_at 改为 server_default=func.now()。
+- app/security.py: verify_password 显式 return False，加单元测试覆盖错误密码分支。
+
+VERIFY_HINTS:
+- pytest tests/test_security.py 现在应该全部 PASS。
+- alembic upgrade head 应可执行。
+
+BLOCKERS: NONE
+
+LESSONS:
+- 失败分支别返回 None；调用方 truthy 检查会把 None 当成"没失败"，是经典坑。

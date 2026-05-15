@@ -1,0 +1,13 @@
+TEST_STATUS: PASS
+GLOBAL_STATUS: CONTINUE
+
+TEST_CASES:
+- bcrypt round-trip：PASS
+- JWT 编解码：PASS
+- User 表迁移：PASS
+- verify_password 错误密码：PASS
+
+BUGS: NONE
+
+LESSONS:
+- 修完 created_at 后，alembic autogenerate 不再产出 spurious diff。

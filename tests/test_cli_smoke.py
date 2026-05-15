@@ -14,12 +14,15 @@ subcommand against a fresh project directory.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
-from zeperion.cli import app
+from zeperion.cli import app, warn_if_anthropic_developer_lacks_file_writes
+from zeperion.models import WorkflowConfig
 
 
 @pytest.fixture
@@ -92,3 +95,57 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert result.exit_code == 0, f"init crashed:\n{result.output}"
         assert (tmp_path / ".zeperion" / "config.yaml").exists()
         assert (tmp_path / "requirement.txt").exists()
+
+
+class TestAnthropicDeveloperWarning:
+    """``warn_if_anthropic_developer_lacks_file_writes`` exists because the
+    AnthropicAgent has no tool / file-IO surface, so ``zeperion run`` with
+    ``developer_agent_type=anthropic`` produces text-only output and never
+    touches the project tree. We surface that at startup; these tests pin
+    the behaviour so a future refactor can't quietly remove the warning.
+    """
+
+    @staticmethod
+    def _capture_console() -> Console:
+        # Force a deterministic 200-col terminal so wrapping doesn't break
+        # substring assertions on different developer terminals.
+        return Console(
+            file=io.StringIO(),
+            force_terminal=False,
+            color_system=None,
+            width=200,
+        )
+
+    def test_anthropic_developer_emits_warning(self) -> None:
+        config = WorkflowConfig(
+            requirement_file="dummy.txt",
+            developer_agent_type="anthropic",
+        )
+        out = self._capture_console()
+        emitted = warn_if_anthropic_developer_lacks_file_writes(config, out)
+        text = out.file.getvalue()
+        assert emitted is True
+        assert "developer_agent_type='anthropic'" in text
+        assert "no file IO" in text
+        assert "claude_code" in text
+
+    def test_claude_code_developer_no_warning(self) -> None:
+        config = WorkflowConfig(
+            requirement_file="dummy.txt",
+            developer_agent_type="claude_code",
+        )
+        out = self._capture_console()
+        emitted = warn_if_anthropic_developer_lacks_file_writes(config, out)
+        assert emitted is False
+        assert out.file.getvalue() == ""
+
+    def test_acknowledged_anthropic_developer_silenced(self) -> None:
+        config = WorkflowConfig(
+            requirement_file="dummy.txt",
+            developer_agent_type="anthropic",
+            acknowledge_anthropic_developer_no_file_writes=True,
+        )
+        out = self._capture_console()
+        emitted = warn_if_anthropic_developer_lacks_file_writes(config, out)
+        assert emitted is False
+        assert out.file.getvalue() == ""

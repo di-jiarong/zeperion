@@ -129,6 +129,50 @@ def _spawn_detached_run(
     console.print(f"  Stop:   zeperion stop -t {resolved_thread}")
 
 
+def warn_if_anthropic_developer_lacks_file_writes(
+    config: WorkflowConfig,
+    out: Console,
+) -> bool:
+    """Emit a yellow startup warning when Developer is on the no-tools backend.
+
+    The default ``AnthropicAgent`` calls ``messages.create`` with no
+    tool definitions and no file IO. When ``developer_agent_type`` is
+    ``"anthropic"`` the workflow runs to completion but the project
+    tree is never modified — a footgun previously buried only in the
+    README. We escalate it to a runtime warning so first-time users
+    see it on their first ``zeperion run``.
+
+    Returns:
+        ``True`` if a warning was actually printed, ``False`` if it
+        was suppressed (either because the role is on ``claude_code``
+        or because the operator opted out via
+        ``acknowledge_anthropic_developer_no_file_writes: true``).
+
+    The function is exposed at module level (rather than inlined into
+    the ``run`` command) so it can be unit-tested without booting the
+    whole Typer command.
+    """
+    if config.developer_agent_type != "anthropic":
+        return False
+    if config.acknowledge_anthropic_developer_no_file_writes:
+        return False
+    out.print(
+        "[yellow]\u26a0  Warning:[/yellow] "
+        "[bold]developer_agent_type='anthropic'[/bold] — the AnthropicAgent "
+        "has no tools / no file IO and will [bold]not[/bold] modify your "
+        "project files.\n"
+        "    The workflow will still produce planner/developer/tester text "
+        "in [dim].zeperion/state/threads/<id>/*_output.txt[/dim], but no "
+        "source code will be touched.\n"
+        "    To make Developer actually edit files, set "
+        "[cyan]developer_agent_type: claude_code[/cyan] in your config.\n"
+        "    To silence this warning when you knowingly want a plan-only "
+        "run, set [cyan]acknowledge_anthropic_developer_no_file_writes: "
+        "true[/cyan]."
+    )
+    return True
+
+
 def _load_workflow_state_from_checkpoint(
     state_dir: Path, thread_id: str
 ) -> dict:
@@ -341,6 +385,11 @@ def run(
     if mode == "multi_agent":
         from zeperion.graphs import create_multi_agent_graph
         from zeperion.models import create_initial_state
+
+        # Surface the "AnthropicAgent doesn't write files" footgun at
+        # runtime — the README warning alone wasn't enough; users
+        # routinely missed it.
+        warn_if_anthropic_developer_lacks_file_writes(config, console)
 
         if resume:
             console.print(f"[bold]Resuming from checkpoint:[/bold] {thread_id}")
