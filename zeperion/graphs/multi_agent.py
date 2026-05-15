@@ -188,6 +188,23 @@ def create_multi_agent_graph(
             round_num=state["round"],
             fix_attempt=state.get("fix_attempt"),
         )
+        # Capture per-invocation token usage when the backend reports it.
+        # ``ClaudeCodeAgent`` doesn't (the ``claude --print`` CLI doesn't
+        # emit usage on stdout); ``AnthropicAgent`` always does. ``None``
+        # is meaningfully different from "0 tokens" — we surface it as
+        # absent fields rather than zeroes so a downstream summary can
+        # tell "we don't know" from "we know it was free".
+        usage = getattr(output, "usage", None)
+        usage_event: dict = {}
+        if usage is not None:
+            usage_event = {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens,
+            }
+
         storage.append_event(
             thread_id,
             {
@@ -201,12 +218,15 @@ def create_multi_agent_graph(
                 "global_status": output.global_status,
                 "duration_ms": duration_ms,
                 "output_chars": len(output.raw_output),
+                **usage_event,
             },
         )
         logger.info(
-            "%s done in %sms",
+            "%s done in %sms (tokens in/out: %s/%s)",
             agent_name,
             duration_ms,
+            usage_event.get("input_tokens", "?"),
+            usage_event.get("output_tokens", "?"),
             extra={
                 "event": "agent_completed",
                 "role": agent_name,
@@ -217,6 +237,7 @@ def create_multi_agent_graph(
                 "task_id": output.task_id,
                 "test_status": getattr(output.test_status, "value", output.test_status),
                 "global_status": getattr(output.global_status, "value", output.global_status),
+                **usage_event,
             },
         )
 

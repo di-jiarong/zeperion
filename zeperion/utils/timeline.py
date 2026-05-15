@@ -169,14 +169,42 @@ def derive_in_flight(
 
 
 def summarise(events: Iterable[TimelineEvent]) -> dict:
-    """Produce a small dict of headline numbers for ``status`` display."""
+    """Produce a small dict of headline numbers for ``status`` display.
+
+    Aggregates token usage from ``agent_completed`` events when the
+    backend reported it (``AnthropicAgent`` always does;
+    ``ClaudeCodeAgent`` currently doesn't). The ``cost_*`` keys
+    distinguish "known and aggregated" from "no data", so a status
+    panel can show "tokens: in 12_345 / out 6_789" vs "tokens: n/a"
+    rather than misleadingly reporting zeroes.
+    """
     events = list(events)
     completed = [e for e in events if e.event == "agent_completed"]
     total_ms = sum(e.duration_ms or 0 for e in completed)
     last_round = max((e.round or 0 for e in events), default=0)
+
+    # Walk the raw event payloads since the dataclass fields don't
+    # carry token data — that would have meant adding 4 fields to a
+    # frozen dataclass for one consumer.
+    in_tokens = 0
+    out_tokens = 0
+    counted = 0
+    for e in completed:
+        in_t = e.raw.get("input_tokens")
+        out_t = e.raw.get("output_tokens")
+        if isinstance(in_t, int) or isinstance(out_t, int):
+            counted += 1
+            in_tokens += in_t or 0
+            out_tokens += out_t or 0
+
     return {
         "total_events": len(events),
         "completed_agent_calls": len(completed),
         "total_agent_ms": total_ms,
         "last_round": last_round,
+        # Token rollup: present iff at least one completion reported usage.
+        "tokens_input": in_tokens if counted else None,
+        "tokens_output": out_tokens if counted else None,
+        "tokens_total": (in_tokens + out_tokens) if counted else None,
+        "agent_calls_with_usage": counted,
     }

@@ -43,6 +43,7 @@ def _instantiate(
             use_worktree=config.claude_cli_use_worktree,
             worktree_parent=config.claude_cli_worktree_parent,
             keep_worktree=config.claude_cli_keep_worktree,
+            progress_interval_seconds=config.claude_cli_progress_interval_seconds,
         )
     return agent_class(role=role, model=model)
 
