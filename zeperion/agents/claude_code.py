@@ -40,12 +40,6 @@ class ClaudeCodeAgent(BaseAgent):
         use_worktree: bool = False,
         worktree_parent: Optional[str] = None,
         keep_worktree: bool = True,
-        # Kept for backward compatibility with old configs/tests; ignored
-        # because the real CLI does not use these flags.
-        cli_model_flag: Optional[str] = None,
-        cli_input_flag: Optional[str] = None,
-        cli_output_flag: Optional[str] = None,
-        cli_log_flag: Optional[str] = None,
     ):
         """Initialise the Claude Code agent.
 
@@ -69,11 +63,6 @@ class ClaudeCodeAgent(BaseAgent):
             keep_worktree: Keep the temporary worktree after invocation so
                 changes can be inspected or merged manually. When false the
                 worktree is removed after the invocation exits.
-            cli_model_flag, cli_input_flag, cli_output_flag, cli_log_flag:
-                Legacy keyword arguments retained for backward compatibility
-                with stored configurations and old tests. They are accepted
-                but ignored — the current implementation pins the flag
-                names matching the real CLI.
         """
         super().__init__(role, model)
         self.cli_tool = cli_tool
@@ -85,11 +74,6 @@ class ClaudeCodeAgent(BaseAgent):
         self.worktree_parent = Path(worktree_parent).resolve() if worktree_parent else None
         self.keep_worktree = keep_worktree
         self.last_worktree_dir: Optional[Path] = None
-        # Legacy attributes (preserved for introspection / tests only).
-        self.cli_model_flag = cli_model_flag
-        self.cli_input_flag = cli_input_flag
-        self.cli_output_flag = cli_output_flag
-        self.cli_log_flag = cli_log_flag
 
     def build_command(self, project_dir: Optional[Path] = None) -> list[str]:
         """Assemble the CLI argv list for one invocation."""

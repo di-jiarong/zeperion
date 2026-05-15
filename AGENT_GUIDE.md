@@ -48,10 +48,8 @@ agent = ClaudeCodeAgent(
     role=AgentRole.DEVELOPER,
     model="claude-sonnet-4-6",
     cli_tool="claude",
-    cli_model_flag="--model",
-    cli_input_flag="--input",
-    cli_output_flag="--output",
     timeout=600,
+    permission_mode="bypassPermissions",  # 也可设成 "acceptEdits" 走人工确认
 )
 ```
 

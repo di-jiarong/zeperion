@@ -248,7 +248,6 @@ GLOBAL_STATUS: CONTINUE
             role=AgentRole.DEVELOPER,
             model="claude-sonnet-4-6",
             cli_tool="custom-cli",
-            cli_model_flag="--model-name",
             timeout=300,
             project_dir="/tmp",
         )
@@ -256,7 +255,6 @@ GLOBAL_STATUS: CONTINUE
         assert agent.role == AgentRole.DEVELOPER
         assert agent.model == "claude-sonnet-4-6"
         assert agent.cli_tool == "custom-cli"
-        assert agent.cli_model_flag == "--model-name"
         assert agent.timeout == 300
         assert str(agent.project_dir) == "/tmp"
 
@@ -282,21 +280,6 @@ GLOBAL_STATUS: CONTINUE
             cmd.index("--permission-mode") : cmd.index("--permission-mode") + 2
         ]
         assert cmd[-1] == "--debug"
-
-    def test_legacy_cli_flag_kwargs_are_accepted_for_back_compat(self, tmp_path):
-        """Old configs and tests may still pass cli_*_flag kwargs; accept and ignore."""
-        agent = ClaudeCodeAgent(
-            role=AgentRole.DEVELOPER,
-            model="claude-sonnet-4-6",
-            project_dir=str(tmp_path),
-            cli_model_flag="--ignored",
-            cli_input_flag="--ignored",
-            cli_output_flag="--ignored",
-            cli_log_flag="--ignored",
-        )
-        # These attributes are stored verbatim but must NOT leak into the command.
-        cmd = agent.build_command()
-        assert "--ignored" not in cmd
 
     @pytest.mark.asyncio
     async def test_invoke_pipes_prompt_to_stdin_and_returns_stdout(
