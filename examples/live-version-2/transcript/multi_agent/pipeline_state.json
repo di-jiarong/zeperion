@@ -1,0 +1,6 @@
+{
+  "thread_id": "live2-pr",
+  "pr_phase": "failed",
+  "pr_error": "gh command failed: HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login",
+  "updated_at": "2026-05-15T07:04:53.800290+00:00"
+}

@@ -372,6 +372,62 @@ class TestWorkflowGraph:
         assert merged_state["round"] <= test_config.max_rounds
 
 
+class TestNoPRPipeline:
+    """Verify ``disable_pr_pipeline=True`` prevents the automatic
+    PR Pipeline sub-graph, even when GitHub credentials are present."""
+
+    @pytest.mark.asyncio
+    async def test_disable_pr_pipeline_skips_pr_subgraph(
+        self, test_config, mock_agent_outputs
+    ):
+        """With github_token='dummy' + disable_pr_pipeline=True, the
+        workflow must finish without entering the PR pipeline sub-graph."""
+        config = WorkflowConfig(
+            requirement_file=test_config.requirement_file,
+            planner_model=test_config.planner_model,
+            developer_model=test_config.developer_model,
+            tester_model=test_config.tester_model,
+            planner_agent_type=test_config.planner_agent_type,
+            developer_agent_type=test_config.developer_agent_type,
+            tester_agent_type=test_config.tester_agent_type,
+            max_rounds=3,
+            max_fix_attempts=2,
+            state_dir=test_config.state_dir,
+            prompts_dir=test_config.prompts_dir,
+            project_dir=test_config.project_dir,
+            github_token="dummy",
+            github_repo="owner/repo",
+        )
+
+        FakeAgent.outputs = [
+            mock_agent_outputs["planner"],
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["tester_pass"],
+        ]
+
+        graph = create_multi_agent_graph(
+            config,
+            agent_class=FakeAgent,
+            enable_checkpoint=False,
+            disable_pr_pipeline=True,
+        )
+        initial_state = create_initial_state(config)
+
+        config_obj = {"configurable": {"thread_id": "test_no_pr"}}
+        merged_state = dict(initial_state)
+
+        async for event in graph.astream(initial_state, config_obj):
+            for _node_name, node_state in event.items():
+                merged_state.update(node_state)
+
+        # The PR pipeline sub-graph was never entered, so pr_phase must
+        # not appear in the final merged state.
+        assert "pr_phase" not in merged_state
+        # The workflow must still have completed its normal loop.
+        assert merged_state["global_status"] == GlobalStatus.DONE
+        assert merged_state["test_status"] == TestStatus.PASS
+
+
 class TestCLIIntegration:
     """Test CLI integration."""
 

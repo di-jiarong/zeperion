@@ -1,0 +1,53 @@
+## 任务
+
+给 `zeperion run` 加一个 `--no-pr-pipeline` 布尔 flag，让 `multi_agent`
+模式跑完后**不要**自动进入 PR Pipeline 子图，即使 `GITHUB_TOKEN` /
+`config.github_repo` 已配置也跳过。
+
+## 背景
+
+zeperion 当前的 `multi_agent.route_after_tester` 逻辑（在
+`zeperion/graphs/multi_agent.py` 里）大致是：当 Tester emit
+`GLOBAL_STATUS=DONE` 时，如果 `config.github_repo or config.github_token`
+为真，就路由到 `pr_pipeline` 子图自动 commit/push/创 PR。
+
+这在 CI / 测试环境里是一个真坑：开发者写 pytest fixture 时如果忘了
+显式传 `github_token=None`，进程 env 里现成的 `GITHUB_TOKEN` 就会
+被 zeperion 看见、自动触发 PR Pipeline、把测试 artifact 当成真代码
+commit 推到远端。
+
+`--no-pr-pipeline` 给操作员一个**显式逃生口**：即使凭据齐全也只跑
+multi_agent 那一段。
+
+## 验收标准（严格按此实现）
+
+1. 在 `zeperion/cli.py` 的 `run` 命令里加 `no_pr_pipeline: bool` typer
+   option，flag 名字为 `--no-pr-pipeline`，默认 `False`。短选项不需要。
+2. 把这个布尔传给 `create_multi_agent_graph()`：
+   - 在 `zeperion/graphs/multi_agent.py` 的 `create_multi_agent_graph`
+     函数签名里加一个 keyword-only 参数 `disable_pr_pipeline: bool = False`。
+   - `route_after_tester` 内部判断，如果 `disable_pr_pipeline` 为 `True`，
+     即使 `global_status == DONE` 且 GitHub 配置完整，也走 `"end"` 分
+     支（即 END），不走 `"pr_pipeline"`。
+3. CLI 的 detach 路径（`_spawn_detached_run`）也要把 `--no-pr-pipeline`
+   原样转发给子进程，否则 detach 后会绕过这个 flag。
+4. 在 `tests/test_cli_smoke.py` 加一个新测试类 `TestNoPRPipelineFlag`，
+   至少包含：
+   - 一个用例验证 `zeperion run --help` 输出里有 `--no-pr-pipeline` 字
+     符串（最简单的"flag 已注册"断言）。
+5. 在 `tests/test_integration.py`（或新建一个 `tests/test_no_pr_pipeline.py`）
+   加一个用例：用 `FakeAgent` 跑 multi_agent，配 `github_token="dummy"` +
+   `disable_pr_pipeline=True`，断言最终状态 phase 是 `COMPLETED`/`PLANNING`/
+   `TESTING` 而不是 `pr_phase` 字段被写入（pr_pipeline 子图根本没跑）。
+6. 不要修改 `pyproject.toml`、不要修改 README/docs/任何 .md 文件、不要
+   动 examples 目录。
+7. 完成后跑 `pytest -q` 必须全绿。
+
+## Tester 必须执行的真实验证命令
+
+```bash
+pytest -q tests/test_cli_smoke.py
+zeperion run --help
+```
+
+第一条验证测试通过；第二条验证新 flag 真出现在 help 文本里。
