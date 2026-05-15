@@ -7,6 +7,31 @@ from typing import Any, Optional, Type
 logger = logging.getLogger(__name__)
 
 
+class MissingRequiredFieldError(ValueError):
+    """Raised when a *required* field is absent or unrecognisable.
+
+    Used by :meth:`SectionParser.extract_required_enum` for fields whose
+    absence must NOT silently default. The classic example is
+    ``GLOBAL_STATUS`` for the Planner / Tester: the previous behaviour of
+    "missing → CONTINUE" combined with ``max_rounds=50`` could quietly
+    burn a whole batch of expensive LLM calls when a single response
+    forgot the marker.
+
+    Carries the field name and the offending value so callers can build
+    a human-readable ``last_error``.
+    """
+
+    def __init__(self, field_name: str, value: Optional[str] = None):
+        self.field_name = field_name
+        self.value = value
+        if value is None:
+            super().__init__(f"Required field {field_name!r} is missing")
+        else:
+            super().__init__(
+                f"Required field {field_name!r} has unrecognised value {value!r}"
+            )
+
+
 class SectionParser:
     """
     Lenient parser for structured LLM output.
@@ -99,6 +124,48 @@ class SectionParser:
             f"Invalid {field_name} value: '{value}', using default: {default}"
         )
         return default
+
+    def extract_required_enum(
+        self,
+        field_name: str,
+        enum_class: Type[Any],
+    ) -> Any:
+        """Like :meth:`extract_enum`, but raises when the field is absent
+        or the value cannot be resolved to a member of ``enum_class``.
+
+        This exists specifically so the workflow can distinguish "the
+        agent legitimately said CONTINUE" from "the agent forgot to
+        emit GLOBAL_STATUS at all". Silently defaulting in the second
+        case used to put the workflow into an infinite Planner→Dev→Tester
+        loop until ``max_rounds`` ran out.
+
+        Raises:
+            MissingRequiredFieldError: When the field is absent, empty,
+                or its value (after decoration stripping) does not match
+                any enum member.
+        """
+        value = self.extract_field(field_name)
+        if not value:
+            raise MissingRequiredFieldError(field_name)
+
+        try:
+            return enum_class(value)
+        except (ValueError, KeyError):
+            pass
+
+        normalized = _strip_decorations(value)
+        if normalized:
+            try:
+                return enum_class(normalized)
+            except (ValueError, KeyError):
+                pass
+
+        value_upper = (normalized or value).upper()
+        for member in enum_class:
+            if member.value.upper() == value_upper:
+                return member
+
+        raise MissingRequiredFieldError(field_name, value)
 
     def extract_section(
         self,

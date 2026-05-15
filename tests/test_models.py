@@ -60,7 +60,7 @@ class TestWorkflowConfig:
         assert config.planner_agent_type == "anthropic"
         assert config.developer_agent_type == "anthropic"
         assert config.tester_agent_type == "anthropic"
-        assert config.max_rounds == 50
+        assert config.max_rounds == 10
         assert config.max_fix_attempts == 3
         assert config.project_dir == "."
         assert config.state_dir == ".zeperion/state"

@@ -102,9 +102,9 @@ That's my recommendation.
         assert result.global_status == GlobalStatus.CONTINUE
         assert len(result.lessons) == 2
 
-    def test_parse_output_invalid_enum_uses_default(self):
-        """Test invalid enum values use defaults."""
-        agent = ClaudeCodeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
+    def test_parse_output_invalid_enum_for_optional_role_uses_default(self):
+        """Developer's TEST_STATUS / GLOBAL_STATUS are optional; invalid → default."""
+        agent = ClaudeCodeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
 
         raw_output = """
 TEST_STATUS: INVALID_STATUS
@@ -114,6 +114,62 @@ GLOBAL_STATUS: INVALID_STATUS
 
         assert result.test_status == TestStatus.PENDING
         assert result.global_status == GlobalStatus.CONTINUE
+        assert result.parse_error is None
+
+    def test_parse_output_invalid_required_enum_blocks_for_tester(self):
+        """Tester invalid TEST_STATUS/GLOBAL_STATUS → BLOCKED + parse_error.
+
+        Used to silently fall back to PENDING/CONTINUE, which combined
+        with ``max_rounds`` could burn a whole round-trip on a single
+        malformed line.
+        """
+        agent = ClaudeCodeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
+
+        raw_output = """
+TEST_STATUS: INVALID_STATUS
+GLOBAL_STATUS: INVALID_STATUS
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.global_status == GlobalStatus.BLOCKED
+        assert result.parse_error is not None
+        assert "TEST_STATUS" in result.parse_error
+        assert "GLOBAL_STATUS" in result.parse_error
+
+    def test_parse_output_missing_global_status_blocks_planner(self):
+        """Planner forgetting GLOBAL_STATUS → BLOCKED, not silent CONTINUE.
+
+        Regression guard for the historical behaviour where missing
+        GLOBAL_STATUS defaulted to CONTINUE, allowing the workflow to
+        loop until ``max_rounds`` ran out.
+        """
+        agent = ClaudeCodeAgent(role=AgentRole.PLANNER, model="claude-opus-4-7")
+
+        raw_output = """
+TASK_ID: task-without-status
+PLAN:
+- do thing
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.global_status == GlobalStatus.BLOCKED
+        assert result.parse_error is not None
+        assert "GLOBAL_STATUS" in result.parse_error
+
+    def test_parse_output_missing_test_status_blocks_tester(self):
+        """Tester forgetting TEST_STATUS → BLOCKED + parse_error mentions TEST_STATUS."""
+        agent = ClaudeCodeAgent(role=AgentRole.TESTER, model="claude-opus-4-7")
+
+        raw_output = """
+GLOBAL_STATUS: CONTINUE
+LESSONS:
+- forgot to emit TEST_STATUS
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.global_status == GlobalStatus.BLOCKED
+        assert result.parse_error is not None
+        assert "TEST_STATUS" in result.parse_error
 
     def test_parse_output_lessons_various_formats(self):
         """Test lessons parsing with various bullet formats."""

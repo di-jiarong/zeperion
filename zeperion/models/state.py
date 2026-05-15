@@ -254,6 +254,12 @@ class AgentOutput(BaseModel):
     )
     lessons: list[str] = Field(default_factory=list)
     raw_output: str = Field(description="Full agent output")
+    # When set, the parser detected a *required* field missing from the
+    # raw output (e.g. Planner/Tester forgot to emit ``GLOBAL_STATUS``).
+    # The graph node should propagate this to ``state["last_error"]`` so
+    # the operator can see *why* the workflow tripped to BLOCKED instead
+    # of seeing a silent infinite loop.
+    parse_error: Optional[str] = Field(default=None)
 
     model_config = ConfigDict(frozen=True)
 

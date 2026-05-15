@@ -293,6 +293,17 @@ def create_multi_agent_graph(
         }
         if output.pr_title:
             state_patch["pr_title"] = output.pr_title
+        # ``parse_error`` is set by ``BaseAgent.parse_output`` when a
+        # required field (GLOBAL_STATUS for the Planner) was missing
+        # or unrecognisable. We propagate it to ``last_error`` so the
+        # subsequent ``route_after_planner`` -> ``blocked`` transition
+        # surfaces a real reason in ``zeperion status`` instead of the
+        # generic "Max fix attempts reached".
+        if output.parse_error:
+            state_patch["phase"] = PhaseType.BLOCKED
+            state_patch["last_error"] = (
+                f"planner output parse failure: {output.parse_error}"
+            )[:500]
         return state_patch
 
     async def developer_node(state: WorkflowState) -> WorkflowState:
@@ -414,8 +425,16 @@ def create_multi_agent_graph(
             "updated_at": iso_now(),
         }
 
-        # Capture error if test failed
-        if output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
+        # ``parse_error`` (Tester forgot TEST_STATUS / GLOBAL_STATUS)
+        # takes precedence over the test_status-derived error: the
+        # parser already coerced ``global_status`` to BLOCKED in this
+        # case, so routing falls through to the ``blocked`` terminal.
+        if output.parse_error:
+            updates["phase"] = PhaseType.BLOCKED
+            updates["last_error"] = (
+                f"tester output parse failure: {output.parse_error}"
+            )[:500]
+        elif output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
             # Extract error from raw output
             updates["last_error"] = output.raw_output[-500:]  # Last 500 chars
 

@@ -4,7 +4,11 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
-from zeperion.parsers.section_parser import SectionParser, _strip_decorations
+from zeperion.parsers.section_parser import (
+    MissingRequiredFieldError,
+    SectionParser,
+    _strip_decorations,
+)
 
 # Conservative upper bound for PR titles — GitHub itself accepts much
 # longer ones, but we truncate to keep PR lists scannable and to avoid
@@ -114,24 +118,80 @@ class BaseAgent(ABC):
         """Return the system prompt for this agent's role."""
         return SYSTEM_PROMPT_BY_ROLE.get(self.role, "")
 
+    # Roles whose ``GLOBAL_STATUS`` line MUST be present and parseable.
+    # Missing → workflow is forced into BLOCKED rather than silently
+    # defaulting to CONTINUE (which used to burn ``max_rounds`` of LLM
+    # calls before anyone noticed). Developer is intentionally NOT in
+    # this set: it never owns ``GLOBAL_STATUS`` (the parser collapses
+    # any DONE claim back to CONTINUE further down).
+    _GLOBAL_STATUS_REQUIRED_ROLES: frozenset[AgentRole] = frozenset(
+        {AgentRole.PLANNER, AgentRole.TESTER}
+    )
+    # Roles whose ``TEST_STATUS`` line is similarly mandatory.
+    _TEST_STATUS_REQUIRED_ROLES: frozenset[AgentRole] = frozenset(
+        {AgentRole.TESTER}
+    )
+
     def parse_output(self, raw_output: str) -> AgentOutput:
         """Parse raw agent output into structured format.
 
         The same parsing logic is shared by every backend so a given LLM
         response is interpreted identically regardless of which Agent
         implementation produced it.
+
+        For roles in :attr:`_GLOBAL_STATUS_REQUIRED_ROLES` /
+        :attr:`_TEST_STATUS_REQUIRED_ROLES` the corresponding fields are
+        treated as *required*. If the LLM omits them (or emits a value
+        that does not resolve to an enum member), this method returns
+        an :class:`AgentOutput` with ``global_status=BLOCKED`` and a
+        populated ``parse_error`` instead of silently defaulting to
+        ``CONTINUE``/``PENDING``. Graph nodes propagate ``parse_error``
+        into ``state["last_error"]`` and route directly to the
+        ``blocked`` terminal.
         """
         parser = SectionParser(raw_output)
 
         task_id = parser.extract_field("TASK_ID")
         pr_title = _clean_pr_title(parser.extract_field("PR_TITLE"))
-        test_status = parser.extract_enum(
-            "TEST_STATUS", TestStatus, TestStatus.PENDING
-        )
-        global_status = parser.extract_enum(
-            "GLOBAL_STATUS", GlobalStatus, GlobalStatus.CONTINUE
-        )
         lessons = parser.extract_list("LESSONS", strip_bullets=True)
+
+        parse_error: Optional[str] = None
+
+        if self.role in self._TEST_STATUS_REQUIRED_ROLES:
+            try:
+                test_status = parser.extract_required_enum(
+                    "TEST_STATUS", TestStatus
+                )
+            except MissingRequiredFieldError as exc:
+                parse_error = str(exc)
+                test_status = TestStatus.PENDING
+        else:
+            test_status = parser.extract_enum(
+                "TEST_STATUS", TestStatus, TestStatus.PENDING
+            )
+
+        if self.role in self._GLOBAL_STATUS_REQUIRED_ROLES:
+            try:
+                global_status = parser.extract_required_enum(
+                    "GLOBAL_STATUS", GlobalStatus
+                )
+            except MissingRequiredFieldError as exc:
+                # Combine with any earlier TEST_STATUS error so the
+                # operator sees both reasons in ``last_error``.
+                parse_error = (
+                    f"{parse_error}; {exc}" if parse_error else str(exc)
+                )
+                global_status = GlobalStatus.BLOCKED
+        else:
+            global_status = parser.extract_enum(
+                "GLOBAL_STATUS", GlobalStatus, GlobalStatus.CONTINUE
+            )
+
+        # When a TEST_STATUS error fired but GLOBAL_STATUS was fine, we
+        # still want to BLOCK the workflow — the Tester producing no
+        # verdict is not safe to treat as PASS or CONTINUE.
+        if parse_error and global_status != GlobalStatus.BLOCKED:
+            global_status = GlobalStatus.BLOCKED
 
         # Developer must not unilaterally finish the workflow; collapse any
         # such claim back to CONTINUE so only Planner/Tester can signal DONE.
@@ -145,6 +205,7 @@ class BaseAgent(ABC):
             global_status=global_status,
             lessons=lessons,
             raw_output=raw_output,
+            parse_error=parse_error,
         )
 
 
