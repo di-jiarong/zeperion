@@ -154,13 +154,34 @@ class TestPromptTemplate:
         assert "本地 Claude CLI 环境" in prompt
 
     def test_get_template_manager_singleton(self):
-        """Test global template manager is singleton."""
+        """``get_template_manager()`` (default dir) is cached per process."""
         manager1 = get_template_manager()
         manager2 = get_template_manager()
         assert manager1 is manager2
 
     def test_get_template_manager_custom_dir(self):
-        """Test global template manager with custom directory."""
+        """A custom ``templates_dir`` returns a one-shot manager.
+
+        The previous implementation stashed the custom-dir manager
+        into the cache, so a later ``get_template_manager(None)``
+        returned that custom (likely stale) manager instead of the
+        packaged one. Verify that's no longer the case: a custom-dir
+        call must NOT mutate the cache.
+        """
         custom_dir = Path("/tmp/custom_templates")
-        manager = get_template_manager(custom_dir)
-        assert manager.templates_dir == custom_dir
+        custom_manager = get_template_manager(custom_dir)
+        assert custom_manager.templates_dir == custom_dir
+
+        # The default-dir manager must still be the packaged one.
+        default_manager = get_template_manager()
+        assert default_manager is not custom_manager
+        assert default_manager.templates_dir != custom_dir
+
+    def test_custom_dir_calls_do_not_share_state(self):
+        """Two calls with different custom dirs must not contaminate each
+        other (the singleton-pollution bug rediscovered while wiring up
+        ``tester_verify_commands``)."""
+        a = get_template_manager(Path("/tmp/a"))
+        b = get_template_manager(Path("/tmp/b"))
+        assert a is not b
+        assert a.templates_dir != b.templates_dir

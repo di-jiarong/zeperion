@@ -153,6 +153,7 @@ class PromptTemplate:
         plan: str,
         dev_output: str,
         lessons: Optional[list[str]] = None,
+        verify_results: Optional[list] = None,
     ) -> str:
         """Render tester prompt.
 
@@ -161,6 +162,11 @@ class PromptTemplate:
             plan: Current plan from planner
             dev_output: Developer's output
             lessons: Lessons learned so far
+            verify_results: Outcomes of ``tester_verify_commands`` shell
+                runs (a list of :class:`zeperion.utils.verify.CommandResult`-
+                shaped objects). When non-empty the prompt instructs the
+                Tester to ground its verdict in these real exit codes /
+                stdout instead of reasoning over the Developer's text.
 
         Returns:
             Rendered tester prompt
@@ -171,25 +177,48 @@ class PromptTemplate:
             plan=plan,
             dev_output=dev_output,
             lessons=lessons or [],
+            verify_results=verify_results or [],
         )
 
 
-# Global instance for convenience
+# Cached default-dir manager (None = packaged templates dir).
+# Note we *only* cache the default-dir case. A custom-dir call always
+# builds a fresh PromptTemplate so two test cases that pass different
+# tmp_paths don't clobber each other's view of the singleton — and so
+# a later call with ``templates_dir=None`` doesn't accidentally inherit
+# whatever custom (and likely stale) dir the previous caller set. The
+# pollution this guards against was discovered while wiring up
+# ``tester_verify_commands`` tests: ``test_prompts.py`` set the
+# singleton to a tmp_path that pytest then deleted, and the next
+# default-dir call in another test file got a TemplateNotFound.
 _default_template_manager: Optional[PromptTemplate] = None
 
 
 def get_template_manager(templates_dir: Optional[Path] = None) -> PromptTemplate:
-    """Get or create the default template manager.
+    """Get the template manager for the given dir.
+
+    Behaviour:
+
+    * ``templates_dir=None`` returns a *cached* PromptTemplate pointing
+      at the packaged ``zeperion/prompts/templates`` directory. Cache
+      is per-process; cheap to rebuild but cheap to reuse too.
+    * ``templates_dir=<path>`` always builds a fresh PromptTemplate
+      and **does not** mutate the cache. This was the source of a
+      pre-existing test-pollution bug: the previous implementation
+      stashed the custom-dir manager into the cache, so a subsequent
+      ``get_template_manager(None)`` returned that custom (likely
+      stale) manager instead of the packaged one.
 
     Args:
-        templates_dir: Optional custom templates directory
+        templates_dir: Optional custom templates directory.
 
     Returns:
-        PromptTemplate instance
+        PromptTemplate instance.
     """
+    if templates_dir is not None:
+        return PromptTemplate(templates_dir)
+
     global _default_template_manager
-
-    if _default_template_manager is None or templates_dir is not None:
-        _default_template_manager = PromptTemplate(templates_dir)
-
+    if _default_template_manager is None:
+        _default_template_manager = PromptTemplate(None)
     return _default_template_manager
