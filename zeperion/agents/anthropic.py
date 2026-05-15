@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Iterable, Optional
 
 from anthropic import AsyncAnthropic
 
@@ -10,6 +10,38 @@ from zeperion.agents.base import AgentInvocationError, BaseAgent
 from zeperion.models import AgentOutput, AgentRole
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_text(content: Iterable[Any]) -> str:
+    """Concatenate text from every TextBlock in a Messages-API response.
+
+    The Messages API returns ``response.content`` as a list of typed
+    blocks. Most responses contain a single TextBlock and the original
+    code did ``content[0].text``. That breaks for **any** response that
+    leads with a non-text block, the most common case being:
+
+    * Extended-thinking responses (``ThinkingBlock`` first, then
+      ``TextBlock``) — affects real Claude Opus with thinking enabled.
+    * DeepSeek's Anthropic-compatible proxy when the upstream model is
+      a reasoning model (always emits ``ThinkingBlock`` first).
+    * Tool-use responses where the assistant emits a ``ToolUseBlock``
+      between text spans.
+
+    Walking every block and concatenating the ``.text`` of any block
+    that has one is robust to all of these without changing the
+    behaviour for plain single-text responses (one TextBlock → its
+    text, unchanged).
+
+    Returns the concatenated text, or an empty string when the response
+    contained zero text blocks (callers should treat that as an
+    invocation failure).
+    """
+    parts: list[str] = []
+    for block in content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
 
 
 class AnthropicAgent(BaseAgent):
@@ -78,7 +110,13 @@ class AnthropicAgent(BaseAgent):
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            raw_output = response.content[0].text
+            raw_output = _extract_text(response.content)
+            if not raw_output:
+                raise AgentInvocationError(
+                    f"{self.role.value}: response had no text blocks "
+                    f"(content types: "
+                    f"{[type(b).__name__ for b in response.content]})"
+                )
             logger.info(f"Received response: {len(raw_output)} chars")
             logger.debug(f"Raw output preview: {raw_output[:200]}...")
 

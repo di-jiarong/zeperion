@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from zeperion.agents import ClaudeCodeAgent
+from zeperion.agents.anthropic import _extract_text
 from zeperion.agents.base import _clean_pr_title
 from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
 
@@ -462,3 +463,66 @@ class TestCleanPRTitle:
         assert len(cleaned) <= 72
         assert cleaned.endswith("...")
         assert "  " not in cleaned
+
+
+class _Block:
+    """Minimal stand-in for anthropic SDK content blocks.
+
+    The real ``TextBlock`` / ``ThinkingBlock`` / ``ToolUseBlock`` are
+    Pydantic models from the ``anthropic`` package. For unit testing
+    ``_extract_text`` we only need duck-typed objects that expose (or
+    deliberately omit) a ``.text`` attribute, so we use a tiny
+    ad-hoc class instead of pulling in the SDK types.
+    """
+
+    def __init__(self, *, text: str | None = None, thinking: str | None = None):
+        # We intentionally only set the attribute when supplied —
+        # ``getattr(block, "text", None)`` is what the production
+        # code does, so a missing attribute is the right shape.
+        if text is not None:
+            self.text = text
+        if thinking is not None:
+            self.thinking = thinking
+
+
+class TestExtractTextBlock:
+    """``_extract_text`` must tolerate any non-text block leading the
+    response. This is a regression guard for the bug that surfaced
+    against DeepSeek's Anthropic-compatible proxy: extended-thinking
+    responses always start with a ThinkingBlock, and the original
+    ``response.content[0].text`` blew up with AttributeError. Real
+    Claude Opus with extended thinking enabled hits the same path.
+    """
+
+    def test_single_text_block_unchanged(self):
+        # The default, vanilla shape of every non-thinking response.
+        # Behaviour must not change for this case.
+        assert _extract_text([_Block(text="hello")]) == "hello"
+
+    def test_thinking_then_text_extracts_text(self):
+        # The original failure mode — ``content[0]`` was a ThinkingBlock
+        # with no ``.text`` attribute, raising AttributeError.
+        blocks = [_Block(thinking="reasoning..."), _Block(text="answer")]
+        assert _extract_text(blocks) == "answer"
+
+    def test_multiple_text_blocks_concatenated_in_order(self):
+        # Real Claude can split a long answer across multiple TextBlocks
+        # (especially mid-tool-use). Order must be preserved.
+        blocks = [
+            _Block(text="part one. "),
+            _Block(thinking="paused to think"),
+            _Block(text="part two."),
+        ]
+        assert _extract_text(blocks) == "part one. part two."
+
+    def test_no_text_blocks_returns_empty_string(self):
+        # Caller (``AnthropicAgent.invoke``) must distinguish an
+        # all-thinking response from a normal one and raise a clear
+        # AgentInvocationError. The helper itself just returns "".
+        assert _extract_text([_Block(thinking="all reasoning, no answer")]) == ""
+
+    def test_empty_text_block_skipped(self):
+        # Defensive against an SDK response whose TextBlock carries an
+        # empty string (e.g. mid-streaming truncation).
+        blocks = [_Block(text=""), _Block(text="real")]
+        assert _extract_text(blocks) == "real"
