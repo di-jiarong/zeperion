@@ -11,20 +11,77 @@ from zeperion.models import WorkflowConfig
 logger = logging.getLogger(__name__)
 
 
+# Path-shaped fields whose YAML values are *resolved against the config
+# file's parent directory* if they are relative. This is the contract
+# users intuitively expect: ``state_dir: .zeperion/state`` written into
+# ``/home/me/proj/.zeperion/config.yaml`` should refer to
+# ``/home/me/proj/.zeperion/state``, regardless of where the user
+# invoked ``zeperion run`` from.
+#
+# Before this fix the values were taken verbatim and resolved against
+# whatever process CWD happened to be — see live test Finding 2 in
+# ``examples/live-version-feature/NOTES.txt``: a unit-test fixture
+# wrote ``state_dir: .zeperion/state`` and silently shared state with
+# the developer's real ``/workspace/.zeperion/state`` whenever pytest
+# was invoked from /workspace.
+#
+# Absolute paths pass through unchanged so existing configs that
+# already used absolute paths keep working.
+_PATH_FIELDS_RELATIVE_TO_CONFIG: tuple[str, ...] = (
+    "requirement_file",
+    "state_dir",
+    "prompts_dir",
+    "project_dir",
+    "claude_cli_worktree_parent",
+)
+
+
+def _resolve_relative_paths(
+    config_dict: Dict[str, Any], config_dir: Path
+) -> Dict[str, Any]:
+    """Return a copy of ``config_dict`` with relative path fields anchored
+    to ``config_dir``.
+
+    Mutates a copy so the caller's input dict is untouched. ``None`` and
+    absolute path values are passed through; only string values that are
+    relative paths get rewritten.
+    """
+    resolved = dict(config_dict)
+    for field in _PATH_FIELDS_RELATIVE_TO_CONFIG:
+        value = resolved.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        candidate = Path(value)
+        if candidate.is_absolute():
+            continue
+        # ``str()`` because WorkflowConfig declares these as ``str``,
+        # not ``Path``; storing a Path would later break the YAML
+        # round-trip in save_config_to_yaml.
+        resolved[field] = str((config_dir / candidate).resolve())
+    return resolved
+
+
 def load_config_from_yaml(config_path: Path) -> WorkflowConfig:
     """
     Load workflow configuration from YAML file.
 
+    Path-shaped fields (``requirement_file``, ``state_dir``,
+    ``prompts_dir``, ``project_dir``, ``claude_cli_worktree_parent``)
+    that hold a *relative* path are resolved against ``config_path``'s
+    parent directory before construction. Absolute paths pass through
+    unchanged.
+
     Args:
-        config_path: Path to config YAML file
+        config_path: Path to config YAML file.
 
     Returns:
-        WorkflowConfig instance
+        WorkflowConfig instance.
 
     Raises:
-        FileNotFoundError: If config file doesn't exist
-        ValueError: If config is invalid
+        FileNotFoundError: If config file doesn't exist.
+        ValueError: If config is invalid.
     """
+    config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -35,6 +92,9 @@ def load_config_from_yaml(config_path: Path) -> WorkflowConfig:
         if not config_dict:
             raise ValueError("Config file is empty")
 
+        config_dict = _resolve_relative_paths(
+            config_dict, config_path.resolve().parent
+        )
         return WorkflowConfig(**config_dict)
 
     except yaml.YAMLError as e:
