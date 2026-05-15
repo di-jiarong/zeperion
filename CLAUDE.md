@@ -107,6 +107,35 @@ State ownership rules:
 parsing branches in concrete agents. If you need new fields, extend the parser
 and `AgentOutput` model together.
 
+### Required vs optional output fields
+
+`BaseAgent.parse_output` distinguishes "missing-but-tolerable" from
+"missing-is-a-bug" via two role sets defined on the class:
+
+* `_GLOBAL_STATUS_REQUIRED_ROLES = {PLANNER, TESTER}`
+* `_TEST_STATUS_REQUIRED_ROLES   = {TESTER}`
+
+When a role in those sets emits output without the corresponding field
+(or with an unrecognisable value), the parser populates `parse_error`
+on `AgentOutput` and forces `global_status=BLOCKED`. The Planner /
+Tester graph nodes then propagate `parse_error` to `state["last_error"]`
+and route directly to the `blocked` terminal. **Do not** reintroduce a
+silent default to `CONTINUE` here — it used to burn the entire
+`max_rounds` budget on a single malformed line. Developer remains
+optional because it never owns `global_status`.
+
+### `AnthropicAgent` does not modify files
+
+`AnthropicAgent.invoke` is a single `messages.create` call with no
+tool definitions, no file IO, no shell. It returns text. That text
+gets parsed and written to `*_output.txt` artifacts but **no source
+code is touched**. Operators wanting the workflow to actually edit
+project files must set the corresponding role's `*_agent_type` to
+`claude_code` (which shells out to the `claude` CLI; the CLI itself
+does the file writes). This used to be undocumented and was the most
+common source of "I ran zeperion and nothing changed in my repo"
+confusion.
+
 ## Prompt output contract (parsed by `SectionParser`)
 
 - **Planner**: `TASK_ID:`, `GLOBAL_STATUS: CONTINUE | DONE | BLOCKED`, `PLAN:`, `RISKS:`, `HANDOFF_TO_DEVELOPER:`, `LESSONS:`
@@ -174,6 +203,16 @@ Encoded in `zeperion/utils/github.py`:
   like `zeperion/prompts/templates`; use `tempfile` and packaged resources.
 - Don't make `Developer` set `GLOBAL_STATUS=DONE`. The parser strips that
   intentionally — adding it back in a graph node will recreate the bug.
+- Don't change `BaseAgent.parse_output` to default missing
+  `GLOBAL_STATUS` / `TEST_STATUS` for Planner / Tester back to
+  `CONTINUE` / `PENDING`. The required-field path exists specifically
+  to avoid burning a whole `max_rounds` budget on a single malformed
+  response.
+- Don't bring back `StateStorage.save_workflow_state` /
+  `load_workflow_state`. The multi-agent graph never wrote that JSON
+  file; the LangGraph SQLite checkpoint is the source of truth.
+- Don't claim in docs that `AnthropicAgent` writes files. It does not.
+  Use `claude_code` for any role that needs to modify the project.
 - Don't resurrect the bash harness on `main`. It lives on
   `legacy/bash-harness` and should stay there; the Python package is the
   single source of truth going forward.
