@@ -51,6 +51,7 @@ def _spawn_detached_run(
     resume: bool,
     thread_id: Optional[str],
     log_format: Optional[str],
+    from_thread: Optional[str] = None,
 ) -> None:
     """Re-invoke ``zeperion run`` in a detached child process.
 
@@ -110,6 +111,8 @@ def _spawn_detached_run(
         argv.append("--resume")
     if log_format:
         argv.extend(["--log-format", log_format])
+    if from_thread:
+        argv.extend(["--from-thread", from_thread])
 
     pid = spawn_detached(
         state_dir=state_dir,
@@ -332,6 +335,18 @@ def run(
             "``zeperion stop -t <thread_id>``."
         ),
     ),
+    from_thread: Optional[str] = typer.Option(
+        None,
+        "--from-thread",
+        help=(
+            "[pr_pipeline mode only] Name of a sibling multi_agent "
+            "thread whose Planner output should seed this PR run "
+            "(picks up PR_TITLE / TASK_ID for the commit subject and "
+            "PR title). When unset and ``--thread-id`` ends in "
+            "``-pr``, the trailing suffix is stripped automatically "
+            "(``foo-pr`` -> ``foo``)."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -352,6 +367,7 @@ def run(
             resume=resume,
             thread_id=thread_id,
             log_format=log_format,
+            from_thread=from_thread,
         )
         return
     if log_format:
@@ -407,6 +423,10 @@ def run(
 
     elif mode == "pr_pipeline":
         from zeperion.graphs import create_pr_pipeline_graph
+        from zeperion.graphs.pr_pipeline import (
+            derive_sibling_multi_agent_thread,
+            load_planner_handoff_from_sibling_thread,
+        )
         from zeperion.models import create_initial_pr_state
 
         if resume:
@@ -414,7 +434,47 @@ def run(
             initial_state = None
         else:
             console.print("[bold]Starting new PR pipeline[/bold]")
+            # Try to recover the Planner-emitted PR_TITLE / TASK_ID
+            # from a sibling multi_agent thread so the auto-commit
+            # subject and PR title aren't the generic
+            # "chore: zeperion automated commit" fallback.
+            #
+            # Precedence:
+            #   1. Explicit --from-thread <id> wins.
+            #   2. Otherwise, if --thread-id ends in "-pr", strip
+            #      the suffix and look there (the README's recommended
+            #      convention).
+            #   3. Otherwise, no handoff — fall through to the
+            #      pre-fix behaviour of branch-name PR title +
+            #      generic commit subject.
+            sibling = from_thread or derive_sibling_multi_agent_thread(thread_id)
+            handoff = {"pr_title": None, "task_id": None}
+            if sibling:
+                handoff = load_planner_handoff_from_sibling_thread(
+                    Path(config.state_dir), sibling
+                )
+                if handoff["pr_title"] or handoff["task_id"]:
+                    console.print(
+                        f"[dim]Recovered PR handoff from sibling thread "
+                        f"[cyan]{sibling}[/cyan]: "
+                        f"pr_title={handoff['pr_title']!r} "
+                        f"task_id={handoff['task_id']!r}[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"[dim]No planner handoff found at sibling "
+                        f"thread [cyan]{sibling}[/cyan]; "
+                        f"PR title/commit subject will fall back to "
+                        f"branch-name / generic.[/dim]"
+                    )
             initial_state = create_initial_pr_state(config)
+            # Patch the seed with whatever we recovered. We only set
+            # non-None values so we never clobber a downstream default
+            # with a missing handoff field.
+            if handoff["pr_title"]:
+                initial_state["pr_title"] = handoff["pr_title"]
+            if handoff["task_id"]:
+                initial_state["task_id"] = handoff["task_id"]
 
         def build_graph(checkpointer):
             return create_pr_pipeline_graph(config, checkpointer=checkpointer)
