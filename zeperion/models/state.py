@@ -233,6 +233,37 @@ class WorkflowConfig(BaseModel):
         ),
     )
 
+    # Shell commands the Tester runs *before* the LLM is invoked, so
+    # the agent's verdict is grounded in real test output instead of
+    # text-level reasoning over the Developer's diff. Each command
+    # runs in ``project_dir`` with the parent process env, output
+    # truncated to a safe size and injected into the Tester prompt.
+    # Empty list = legacy behaviour (Tester reasons over text only).
+    #
+    # Typical contents:
+    #
+    #   tester_verify_commands:
+    #     - pytest -q
+    #     - ruff check zeperion
+    tester_verify_commands: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Shell commands run before invoking the Tester LLM. Their "
+            "stdout/stderr/exit codes are injected into the Tester "
+            "prompt so verdicts are grounded in real test output."
+        ),
+    )
+    tester_verify_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Per-command wall-clock timeout for tester_verify_commands. "
+            "On overrun the process is SIGKILL'd and the result reports "
+            "timed_out=True; the workflow is not aborted (Tester then "
+            "reasons over the partial output)."
+        ),
+    )
+
     # GitHub PR Pipeline configuration
     github_repo: Optional[str] = Field(default=None, description="GitHub repo (owner/repo)")
     github_token: Optional[str] = Field(
