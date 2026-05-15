@@ -7,9 +7,37 @@ from typing import Any, Iterable, Optional
 from anthropic import AsyncAnthropic
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent
-from zeperion.models import AgentOutput, AgentRole
+from zeperion.models import AgentOutput, AgentRole, TokenUsage
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_usage(usage_obj: Any) -> Optional[TokenUsage]:
+    """Coerce the SDK's ``response.usage`` into a :class:`TokenUsage`.
+
+    The Anthropic Messages API exposes per-response token counts on a
+    Pydantic ``Usage`` model (``input_tokens``, ``output_tokens``, plus
+    optional ``cache_creation_input_tokens`` /
+    ``cache_read_input_tokens`` for prompt-caching users). DeepSeek's
+    Anthropic-compatible proxy emits the same shape (verified during
+    Phase 3 live tests). Older SDK versions or a stripped-down proxy
+    response can omit fields, so each lookup is wrapped in getattr.
+    Returns ``None`` only when the response carried no usage block at
+    all — that's a meaningful signal ("we don't know the cost") and
+    must not be conflated with "0 tokens".
+    """
+    if usage_obj is None:
+        return None
+    return TokenUsage(
+        input_tokens=getattr(usage_obj, "input_tokens", None),
+        output_tokens=getattr(usage_obj, "output_tokens", None),
+        cache_creation_input_tokens=getattr(
+            usage_obj, "cache_creation_input_tokens", None
+        ),
+        cache_read_input_tokens=getattr(
+            usage_obj, "cache_read_input_tokens", None
+        ),
+    )
 
 
 def _extract_text(content: Iterable[Any]) -> str:
@@ -120,7 +148,12 @@ class AnthropicAgent(BaseAgent):
             logger.info(f"Received response: {len(raw_output)} chars")
             logger.debug(f"Raw output preview: {raw_output[:200]}...")
 
-            return self.parse_output(raw_output)
+            output = self.parse_output(raw_output)
+            usage = _extract_usage(getattr(response, "usage", None))
+            if usage is not None:
+                # ``model_copy`` because AgentOutput is frozen.
+                output = output.model_copy(update={"usage": usage})
+            return output
 
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}")

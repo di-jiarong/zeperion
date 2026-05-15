@@ -287,6 +287,31 @@ class WorkflowConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class TokenUsage(BaseModel):
+    """Per-invocation token accounting from the underlying model API.
+
+    Populated by ``AnthropicAgent.invoke`` from the SDK's
+    ``response.usage`` object. ``ClaudeCodeAgent`` does not currently
+    surface usage (the ``claude --print`` CLI doesn't emit it on
+    stdout), so its invocations leave this as ``None`` on AgentOutput.
+
+    The fields mirror Anthropic's Messages API usage block, with all
+    fields optional so future model APIs that don't report cache stats
+    don't break parsing.
+    """
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
+    cache_read_input_tokens: Optional[int] = None
+
+    @property
+    def total_tokens(self) -> int:
+        """Best-effort sum of input + output tokens (None treated as 0)."""
+        return (self.input_tokens or 0) + (self.output_tokens or 0)
+
+    model_config = ConfigDict(frozen=True)
+
+
 class AgentOutput(BaseModel):
     """Parsed output from an agent."""
     task_id: Optional[str] = None
@@ -308,6 +333,11 @@ class AgentOutput(BaseModel):
     # the operator can see *why* the workflow tripped to BLOCKED instead
     # of seeing a silent infinite loop.
     parse_error: Optional[str] = Field(default=None)
+    # Per-invocation token usage from the model API. ``None`` for
+    # backends that don't report it (currently ClaudeCodeAgent).
+    # Aggregated by the graph into events.jsonl + the status panel
+    # so operators can see what a workflow actually cost.
+    usage: Optional[TokenUsage] = Field(default=None)
 
     model_config = ConfigDict(frozen=True)
 

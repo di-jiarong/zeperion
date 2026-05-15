@@ -12,6 +12,7 @@ from zeperion.utils.threading import default_thread_id
 from zeperion.utils.timeline import (
     derive_in_flight,
     read_events,
+    summarise,
 )
 from zeperion.utils.process import (
     logfile_path,
@@ -677,6 +678,29 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
                 f"running for [yellow]{agent.elapsed_human}[/yellow] "
                 f"[dim]({round_part}{fix_part})[/dim]"
             )
+
+    # Cost summary: tokens consumed across all agent_completed events
+    # that carried usage data. Only render when at least one
+    # invocation reported usage (otherwise we'd lie to the operator
+    # by showing "0 tokens" when we actually mean "unknown").
+    summary = summarise(events)
+    if summary["tokens_total"] is not None:
+        in_t = summary["tokens_input"]
+        out_t = summary["tokens_output"]
+        total_t = summary["tokens_total"]
+        n_known = summary["agent_calls_with_usage"]
+        n_total = summary["completed_agent_calls"]
+        coverage = (
+            f"[dim]({n_known}/{n_total} agent calls reported usage)[/dim]"
+            if n_known < n_total
+            else ""
+        )
+        status_lines.append("")
+        status_lines.append(
+            f"[bold]Tokens:[/bold] in [cyan]{in_t:,}[/cyan]  "
+            f"out [cyan]{out_t:,}[/cyan]  "
+            f"total [cyan]{total_t:,}[/cyan] {coverage}"
+        )
 
     if _fmt(workflow_state.get("global_status")) == "BLOCKED" or _fmt(
         workflow_state.get("phase")
