@@ -88,24 +88,32 @@ def get_default_config() -> Dict[str, Any]:
     """
     Get default configuration values.
 
+    NOTE: Numeric / behavioural defaults are sourced from
+    :class:`zeperion.models.state.WorkflowConfig` itself rather than
+    duplicated here, so a default change in the model can't drift out
+    of sync with what ``zeperion init`` writes. Previously ``max_rounds``
+    was hardcoded as ``50`` in this dict and silently overrode the
+    model's default.
+
     Returns:
-        Dictionary with default config values
+        Dictionary with default config values.
     """
+    defaults = WorkflowConfig.model_fields
     return {
         "requirement_file": "./requirement.txt",
-        "planner_model": "claude-opus-4-7",
-        "developer_model": "claude-sonnet-4-6",
-        "tester_model": "claude-opus-4-7",
-        "planner_agent_type": "anthropic",
-        "developer_agent_type": "anthropic",
-        "tester_agent_type": "anthropic",
-        "max_rounds": 50,
-        "max_fix_attempts": 3,
-        "project_dir": ".",
-        "state_dir": ".zeperion/state",
-        "claude_cli_tool": "claude",
-        "claude_cli_timeout": 600,
-        "claude_cli_use_worktree": False,
-        "claude_cli_worktree_parent": None,
-        "claude_cli_keep_worktree": True,
+        "planner_model": defaults["planner_model"].default,
+        "developer_model": defaults["developer_model"].default,
+        "tester_model": defaults["tester_model"].default,
+        "planner_agent_type": defaults["planner_agent_type"].default,
+        "developer_agent_type": defaults["developer_agent_type"].default,
+        "tester_agent_type": defaults["tester_agent_type"].default,
+        "max_rounds": defaults["max_rounds"].default,
+        "max_fix_attempts": defaults["max_fix_attempts"].default,
+        "project_dir": defaults["project_dir"].default,
+        "state_dir": defaults["state_dir"].default,
+        "claude_cli_tool": defaults["claude_cli_tool"].default,
+        "claude_cli_timeout": defaults["claude_cli_timeout"].default,
+        "claude_cli_use_worktree": defaults["claude_cli_use_worktree"].default,
+        "claude_cli_worktree_parent": defaults["claude_cli_worktree_parent"].default,
+        "claude_cli_keep_worktree": defaults["claude_cli_keep_worktree"].default,
     }

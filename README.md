@@ -4,6 +4,24 @@
 
 ZEPERION 是一个基于 LangGraph 的多智能体协作框架，用于自动化软件开发工作流。它通过 Planner、Developer、Tester 三个智能体的协作，实现从需求到代码交付的完整闭环，并支持自动化 GitHub PR 创建、审查和合并。
 
+> **⚠️ 重要：默认 `anthropic` agent 不会修改你的项目文件**
+>
+> `AnthropicAgent` 只发起一次 `messages.create` 调用并解析返回文本，
+> **不带任何工具能力**（没有 file IO，没有 shell）。在 `multi_agent`
+> 模式下使用默认配置时，Planner/Developer/Tester 三个 agent 只会产出
+> 文本到 `.zeperion/state/threads/<thread_id>/*_output.txt`，**不会写入
+> 任何源代码**。
+>
+> 如果想让 agent 真正改文件，必须把对应 role（通常是 Developer）切到
+> `claude_code` agent 类型 —— 它通过 `claude --print` CLI 调起 Claude Code，
+> 由 CLI 自身完成文件读写：
+>
+> ```yaml
+> developer_agent_type: claude_code
+> ```
+>
+> 这件事 README 之前没有讲清楚，请先看完这一段再决定怎么用。
+
 ## 特性
 
 - **类型安全**：基于 Pydantic 的状态模型，编译时类型检查
@@ -252,40 +270,47 @@ zeperion run --mode multi_agent --resume --thread-id auth-system
 
 ## 配置
 
-编辑 `.zeperion/config.yaml`：
+编辑 `.zeperion/config.yaml`。配置是一份**扁平**的 YAML（直接对应
+`WorkflowConfig` 的 Pydantic 字段），不要写嵌套的 `anthropic:` /
+`github:` block —— 加载器只会把顶层 key 透传给 `WorkflowConfig(**)`：
 
 ```yaml
-# Agent 类型选择
-agent_type: anthropic  # 可选: anthropic, claude_code
+# 入口需求
+requirement_file: ./requirement.txt
 
-# 模型配置
+# 三个 role 各自的 agent 后端：anthropic（API）或 claude_code（CLI）
+planner_agent_type: anthropic
+developer_agent_type: anthropic    # 想真正改文件请改成 claude_code
+tester_agent_type: anthropic
+
+# 模型
 planner_model: claude-opus-4-7
 developer_model: claude-sonnet-4-6
 tester_model: claude-opus-4-7
 
-# 工作流配置
-max_rounds: 50          # 最大循环次数
-max_fix_attempts: 3     # 最大修复尝试次数
+# 工作流
+max_rounds: 10                     # 默认 10；从 50 降下来防止解析失败时烧 token
+max_fix_attempts: 3
 
-# Anthropic API 配置（agent_type: anthropic）
-anthropic:
-  api_key: ${ANTHROPIC_API_KEY}  # 或直接填写
-  max_tokens: 4096
-  timeout: 600
+# Claude Code CLI 调谐（只有 developer/tester_agent_type=claude_code 时才用得上）
+# 实际 CLI flag 由 ClaudeCodeAgent 内部拼装（--print --model --add-dir
+# --permission-mode），无法通过配置覆盖。
+claude_cli_tool: claude
+claude_cli_timeout: 600
+claude_cli_use_worktree: false
+claude_cli_keep_worktree: true
 
-# Claude Code CLI 配置（agent_type: claude_code）
-claude_code:
-  cli_tool: claude
-  cli_model_flag: --model
-  cli_input_flag: --input
-  cli_output_flag: --output
-  timeout: 600
+# Anthropic API 凭据从环境变量读：
+#   export ANTHROPIC_API_KEY=sk-ant-...
+# 不要写在配置里。
 
-# GitHub 配置（PR Pipeline 模式）
-github:
-  token: ${GITHUB_TOKEN}     # GitHub Personal Access Token
-  repo: owner/repo-name      # 可选，自动从 git remote 检测
-  target_branch: main        # PR 目标分支
+# GitHub PR Pipeline（顶层字段，不是嵌套 block）
+github_repo: owner/repo-name       # 可选，未填则从 git remote 自动识别
+# github_token 从环境变量读：export GITHUB_TOKEN=ghp_...
+pr_target_branch: main             # 默认 main
+pr_auto_merge: true                # APPROVED 后是否启用 auto-merge
+codex_poll_minutes: 30
+max_pr_fixer_rounds: 5             # pr_fixer 最多自动改几轮，防 ping-pong
   
   # Codex 审查配置
   codex:
@@ -312,55 +337,21 @@ github:
 
 ### 自定义 Agent
 
-ZEPERION 支持多种 LLM 提供商，你可以实现自己的 Agent：
+仓库自带的 Agent 只有两种：
 
-```python
-from zeperion.agents import BaseAgent, AgentOutput
-from zeperion.models import AgentRole
+- `AnthropicAgent` — 直接调 Anthropic Messages API。**不带工具能力，
+  只产出文本**（见顶部黄牌）。适合 Planner / Tester。
+- `ClaudeCodeAgent` — 通过 subprocess 调用 `claude --print` CLI。
+  CLI 自身可读写文件，是 Developer 真正能"改代码"的唯一路径。
 
-class OpenAIAgent(BaseAgent):
-    """使用 OpenAI API"""
-    
-    def __init__(self, role: AgentRole, model: str, api_key: str):
-        super().__init__(role, model)
-        self.client = openai.AsyncOpenAI(api_key=api_key)
-    
-    async def invoke(self, prompt: str, session_id=None) -> AgentOutput:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw_output = response.choices[0].message.content
-        return self.parse_output(raw_output)
-    
-    def parse_output(self, raw_output: str) -> AgentOutput:
-        from zeperion.parsers import SectionParser
-        return SectionParser.parse(raw_output, self.role)
+要自己接其他后端（OpenAI / Gemini / Ollama / Azure 等），继承
+`BaseAgent` 并实现 `invoke()`，复用 `self.parse_output(raw)` 即可
+得到与内置 agent 一致的字段解析（含本仓库对 Planner/Tester 必填字段
+的 BLOCKED 行为）。具体写法见 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)。
 
-
-class OllamaAgent(BaseAgent):
-    """使用本地 Ollama"""
-    
-    async def invoke(self, prompt: str, session_id=None) -> AgentOutput:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "http://localhost:11434/api/generate",
-                json={"model": self.model, "prompt": prompt}
-            ) as resp:
-                data = await resp.json()
-                return self.parse_output(data["response"])
-```
-
-**内置 Agent**：
-- `AnthropicAgent` - Anthropic API（推荐）
-- `ClaudeCodeAgent` - Claude Code CLI
-
-**第三方 Agent 示例**：
-- OpenAI GPT-4
-- Google Gemini
-- 本地 Llama/Ollama
-- Azure OpenAI
+> 历史版本的 README 在这里贴过 `OpenAIAgent` / `OllamaAgent` 的"示例"，
+> 但仓库里**并没有**这些实现，会误导用户以为安装即用。本节已收回，
+> 等真有人实现并提交时再恢复。
 
 ### 自定义工作流
 
