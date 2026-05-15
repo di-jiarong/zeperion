@@ -1,0 +1,13 @@
+TEST_STATUS: PASS
+GLOBAL_STATUS: DONE
+
+TEST_CASES:
+- POST /register 正常路径：PASS
+- POST /register 重复 email：PASS（返回 409）
+- 密码字段在 DB 中已 bcrypt 哈希：PASS
+- RateLimiter 内存实现：PASS（5 次/分钟阈值生效）
+
+BUGS: NONE
+
+LESSONS:
+- 第一轮的 P3 被拆到第二轮独立做，节奏更顺；下次直接这样规划。

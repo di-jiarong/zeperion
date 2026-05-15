@@ -1,252 +1,111 @@
 # 示例：用户认证系统
 
-这是一个使用 ZEPERION 开发用户认证系统的完整示例。
+这个目录是 ZEPERION 的一个**可复现端到端示例**：跑一次 multi-agent
+流程，把它真实写到磁盘上的所有产物（每轮的 planner / developer /
+tester 输出、`events.jsonl`、`lessons_learned.txt`）原样保存到
+`transcript/` 子目录里。
 
-## 需求
+> 之前这个示例 README 列了一份"理想化"的预期产出（包括 `src/auth/main.py`
+> 等源码文件）—— 那是误导。默认的 `anthropic` agent 没有任何工具能力，
+> 不会写任何源代码。本次更新把它改成一份**真实跑出来的样子**，包括
+> 测试失败 → 修复 → 通过 → 进入下一轮 → 完成的完整循环。
+> 详见仓库根目录 `README.md` 顶部的黄牌警告。
 
-实现一个用户认证系统，包括：
-1. 用户注册（邮箱 + 密码）
-2. 用户登录（JWT token）
-3. 密码加密存储（bcrypt）
-4. 登录失败限流（5次/分钟）
+## 目录结构
 
-## 步骤
+```
+examples/auth-system/
+├── README.md                    # 本文件
+├── config.yaml                  # 扁平 ZEPERION 配置（注意：旧版的嵌套写法已废弃）
+├── requirement.txt              # 输入需求
+├── run_demo.py                  # 复现脚本：用 FakeAgent 跑一次完整流程
+└── transcript/                  # run_demo.py 的产出，commit 进仓库
+    ├── lessons_learned.txt      # 跨轮经验沉淀
+    ├── threads/demo/            # "最新一份"产出（latest snapshot）
+    │   ├── planner_output.txt
+    │   ├── developer_output.txt
+    │   └── tester_output.txt
+    └── runs/demo/               # 每轮 / 每次 fix 的归档产物
+        ├── events.jsonl                       # 结构化事件流
+        ├── round_001_planner.txt
+        ├── round_001_developer.txt
+        ├── round_001_tester.txt               # FAIL
+        ├── round_001_developer_fix_1.txt      # 修复
+        ├── round_001_tester_fix_1.txt         # PASS
+        ├── round_002_planner.txt
+        ├── round_002_developer.txt
+        └── round_002_tester.txt               # PASS + GLOBAL_STATUS=DONE
+```
 
-### 1. 初始化项目
+## 这次"跑"的故事
+
+`run_demo.py` 用一个 `FakeAgent` 喂 8 段预先写好的 LLM 输出（覆盖 2 轮
++ 1 次 round 1 的 fix attempt），跑通了 ZEPERION 真实的状态机：
+
+| 步骤 | 角色 | 关键产出 |
+|------|------|---------|
+| Round 1 | Planner | 拆出 P1/P2/P3，emit `TASK_ID=auth_v1_bootstrap`、`PR_TITLE`、`GLOBAL_STATUS=CONTINUE` |
+| Round 1 | Developer | 报告写了 `app/security.py` 等文件 |
+| Round 1 | Tester | `TEST_STATUS=FAIL`，报告 `created_at` 默认值缺失 + `verify_password` 错误返回 |
+| Round 1 fix | Developer | 修两处 bug |
+| Round 1 fix | Tester | `TEST_STATUS=PASS` |
+| Round 2 | Planner | 进入下一组任务（注册 API + 限流 stub） |
+| Round 2 | Developer | 报告实现完成 |
+| Round 2 | Tester | `TEST_STATUS=PASS`, `GLOBAL_STATUS=DONE` —— 流程结束 |
+
+最终 state：
+
+```
+phase: completed
+test_status: PASS
+global_status: DONE
+```
+
+注意 Developer 的产出**只是文本**——没有 `app/security.py` 真正生成。
+要让 Developer 能改你项目里的文件，必须在 `config.yaml` 里把
+`developer_agent_type` 改成 `claude_code`，由 `claude` CLI 自己完成 IO。
+
+## 如何复现
 
 ```bash
-mkdir auth-system
-cd auth-system
-zeperion init
+cd examples/auth-system
+python3 run_demo.py
 ```
 
-### 2. 编写需求文件
+脚本会清空并重写 `transcript/` 目录。本次提交里的 `transcript/` 内容
+就是这条命令的产物，跨机器跑结果应该是 byte-identical（FakeAgent 是
+确定性的，时间戳除外）。
 
-编辑 `requirement.txt`：
+## 想跑一次"真的"
 
-```
-实现一个用户认证系统，包括：
-
-功能需求：
-1. 用户注册
-   - 接受邮箱和密码
-   - 邮箱格式验证
-   - 密码强度检查（至少8位，包含大小写字母和数字）
-   - 密码使用 bcrypt 加密存储
-   - 返回用户 ID
-
-2. 用户登录
-   - 接受邮箱和密码
-   - 验证凭据
-   - 生成 JWT token（有效期 24 小时）
-   - 返回 token 和用户信息
-
-3. 登录限流
-   - 同一 IP 最多 5 次失败尝试/分钟
-   - 超过限制返回 429 错误
-   - 成功登录后重置计数
-
-技术栈：
-- Python 3.11+
-- FastAPI
-- SQLAlchemy
-- bcrypt
-- PyJWT
-- Redis（限流）
-
-验收标准：
-- 所有 API 有单元测试
-- 密码不以明文存储
-- JWT token 可验证
-- 限流机制生效
-```
-
-### 3. 配置工作流
-
-编辑 `.zeperion/config.yaml`：
-
-```yaml
-models:
-  planner: claude-opus-4-7
-  developer: claude-sonnet-4-6
-  tester: claude-opus-4-7
-
-workflow:
-  max_rounds: 30
-  max_fix_attempts: 3
-
-cli:
-  command: claude
-  model_flag: --model
-  resume_flag: --resume
-  timeout: 600
-```
-
-### 4. 运行工作流
+如果你有 Anthropic API key 并且想看真实的 LLM 跑：
 
 ```bash
-zeperion run
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 在你自己的项目目录里（不是 examples/auth-system）
+cd my-real-project
+zeperion init                       # 生成 .zeperion/config.yaml + requirement.txt
+$EDITOR requirement.txt             # 写需求
+$EDITOR .zeperion/config.yaml       # 把 developer_agent_type 改成 claude_code
+zeperion run --mode multi_agent --thread-id auth-system
+zeperion status --thread-id auth-system
 ```
 
-## 预期输出
+## 想自动开 PR
 
-### Round 1: Planning
-
-Planner 会输出：
-
-```
-TASK_ID: auth_system_v1
-GLOBAL_STATUS: CONTINUE
-
-PLAN:
-- [P1] 搭建项目结构（FastAPI + SQLAlchemy）
-- [P2] 实现用户模型和数据库表
-- [P3] 实现密码加密工具（bcrypt）
-- [P4] 实现 JWT token 生成和验证
-- [P5] 实现注册 API
-- [P6] 实现登录 API
-- [P7] 实现 Redis 限流中间件
-- [P8] 编写单元测试
-
-RISKS:
-- bcrypt 性能可能影响响应时间
-- Redis 连接失败需要降级方案
-
-HANDOFF_TO_DEVELOPER:
-- 本轮先实现 P1-P4（基础设施）
-- 创建 src/auth/ 目录结构
-- 配置数据库连接
-```
-
-### Round 2: Development
-
-Developer 会创建：
-
-```
-src/
-├── auth/
-│   ├── __init__.py
-│   ├── models.py       # User 模型
-│   ├── schemas.py      # Pydantic schemas
-│   ├── security.py     # 密码加密、JWT
-│   ├── database.py     # 数据库配置
-│   └── main.py         # FastAPI app
-├── tests/
-│   ├── test_security.py
-│   └── test_models.py
-└── requirements.txt
-```
-
-### Round 3: Testing
-
-Tester 会验证：
-
-```
-TEST_STATUS: PASS
-
-TEST_CASES:
-- 密码加密：PASS（bcrypt 正确使用）
-- JWT 生成：PASS（token 可验证）
-- 数据库模型：PASS（表结构正确）
-
-BUGS: NONE
-```
-
-### Round 4-6: API 实现
-
-继续实现注册、登录 API 和限流功能。
-
-### Final Round: 完成
-
-```
-GLOBAL_STATUS: DONE
-
-所有功能已实现并通过测试：
-✅ 用户注册 API
-✅ 用户登录 API
-✅ 密码 bcrypt 加密
-✅ JWT token 认证
-✅ Redis 限流
-✅ 单元测试覆盖率 > 90%
-```
-
-## 查看结果
+跑完 multi_agent 之后：
 
 ```bash
-# 查看生成的代码
-ls -la src/auth/
-
-# 运行测试
-pytest tests/
-
-# 启动服务
-uvicorn src.auth.main:app --reload
-
-# 测试 API
-curl -X POST http://localhost:8000/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "SecurePass123"}'
+zeperion run --mode pr_pipeline --thread-id auth-system-pr
 ```
 
-## 中断恢复
+注意：PR Pipeline 默认 `pr_target_branch=main`、`pr_auto_merge=true`，
+按需在 `config.yaml` 里调。
 
-如果工作流中断：
+## 旧版本的 README 怎么了
 
-```bash
-# 查看运行历史
-zeperion status
-
-# 恢复特定运行
-zeperion run --resume <run_id>
-```
-
-## 自定义调整
-
-### 修改需求
-
-编辑 `requirement.txt` 添加新需求：
-
-```
-4. 添加邮箱验证
-   - 注册后发送验证邮件
-   - 验证链接 24 小时有效
-   - 未验证用户不能登录
-```
-
-然后重新运行：
-
-```bash
-zeperion run
-```
-
-### 调整模型
-
-如果 Developer 太慢，可以降级：
-
-```yaml
-models:
-  developer: claude-haiku-4-5  # 更快但能力稍弱
-```
-
-## 经验总结
-
-从这个示例中学到的经验（会自动记录到 `lessons_learned.txt`）：
-
-```
-- bcrypt 的 cost factor 设为 12 平衡安全和性能
-- JWT secret 必须从环境变量读取，不能硬编码
-- Redis 连接失败时应降级到内存限流
-- 单元测试应 mock 外部依赖（数据库、Redis）
-- FastAPI 的依赖注入适合实现认证中间件
-```
-
-## 下一步
-
-- 添加 OAuth2 登录（Google、GitHub）
-- 实现双因素认证（2FA）
-- 添加用户权限系统（RBAC）
-- 部署到生产环境
-
-## 完整代码
-
-完整的示例代码可在 `examples/auth-system/` 目录中找到。
+历史 README 在这里贴过 8 步幻想式的预期输出，包括 ZEPERION 自动生成
+`src/auth/main.py` 等文件、跑 alembic、`uvicorn ... --reload` 起服务
+的整套示意。**那些都不会发生**：默认的 anthropic 后端只产生文本。
+保留那种 README 是在骗自己。本次替换为真实可复现的产物。

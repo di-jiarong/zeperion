@@ -1,0 +1,19 @@
+TEST_STATUS: FAIL
+GLOBAL_STATUS: CONTINUE
+
+TEST_CASES:
+- bcrypt round-trip：PASS
+- JWT 编解码：PASS
+- User 表迁移：FAIL（缺少 created_at 默认值）
+- security.verify_password 错误密码场景：FAIL（返回 None，应该返回 False）
+
+BUGS:
+- app/models.py: User.created_at 没设 server_default=func.now()，alembic 升级时报错。
+- app/security.py: verify_password 的失败分支返回 None 而不是 False，调用方会被 truthy 判断坑。
+
+FIX_REQUEST:
+- 修复 User.created_at 默认值。
+- 让 verify_password 在所有失败分支都明确 ``return False``。
+
+LESSONS:
+- SQLAlchemy 的 created_at 必须用 server_default 而不是 Python-side default，否则 alembic 不识别。

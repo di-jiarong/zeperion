@@ -1,0 +1,14 @@
+GLOBAL_STATUS: CONTINUE
+
+CHANGES:
+- 新增 app/__init__.py、app/models.py（User 表定义）、app/security.py（bcrypt + JWT）。
+- 新增 tests/test_security.py，覆盖 bcrypt 哈希校验和 JWT 编解码。
+
+VERIFY_HINTS:
+- pytest tests/test_security.py 应该全绿。
+- alembic revision --autogenerate -m "init users" 不应报错。
+
+BLOCKERS: NONE
+
+LESSONS:
+- 用 passlib[bcrypt] 而不是裸 bcrypt：自带版本兼容层，省去 deprecation 噪声。

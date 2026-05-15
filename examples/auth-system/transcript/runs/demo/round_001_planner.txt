@@ -1,0 +1,19 @@
+TASK_ID: auth_v1_bootstrap
+PR_TITLE: feat: bootstrap user-auth project (registration + bcrypt + JWT)
+GLOBAL_STATUS: CONTINUE
+
+PLAN:
+- [P1] 搭建 FastAPI 项目骨架 + SQLAlchemy User 模型，验收：``alembic upgrade head`` 生效。
+- [P2] 实现密码 bcrypt 加密 + JWT 工具函数，验收：``pytest tests/test_security.py`` 通过。
+- [P3] 实现 ``POST /register`` API，验收：注册返回 user_id 且 DB 中密码字段非明文。
+
+RISKS:
+- bcrypt cost factor 过大会拖慢 register API。
+- JWT secret 必须从环境变量读，不能硬编码到代码里。
+
+HANDOFF_TO_DEVELOPER:
+- 本轮完成 P1+P2，``POST /register`` 留到下一轮再做。
+- 输出：``app/__init__.py``、``app/models.py``、``app/security.py``、``tests/test_security.py``。
+
+LESSONS:
+- 第一轮先打地基，不要急着做 API；登录 / 限流是更难的部分。

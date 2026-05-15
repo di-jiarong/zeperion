@@ -1,0 +1,16 @@
+TASK_ID: auth_v1_register_endpoint
+PR_TITLE: feat: add POST /register with rate-limited login skeleton
+GLOBAL_STATUS: CONTINUE
+
+PLAN:
+- [P1] 实现 POST /register（接收 email+password，写库，返回 user_id）。
+- [P2] 加 fastapi-limiter 中间件 skeleton（限流 5/min，但先 stub Redis）。
+
+RISKS:
+- 真接 Redis 在本地环境不一定可用，先做接口对齐。
+
+HANDOFF_TO_DEVELOPER:
+- 本轮完成 P1+P2 的 stub，POST /login 留到下一轮。
+
+LESSONS:
+- 限流先做接口和测试 stub，不要在第一轮接真实 Redis。
