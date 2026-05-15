@@ -490,21 +490,18 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
     thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
     storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
 
-    # 1) Prefer the LangGraph checkpoint as the source of truth. The
-    #    legacy ``workflow_state.json`` was never actually written by
-    #    the multi-agent graph (only the PR pipeline writes its own
-    #    pipeline_state.json), so relying on it caused "No workflow
-    #    state found" even mid-run. The checkpoint DB is authoritative.
+    # The LangGraph checkpoint is the single source of truth for workflow
+    # state. The previous fallback to ``storage.load_workflow_state()``
+    # was dead code — the multi-agent graph never wrote that JSON file
+    # in the first place — and has been removed along with the unused
+    # ``StateStorage.save_workflow_state``/``load_workflow_state``
+    # helpers.
     workflow_state = _load_workflow_state_from_checkpoint(
         Path(config.state_dir), thread_id
     )
-    # 2) Backward compat: a legacy ``workflow_state.json`` (if any old
-    #    run wrote one) is still respected.
-    if not workflow_state:
-        workflow_state = storage.load_workflow_state()
 
-    # 3) Last resort: even if there's no state at all, ``events.jsonl``
-    #    often has enough to show the user "yes, work happened here".
+    # When even the checkpoint is empty, ``events.jsonl`` often still
+    # has enough breadcrumbs to show the user "yes, work happened here".
     events = read_events(Path(config.state_dir), thread_id)
 
     if not workflow_state and not events:

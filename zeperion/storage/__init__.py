@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from zeperion.models import WorkflowState
 from zeperion.utils.time import iso_now, utc_strftime
 
 logger = logging.getLogger(__name__)
@@ -42,51 +41,19 @@ class StateStorage:
         else:
             self.thread_dir = self.state_dir
 
-        # State file paths
-        self.workflow_state_file = self.thread_dir / "workflow_state.json"
+        # State file paths.
+        #
+        # ``workflow_state.json`` is intentionally absent: the multi-agent
+        # graph never wrote it (the LangGraph SQLite checkpoint is the
+        # source of truth) and the previous helpers were dead code. A
+        # legacy file left behind by an old install is still wiped by
+        # ``clear_state`` below as best-effort cleanup.
         self.pipeline_state_file = self.thread_dir / "pipeline_state.json"
         self.planner_output_file = self.thread_dir / "planner_output.txt"
         self.developer_output_file = self.thread_dir / "developer_output.txt"
         self.tester_output_file = self.thread_dir / "tester_output.txt"
         self.lessons_file = self.state_dir / "lessons_learned.txt"
         self.runs_dir = self.state_dir / "runs"
-
-    def save_workflow_state(self, state: WorkflowState) -> None:
-        """
-        Save workflow state to JSON.
-
-        Args:
-            state: Workflow state to save
-        """
-        # Convert enums to strings for JSON serialization
-        serializable_state = {}
-        for key, value in state.items():
-            if hasattr(value, "value"):  # Enum
-                serializable_state[key] = value.value
-            else:
-                serializable_state[key] = value
-
-        self.workflow_state_file.write_text(
-            json.dumps(serializable_state, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        logger.debug(f"Saved workflow state to {self.workflow_state_file}")
-
-    def load_workflow_state(self) -> Optional[dict]:
-        """
-        Load workflow state from JSON.
-
-        Returns:
-            Workflow state dict or None if not found
-        """
-        if not self.workflow_state_file.exists():
-            return None
-
-        try:
-            return json.loads(self.workflow_state_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to load workflow state: {e}")
-            return None
 
     def save_pipeline_state(self, state: dict) -> None:
         """Persist PR pipeline state to its own JSON file."""
@@ -222,9 +189,15 @@ class StateStorage:
         return lessons
 
     def clear_state(self) -> None:
-        """Clear all state files except lessons."""
+        """Clear all state files except lessons.
+
+        Best-effort wipes a legacy ``workflow_state.json`` if one is
+        still on disk from an older install — the file is no longer
+        produced by the current code.
+        """
+        legacy_workflow_state = self.thread_dir / "workflow_state.json"
         for file in [
-            self.workflow_state_file,
+            legacy_workflow_state,
             self.pipeline_state_file,
             self.planner_output_file,
             self.developer_output_file,

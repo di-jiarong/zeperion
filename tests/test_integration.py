@@ -120,21 +120,6 @@ def mock_agent_outputs():
 class TestStateStorage:
     """Test state storage functionality."""
 
-    def test_save_and_load_workflow_state(self, temp_project_dir, test_config):
-        """Test saving and loading workflow state."""
-        storage = StateStorage(Path(test_config.state_dir))
-        initial_state = create_initial_state(test_config)
-
-        # Save state
-        storage.save_workflow_state(initial_state)
-
-        # Load state
-        loaded_state = storage.load_workflow_state()
-
-        assert loaded_state is not None
-        assert loaded_state["round"] == 1
-        assert loaded_state["fix_attempt"] == 0
-
     def test_save_and_load_agent_output(self, temp_project_dir, test_config):
         """Test saving and loading agent outputs."""
         storage = StateStorage(Path(test_config.state_dir))
