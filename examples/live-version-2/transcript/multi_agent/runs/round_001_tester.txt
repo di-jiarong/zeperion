@@ -1,0 +1,10 @@
+TEST_STATUS: PASS
+GLOBAL_STATUS: DONE
+TEST_CASES:  
+- 用例1（CLI flag 注册）：`zeperion run --help | grep -q -- '--no-pr-pipeline'`，exit code 0，成功检测到 flag。  
+- 用例2（Smoke 测试）：`pytest -q tests/test_cli_smoke.py`，exit code 0，所有 11 个测试通过，包含 `TestNoPRPipelineFlag`。
+BUGS: NONE
+FIX_REQUEST: NONE
+LESSONS:  
+- 验收标准中要求集成测试的存在但未纳入本次实际执行的命令集合；计划指定的验证命令已全部通过，说明关键路径合规。  
+- 若后续需要全量验证，建议在验收命令中显式添加集成测试执行 `pytest -q tests/test_integration.py`。

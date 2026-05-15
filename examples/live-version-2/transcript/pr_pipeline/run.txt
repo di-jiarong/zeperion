@@ -1,0 +1,29 @@
+Loading config: .zeperion/config.yaml
+Mode: pr_pipeline
+Thread ID: live2-pr
+Starting new PR pipeline
+Recovered PR handoff from sibling thread live2: pr_title='feat: add 
+--no-pr-pipeline flag to zeperion run' task_id='task_add_no_pr_pipeline_flag'
+
+Starting workflow execution...
+
+2026-05-15 07:07:01,709 [INFO] zeperion.graphs.pr_pipeline: Creating PR Pipeline graph
+2026-05-15 07:07:01,719 [INFO] zeperion.graphs.pr_pipeline: Validating Git and GitHub environment
+2026-05-15 07:07:01,751 [INFO] zeperion.graphs.pr_pipeline: Auto-detected GitHub repo: di-jiarong/zeperion
+2026-05-15 07:07:01,751 [INFO] zeperion.graphs.pr_pipeline: Validated: branch=cursor/zeperion-live-test-2-43a2, repo=di-jiarong/zeperion
+→ validate_git
+
+2026-05-15 07:07:01,752 [INFO] zeperion.graphs.pr_pipeline: Committing changes
+2026-05-15 07:07:01,757 [INFO] zeperion.graphs.pr_pipeline: No changes to commit, using existing branch state
+→ commit_changes
+
+2026-05-15 07:07:01,757 [INFO] zeperion.graphs.pr_pipeline: Pushing branch: cursor/zeperion-live-test-2-43a2
+2026-05-15 07:07:01,991 [INFO] zeperion.graphs.pr_pipeline: Pushed cursor/zeperion-live-test-2-43a2 to origin
+→ push_branch
+
+2026-05-15 07:07:01,992 [INFO] zeperion.graphs.pr_pipeline: Creating/updating PR: cursor/zeperion-live-test-2-43a2 -> dev
+2026-05-15 07:07:02,070 [INFO] zeperion.graphs.pr_pipeline: Creating new PR: feat: add --no-pr-pipeline flag to zeperion run
+
+✗ Workflow failed: gh command failed: HTTP 401: Bad credentials 
+(https://api.github.com/graphql)
+Try authenticating with:  gh auth login

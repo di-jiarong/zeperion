@@ -1,0 +1,18 @@
+TASK_ID: task_add_no_pr_pipeline_flag
+PR_TITLE: feat: add --no-pr-pipeline flag to zeperion run
+GLOBAL_STATUS: CONTINUE
+PLAN:
+- [P1] 在 `zeperion/graphs/multi_agent.py` 的 `create_multi_agent_graph` 添加 keyword-only 参数 `disable_pr_pipeline: bool = False`，并在 `route_after_tester` 内使用该参数：若为 True，无论 GitHub 配置如何，路由到 `"end"`。编写或扩展相关单元测试覆盖路由分支。
+- [P2] 在 `zeperion/cli.py` 的 `run` 命令添加 `--no-pr-pipeline` 布尔 option（`no_pr_pipeline: bool = typer.Option(False, "--no-pr-pipeline")`），并传入 `create_multi_agent_graph`。
+- [P3] 在 CLI 的 `_spawn_detached_run` 函数内，将 `--no-pr-pipeline` 转发到子进程命令参数中（若原始调用传入该 flag）。
+- [P4] 在 `tests/test_cli_smoke.py` 新增 `TestNoPRPipelineFlag` 类，用例验证 `zeperion run --help` 包含 `--no-pr-pipeline`。
+- [P5] 在 `tests/test_integration.py` 添加集成测试：使用 `FakeAgent` 运行 multi_agent，配置 `github_token="dummy"` 且 `disable_pr_pipeline=True`，断言最终状态不包含 `pr_phase` 字段（即未进入 PR pipeline）。
+RISKS:
+- 修改 `route_after_tester` 逻辑时可能无意中破坏原有条件分支（如 token 为空仍正确路由到 end）。
+- CLI 参数转发在 detach 模式下的实现可能因 `_spawn_detached_run` 参数构造方式不同而遗漏。
+HANDOFF_TO_DEVELOPER:
+- 实现顺序建议按 P1→P2→P3→P4→P5，每步完成后执行相关测试。
+- 修改文件：`zeperion/graphs/multi_agent.py`, `zeperion/cli.py`, `tests/test_cli_smoke.py`, `tests/test_integration.py`（或新建 `tests/test_no_pr_pipeline.py`）。
+- 完成后运行 `pytest -q` 确认全部通过，并手动执行 `zeperion run --help` 检查 flag 出现。
+LESSONS:
+- （本轮无历史经验）

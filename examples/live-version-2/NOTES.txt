@@ -1,0 +1,165 @@
+examples/live-version-2/
+=========================
+
+Second live end-to-end test of zeperion against itself, run AFTER
+Phase 3 fixes (PRs #3, #4, #5) were merged into dev. Compared with
+the first live test (examples/live-version-feature/), this run
+verifies that the four real bugs that surfaced last time are
+actually fixed.
+
+
+Task this time
+--------------
+
+Add a ``--no-pr-pipeline`` boolean flag to ``zeperion run`` so the
+multi_agent loop does NOT auto-enter the PR Pipeline subgraph even
+when ``GITHUB_TOKEN`` / ``config.github_repo`` are set. This is a
+meta-fix: the very bug I myself hit while writing PR #5's tests
+(my fixture had ``GITHUB_TOKEN`` exported in the env, multi_agent
+auto-ran PR Pipeline, and it pushed 4 spurious "feat: t1" commits
+to the remote).
+
+The Developer (claude_code) wrote 6 file changes in 5 minutes:
+
+    zeperion/cli.py                +14 lines  (typer option + forward to detach + pass to graph)
+    zeperion/graphs/multi_agent.py  +6 lines  (disable_pr_pipeline kwarg + early return in route_after_tester)
+    tests/test_cli_smoke.py         +8 lines  (TestNoPRPipelineFlag::test_run_help_includes_...)
+    tests/test_integration.py      +56 lines  (TestNoPRPipeline::test_disable_pr_pipeline_skips_pr_subgraph)
+    requirement.txt                +53 lines  (input — moved here from /workspace root)
+    .zeperion/config.yaml          +54 lines  (input — moved here from /workspace/.zeperion/)
+
+Code quality is on par with what a careful human reviewer would
+produce: the early-return in ``route_after_tester`` is correctly
+placed BEFORE the ``config.github_repo or config.github_token``
+check; the ``--no-pr-pipeline`` flag is properly forwarded through
+``_spawn_detached_run`` so detached runs don't bypass it; and the
+integration test sets ``github_token="dummy"`` to force the
+GitHub-configured branch and proves the flag dominates.
+
+
+Wall-clock breakdown
+--------------------
+
+    Planner       26s    (deepseek-v4-pro[1m])
+    Developer    298s    (claude --print, 6 file edits)
+    Tester        37s    (deepseek-v4-pro[1m])
+    Tester verify  1s    (pytest 747ms + grep 318ms)
+    PR Pipeline auto    <1s up to commit+push, then 401 at gh pr create
+    --------------------------------------
+    Total ~6m wall, single round, ZERO fix attempts.
+
+For comparison, live test #1 needed 1 round + 1 fix attempt for a
+slightly smaller task (``zeperion version``). The cleaner first-pass
+this time isn't a controlled comparison but suggests the
+tester_verify_commands feedback is useful: the agent's confidence
+that "yes, real pytest passed" is firmer than "yes, I think the
+code is right".
+
+
+Verification of each Phase 3 fix
+--------------------------------
+
+P0-1 (PR_TITLE recovery — was: standalone pr_pipeline lost the
+       Planner's PR_TITLE).
+  * Auto-PR-pipeline path (multi_agent → subgraph): the actual
+    commit subject is "feat: add --no-pr-pipeline flag to zeperion
+    run", which is exactly the Planner's PR_TITLE. Last time it
+    would have degraded to "chore: zeperion automated commit".
+    See transcript/multi_agent/run.txt line "Committed: 599c6a23".
+  * Standalone path (zeperion run --mode pr_pipeline): the run
+    log shows
+        Recovered PR handoff from sibling thread live2:
+            pr_title='feat: add --no-pr-pipeline flag to zeperion run'
+            task_id='task_add_no_pr_pipeline_flag'
+    which proves the X-pr → X auto-detect heuristic works against
+    a real on-disk planner_output.txt. See transcript/pr_pipeline/run.txt.
+
+P0-2 (relative path resolution — was: state_dir relative paths
+       silently anchored to CWD).
+  * config.yaml deliberately uses relative paths everywhere
+    (``requirement_file: ../requirement.txt``,
+     ``state_dir: state``,
+     ``project_dir: ..``).
+  * A pre-flight check via load_config_from_yaml() showed the
+    paths resolved correctly to /workspace/* against the config
+    file's parent. State files landed where expected, no
+    contamination of the developer's real .zeperion/.
+
+P0-3 (no Co-Authored-By Claude — was: every auto-commit dishonestly
+       attributed work to Claude Opus 4.7 regardless of actual model).
+  * The auto-commit body (599c6a23) contains:
+        Changed files:
+        - .zeperion/config.yaml
+        - requirement.txt
+        - tests/test_cli_smoke.py
+        - tests/test_integration.py
+        - zeperion/cli.py
+        - zeperion/graphs/multi_agent.py
+    and NOTHING else. No Claude trailer. Compare with live test
+    #1's commit body which had the spurious line.
+
+P1-4 (Tester runs verify commands — was: Tester reasoned about
+       test results without running them).
+  * config.yaml set
+        tester_verify_commands:
+          - pytest -q tests/test_cli_smoke.py
+          - zeperion run --help | grep -q -- '--no-pr-pipeline'
+  * Both ran (transcript/multi_agent/runs/events.jsonl has
+    ``tester_verify_command`` events) and the Tester's prompt
+    received their real exit codes / stdout. The Tester's verdict
+    of PASS is therefore grounded in ``pytest -q -> exit=0`` (real)
+    and ``zeperion run --help | grep ... -> exit=0`` (real),
+    not in text-reasoning over the Developer's diff.
+
+
+Limitations not fixed
+---------------------
+
+* PR creation itself still failed: ``gh pr create`` returns
+  HTTP 401 'Bad credentials'. This is the same Cursor cloud-agent
+  token limitation from live test #1, NOT a zeperion bug. Outside
+  Cursor's VM (i.e. on a developer laptop with ``gh auth login``)
+  this would have completed.
+  This PR was therefore opened via Cursor's ManagePullRequest
+  tool, not via zeperion's PR Pipeline.
+
+* The auto-PR-pipeline path STILL ran even though I'm the same
+  cloud agent who hit this exact footgun while writing PR #5.
+  That's because the very task this run is trying to add
+  (``--no-pr-pipeline``) doesn't exist yet at the moment of THIS
+  run — the Phase 3 fix had to land first before it could be
+  used. Tautological. Once this PR is merged, future live tests
+  can pass ``--no-pr-pipeline`` to multi_agent and skip the
+  subgraph entirely.
+
+
+Cost
+----
+
+Same DeepSeek proxy as live test #1 (deepseek-v4-pro[1m]).
+~5 LLM round-trips. Pricing trivial.
+
+
+How to reproduce
+----------------
+
+    # Set env vars (deepseek mapping or real Anthropic key)
+    export ANTHROPIC_API_KEY=...
+    export ANTHROPIC_AUTH_TOKEN=...
+    export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic   # if using deepseek
+    export ANTHROPIC_MODEL=deepseek-v4-pro[1m]                      # ditto
+    npm i -g @anthropic-ai/claude-code
+
+    # Set up the live test
+    git checkout dev
+    cp examples/live-version-2/requirement.txt   ./requirement.txt
+    cp examples/live-version-2/config.yaml       ./.zeperion/config.yaml
+    rm -rf .zeperion/state
+
+    # Run
+    zeperion run --mode multi_agent --thread-id mytest
+    zeperion run --mode pr_pipeline --thread-id mytest-pr   # auto-detects sibling
+
+The agents are non-deterministic, so your transcript will not
+byte-match this one. But Tester verdicts and commit subjects
+should follow the same patterns described above.

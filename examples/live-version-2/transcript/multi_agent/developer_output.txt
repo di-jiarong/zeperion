@@ -1,0 +1,27 @@
+---
+
+**GLOBAL_STATUS: DONE**
+
+**CHANGES:**
+- `zeperion/graphs/multi_agent.py:42` — added `disable_pr_pipeline: bool = False` keyword-only parameter to `create_multi_agent_graph`
+- `zeperion/graphs/multi_agent.py:544-548` — `route_after_tester` now checks `disable_pr_pipeline` first; when `True`, routes to `"end"` regardless of GitHub config
+- `zeperion/cli.py:350-356` — added `--no-pr-pipeline` typer Option to the `run` command
+- `zeperion/cli.py:370` — `_spawn_detached_run` call now passes `no_pr_pipeline` through
+- `zeperion/cli.py:56` — `_spawn_detached_run` signature accepts `no_pr_pipeline: bool = False`
+- `zeperion/cli.py:117` — `_spawn_detached_run` forwards `--no-pr-pipeline` to child process argv
+- `zeperion/cli.py:426` — `build_graph` passes `disable_pr_pipeline=no_pr_pipeline` to `create_multi_agent_graph`
+- `tests/test_cli_smoke.py:157-162` — new `TestNoPRPipelineFlag` class verifies `--no-pr-pipeline` appears in `run --help`
+- `tests/test_integration.py:375-418` — new `TestNoPRPipeline` class with `test_disable_pr_pipeline_skips_pr_subgraph` that asserts `pr_phase` not in state when flag is active with `github_token="dummy"`
+
+**VERIFY_HINTS:**
+- `pytest -q` — all 332 tests pass
+- `zeperion run --help` — `--no-pr-pipeline` flag is listed
+- Integration test explicitly sets `github_token="dummy"` + `disable_pr_pipeline=True` and asserts `pr_phase` absent from final state
+- Detach path forwarding: verify `_spawn_detached_run` includes `--no-pr-pipeline` in child argv when parent receives it
+
+**BLOCKERS:**
+- NONE
+
+**LESSONS:**
+- `route_after_tester` already had a clean priority-ordered structure — inserting the `disable_pr_pipeline` check at the top of the DONE branch (before the GitHub config check) was the minimal, non-breaking change
+- When adding a CLI flag that affects graph behavior, three wiring points are needed: the CLI option definition, the graph factory parameter, and (for detach mode) the `_spawn_detached_run` argv forwarding
