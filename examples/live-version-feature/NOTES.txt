@@ -1,0 +1,189 @@
+examples/live-version-feature/
+================================
+
+This directory is a *real* end-to-end transcript from running zeperion
+against itself. Unlike examples/auth-system/ (which uses the
+deterministic FakeAgent), this one was a live workflow that actually
+hit a remote API, made real LLM calls, modified real files in the
+zeperion repo, and committed + pushed via real git operations.
+
+The purpose: prove (or disprove) the "this framework actually works
+end-to-end" claim. Previous reviews of zeperion noted that the repo
+had no concrete evidence of a live multi-agent run — only mocked
+demos. This directory is that evidence, warts and all.
+
+
+Layout
+------
+
+  config.yaml       The actual config used (DeepSeek-via-Anthropic-
+                    proxy, claude_code Developer, anthropic
+                    Planner/Tester, target dev branch, no auto-merge).
+
+  requirement.txt   The actual requirement spec fed to the workflow:
+                    "give zeperion a `version` subcommand".
+
+  transcript/
+    lessons_learned.txt
+                    The cross-run lesson log produced by the workflow.
+
+    multi_agent/
+      run.log                              stdout of `zeperion run --mode multi_agent`
+      planner_output.txt                   latest Planner output (round 1)
+      developer_output.txt                 latest Developer output
+      tester_output.txt                    latest Tester output
+      runs/events.jsonl                    structured event stream
+      runs/round_001_planner.txt           per-round artefact
+      runs/round_001_developer.txt         per-round artefact
+      runs/round_001_tester.txt            (FAIL — see findings below)
+      runs/round_001_developer_fix_1.txt   fix-attempt artefact
+      runs/round_001_tester_fix_1.txt      (PASS + DONE)
+
+    pr_pipeline/
+      run.log                              stdout of `zeperion run --mode pr_pipeline`
+                                           (PARTIAL — failed at create_or_update_pr)
+
+
+The story
+---------
+
+Task: add a `zeperion version` subcommand (zeperion modifying itself).
+
+Round 1:
+  - Planner cut the task into 3 P-tasks, emitted PR_TITLE
+    "feat: add zeperion version command", produced a clean handoff.
+  - Developer (claude_code, real CLI invocation) edited
+    zeperion/cli.py and tests/test_cli_smoke.py, added a clean
+    @app.command() and two test cases. Did NOT redundantly add
+    __version__ to __init__.py because it correctly noticed it
+    already existed.
+  - Tester reported FAIL — claimed test_list_with_no_runs was failing.
+    Initially looked like a hallucination, but turned out to be
+    correct (see Finding 2 below).
+
+Round 1 fix attempt:
+  - Developer correctly diagnosed: the test fixture wrote
+    `state_dir: .zeperion/state` (relative path) into a temp
+    config; CliRunner inherits the parent process CWD, so the test
+    saw the *real* /workspace/.zeperion/state (which was now
+    populated by our live run). Fixed by using absolute paths in
+    the fixture. Also tightened the version test from `in` to
+    strict equality.
+  - Tester reported PASS + GLOBAL_STATUS=DONE.
+
+Round 1 cost (deepseek-v4-pro[1m] via DeepSeek's Anthropic proxy):
+  - Planner       21s
+  - Developer     98s   (claude --print, 3 file edits)
+  - Tester        59s
+  - Developer fix 188s  (claude --print, 1 file edit)
+  - Tester fix    58s
+  - Total ~7m wall, single round, 1 fix attempt.
+
+Real result: `pytest -q` passes 298/298 (including new tests),
+`zeperion version` prints "zeperion 0.1.0" exactly. Code in
+zeperion/cli.py and tests/test_cli_smoke.py committed in this PR
+is byte-for-byte what the agents produced.
+
+
+Findings (real bugs surfaced by the live test)
+----------------------------------------------
+
+Finding 1: AnthropicAgent.invoke() crashed on extended-thinking responses.
+  zeperion/agents/anthropic.py did `response.content[0].text`,
+  assuming the first content block is always TextBlock. DeepSeek's
+  reasoning models (and real Claude Opus with extended thinking
+  enabled) return [ThinkingBlock, TextBlock], so [0].text raised
+  AttributeError on the first invocation.
+
+  Fixed in the dev branch via commit 66a2a33 (walks all blocks,
+  concatenates .text from any block that has one). 5 regression
+  tests added in tests/test_agents.py::TestExtractTextBlock.
+  Without this fix the live test couldn't run at all.
+
+Finding 2: tests/test_cli_smoke.py fixture is not isolated from real CWD.
+  The CliRunner-based fixture passed `state_dir: .zeperion/state`
+  (relative) to the CLI. The CLI does `Path(config.state_dir)`
+  which resolves against the *parent process CWD*, not the
+  fixture's tmp_path. So the test silently shared state with
+  /workspace/.zeperion/state and started failing the moment we
+  ran a real workflow.
+
+  Fixed by the Developer agent in this PR (see test fixture diff).
+  Open question: should the CLI itself resolve relative state_dir
+  against the config file's parent directory? That would be a
+  more general fix but is a behaviour change for existing users.
+
+Finding 3: standalone `pr_pipeline` mode loses the Planner's PR_TITLE.
+  When running `zeperion run --mode multi_agent --thread-id X`
+  followed by `zeperion run --mode pr_pipeline --thread-id Y`
+  (two separate thread_ids, the recommended pattern in the
+  README), the PR Pipeline doesn't pull `pr_title` / `task_id`
+  from the multi_agent thread's checkpoint. Result: the Planner
+  carefully proposed PR_TITLE "feat: add zeperion version command"
+  but the actual auto-commit subject came out as the generic
+  fallback "chore: zeperion automated commit", and the would-be
+  PR title would have been "feat: cursor/zeperion-live-test-43a2"
+  (branch-name fallback).
+
+  See pr_pipeline/run.log line "Creating new PR: feat: cursor/...".
+
+  Not fixed in this PR. Two reasonable fixes:
+    a) PR Pipeline reads the latest planner_output.txt from
+       state_dir/threads/<sibling_thread_id>/ to recover the
+       PR_TITLE / TASK_ID.
+    b) Add a CLI option `--from-thread <multi_agent_thread_id>`
+       that the user passes explicitly.
+
+Finding 4: gh CLI lacks PR-create permission under Cursor's cloud-agent
+           token.
+  PR Pipeline's `gh pr create` failed with:
+    GraphQL: Resource not accessible by integration (createPullRequest)
+  This is a Cursor-environment limitation (the cloud-agent gh token
+  is scoped without `repo:write` for createPullRequest on this repo
+  via gh CLI, even though the same token CAN open PRs through
+  Cursor's own ManagePullRequest internal tool). Outside Cursor's
+  cloud-agent VM (i.e. on a developer laptop with `gh auth login`)
+  this would have worked.
+
+  This PR was therefore opened via Cursor's internal PR tool, not
+  via zeperion's PR Pipeline. The pr_pipeline/run.log captures the
+  exact gh error so anyone reproducing the test can recognise it.
+
+
+How to reproduce
+----------------
+
+You will need:
+
+  1. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN (or the equivalent
+     env mapping for an Anthropic-compatible proxy — see config.yaml
+     comments for the DeepSeek mapping used here).
+  2. `claude` CLI installed (npm i -g @anthropic-ai/claude-code).
+  3. `gh` CLI authenticated against a repo where you can push +
+     create PRs (must NOT be inside Cursor's cloud-agent VM if you
+     want PR Pipeline to open the PR end-to-end — see Finding 4).
+  4. The dev branch from this repo as your starting point (this PR
+     is what landed on dev).
+
+Then:
+
+  cd <your zeperion clone>
+  git checkout dev
+  cp examples/live-version-feature/config.yaml      .zeperion/config.yaml
+  cp examples/live-version-feature/requirement.txt  ./requirement.txt
+  zeperion run --mode multi_agent --thread-id my-live-test
+  zeperion run --mode pr_pipeline --thread-id my-live-test-pr
+
+The agents are non-deterministic, so your transcript will not
+byte-match this one — but the *shape* (round count, fix attempts,
+PR pipeline halt at create_pr if Cursor-VM-restricted) should
+match closely.
+
+
+Cost
+----
+
+This live test consumed roughly 5 LLM round-trips against
+deepseek-v4-pro[1m] over DeepSeek's proxy. Pricing varies; on
+real Anthropic Claude Opus 4 the equivalent run would be on
+the order of single-digit USD.

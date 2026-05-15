@@ -1,0 +1,17 @@
+All 10 tests pass, and `zeperion version` outputs exactly `zeperion 0.1.0`.
+
+---
+
+GLOBAL_STATUS: CONTINUE
+CHANGES:
+- `tests/test_cli_smoke.py`: 将 `project_dir` fixture 中的 `requirement_file`、`state_dir`、`project_dir` 从相对路径改为绝对路径（引用 `tmp_path`），防止 CliRunner 在项目根目录 CWD 下误读到真实的 `.zeperion/state/checkpoints.db` 而导致 `list` 命令输出 Rich 表格而非 "No checkpoints found"。
+- `tests/test_cli_smoke.py`: 将 `test_version_prints_package_version` 的断言从 `assert "zeperion 0.1.0" in result.output` 收紧为 `assert result.stdout.strip() == "zeperion 0.1.0"`，防止漏检额外输出。
+VERIFY_HINTS:
+- `pytest -q tests/test_cli_smoke.py` 全绿（10 passed）
+- `python3 -m zeperion.cli version` 输出恰好为 `zeperion 0.1.0`，exit code 0
+- 在无 `.zeperion/config.yaml` 的目录中运行 `zeperion version` 不读配置、不崩溃
+- `test_version_command_help` 断言 exit_code == 0
+BLOCKERS: NONE
+LESSONS:
+- CliRunner 不自动 chdir 到 tmp_path；fixture 中使用相对路径（如 `state_dir: .zeperion/state`）会让被测命令在项目根目录 CWD 下解析路径，可能读到仓库内已有的真实状态文件，导致测试行为与预期不符。fixture 中应使用绝对路径。
+- 对于纯输出型命令（如 `version`），使用 `result.stdout.strip() == expected` 比 `in` 更严格，可防止额外输出（如 Rich markup、stderr 泄漏）逃过检测。

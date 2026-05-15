@@ -1,0 +1,27 @@
+全部通过。总结：
+
+**已完成的工作：**
+
+- `zeperion/__init__.py` — 已有 `__version__ = "0.1.0"`（第 3 行），无需修改。
+- `zeperion/cli.py` — 新增 `version` 子命令（第 29 行导入 `__version__`，文件末尾新增 `@app.command()` 函数），输出 `zeperion 0.1.0`，不读配置，无 `--config` 参数。
+- `tests/test_cli_smoke.py` — 新增 `TestVersionCommand` 类，包含 `test_version_prints_package_version` 和 `test_version_command_help`，两个用例均通过。
+
+（`test_list_with_no_runs` 的失败与此次无关，属于已有问题——命令输出与测试预期文本不匹配。）
+
+---
+
+**Developer Output — Final**
+
+GLOBAL_STATUS: CONTINUE
+CHANGES:
+- `zeperion/cli.py`: 导入 `zeperion.__version__`，新增 `@app.command() version` 函数，`console.print(f"zeperion {__version__}")`，无 `--config` 参数，不读配置文件
+- `tests/test_cli_smoke.py`: 新增 `TestVersionCommand` 测试类，包含 `test_version_prints_package_version`（断言 exit 0 且 stdout 含 `zeperion 0.1.0`）和 `test_version_command_help`（断言 `version --help` exit 0）
+VERIFY_HINTS:
+- `zeperion version` 在有/无 `.zeperion/config.yaml` 的目录中均不调用 `load_config_from_yaml`
+- `version` 命令不在 `app` 的 `--help` 列表中破坏已有命令的显示
+- 未修改 `pyproject.toml`、README、CLAUDE.md 或其他文件
+BLOCKERS:
+- NONE
+LESSONS:
+- 已有 `TestListCommandDoesNotCrash.test_list_with_no_runs` 的断言文本与当前输出不匹配（期待 `No checkpoints found` 但实际输出 Rich 表单），属于已有问题，不影响本任务交付
+- `zeperion/__init__.py` 中已有 `__version__ = "0.1.0"`，无需重复添加；此变量的存在使得 `version` 子命令实现只需一行导入加几行输出

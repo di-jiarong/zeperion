@@ -1,0 +1,19 @@
+TASK_ID: task_001
+PR_TITLE: feat: add zeperion version command
+GLOBAL_STATUS: CONTINUE
+PLAN:
+- [P1] 在 `zeperion/__init__.py` 中新增 `__version__ = "0.1.0"`，确保与 pyproject.toml 一致。
+- [P2] 在 `zeperion/cli.py` 注册 `version` 子命令，读取 `zeperion.__version__`，用 `console.print(f"zeperion {__version__}")` 输出，不加参数、不读配置，exit code 0。
+- [P3] 在 `tests/test_cli_smoke.py` 新增 `TestVersionCommand` 类，实现 `test_version_prints_package_version` 和 `test_version_command_help`，并运行 `pytest -q` 确保全绿。
+RISKS:
+- 现有测试可能因新增命令而意外挂起（如 help 输出列表变化），但预期不会影响通过。
+- 版本号硬编码 0.1.0，后续升级需要手动同步。
+HANDOFF_TO_DEVELOPER:
+- 本轮要做什么：在包内添加版本变量，实现 `zeperion version` 子命令，并编写两个测试用例。
+- 输入/输出路径：
+  - `zeperion/__init__.py`（新增一行 `__version__ = "0.1.0"`）
+  - `zeperion/cli.py`（新增 `version` 命令函数）
+  - `tests/test_cli_smoke.py`（新增测试类）
+- 验证命令：运行 `pytest -q tests/test_cli_smoke.py` 和 `zeperion version`。
+LESSONS:
+- 本轮暂无经验积累。
