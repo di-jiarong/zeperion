@@ -171,7 +171,14 @@ class WorkflowConfig(BaseModel):
     developer_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
     tester_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
 
-    max_rounds: int = Field(default=50, ge=1)
+    # ``max_rounds`` was historically 50, which combined with the
+    # parser's previous "missing GLOBAL_STATUS → CONTINUE" fallback
+    # could quietly burn 50 expensive Opus rounds when a single
+    # response forgot the marker. The parser now treats missing
+    # GLOBAL_STATUS as BLOCKED (see ``BaseAgent.parse_output``), and
+    # we also lower the safety net to 10 — enough for legitimate
+    # multi-task plans, cheap enough to recover from operator error.
+    max_rounds: int = Field(default=10, ge=1)
     max_fix_attempts: int = Field(default=3, ge=0)
 
     project_dir: str = Field(default=".")
@@ -215,7 +222,7 @@ class WorkflowConfig(BaseModel):
         default_factory=lambda: os.environ.get("GITHUB_TOKEN"),
         description="GitHub token"
     )
-    pr_target_branch: str = Field(default="dev", description="PR target branch")
+    pr_target_branch: str = Field(default="main", description="PR target branch")
     pr_auto_merge: bool = Field(default=True, description="Enable auto-merge")
     codex_poll_minutes: int = Field(default=30, description="Codex review poll interval")
     max_pr_fixer_rounds: int = Field(
