@@ -1,0 +1,44 @@
+## 任务
+
+给 zeperion 自己加一个 `zeperion version` 子命令，输出当前包版本。
+
+## 背景
+
+zeperion 已经有 `init / run / status / list / logs / stop / serve` 七个子命令，
+但没有 `version`。`pyproject.toml` 里是 `version = "0.1.0"`，包内
+`zeperion/__init__.py` 里也应该有一个 `__version__` 字符串可读。
+现在用户想知道版本只能 `pip show zeperion`，不够顺手。
+
+## 验收标准（严格）
+
+1. 在 `zeperion/cli.py` 里加 `@app.command()` 注册名为 `version` 的新子命令。
+2. `version` 子命令做的事：
+   - 读取 `zeperion.__version__`（如果该字符串目前不存在，请在
+     `zeperion/__init__.py` 里补一个，字符串值与 `pyproject.toml` 的
+     `version` 字段一致，目前是 `"0.1.0"`）。
+   - 用 `console.print` 输出一行，格式恰好为 `zeperion 0.1.0`
+     （也就是 `f"zeperion {__version__}"`，**不要**加颜色 / 表情 /
+     额外文案）。
+   - exit code 为 0。
+3. 不读取配置文件（即 **不要** 加 `--config` 参数；也不要在
+   `version` 命令体里调用 `load_config_from_yaml`）—— 它必须能在没有
+   `.zeperion/config.yaml` 的目录里直接 `zeperion version` 跑通。
+4. 在 `tests/test_cli_smoke.py` 里加一个新测试类
+   `TestVersionCommand`，至少包含两个用例：
+   - `test_version_prints_package_version`：用 `CliRunner` 调
+     `zeperion version`，断言 exit_code == 0 且 stdout 包含
+     `"zeperion 0.1.0"`。
+   - `test_version_command_help`：调 `zeperion version --help`，
+     断言 exit_code == 0。
+5. **不要**改 `pyproject.toml` 里的版本号。
+6. **不要**修改 README、AGENT_GUIDE、CLAUDE.md 或 examples 下的
+   任何文件。
+7. **不要**新增任何依赖（不要改 `pyproject.toml` 的 `dependencies`）。
+8. 修改后跑 `pytest -q` 必须全绿（含新加的两个用例）。
+
+## 验证命令（Tester 必须真跑）
+
+```bash
+pytest -q tests/test_cli_smoke.py
+zeperion version
+```
