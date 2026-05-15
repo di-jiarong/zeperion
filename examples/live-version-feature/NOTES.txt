@@ -28,7 +28,7 @@ Layout
                     The cross-run lesson log produced by the workflow.
 
     multi_agent/
-      run.log                              stdout of `zeperion run --mode multi_agent`
+      run.txt                              stdout of `zeperion run --mode multi_agent`
       planner_output.txt                   latest Planner output (round 1)
       developer_output.txt                 latest Developer output
       tester_output.txt                    latest Tester output
@@ -40,7 +40,7 @@ Layout
       runs/round_001_tester_fix_1.txt      (PASS + DONE)
 
     pr_pipeline/
-      run.log                              stdout of `zeperion run --mode pr_pipeline`
+      run.txt                              stdout of `zeperion run --mode pr_pipeline`
                                            (PARTIAL — failed at create_or_update_pr)
 
 
@@ -125,7 +125,7 @@ Finding 3: standalone `pr_pipeline` mode loses the Planner's PR_TITLE.
   PR title would have been "feat: cursor/zeperion-live-test-43a2"
   (branch-name fallback).
 
-  See pr_pipeline/run.log line "Creating new PR: feat: cursor/...".
+  See pr_pipeline/run.txt line "Creating new PR: feat: cursor/...".
 
   Not fixed in this PR. Two reasonable fixes:
     a) PR Pipeline reads the latest planner_output.txt from
@@ -146,7 +146,7 @@ Finding 4: gh CLI lacks PR-create permission under Cursor's cloud-agent
   this would have worked.
 
   This PR was therefore opened via Cursor's internal PR tool, not
-  via zeperion's PR Pipeline. The pr_pipeline/run.log captures the
+  via zeperion's PR Pipeline. The pr_pipeline/run.txt captures the
   exact gh error so anyone reproducing the test can recognise it.
 
 

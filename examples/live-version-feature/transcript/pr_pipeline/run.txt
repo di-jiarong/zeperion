@@ -1,0 +1,26 @@
+Loading config: .zeperion/config.yaml
+Mode: pr_pipeline
+Thread ID: live-test-pr
+Starting new PR pipeline
+
+Starting workflow execution...
+
+2026-05-15 06:14:23,371 [INFO] zeperion.graphs.pr_pipeline: Creating PR Pipeline graph
+2026-05-15 06:14:23,382 [INFO] zeperion.graphs.pr_pipeline: Validating Git and GitHub environment
+2026-05-15 06:14:23,413 [INFO] zeperion.graphs.pr_pipeline: Auto-detected GitHub repo: di-jiarong/zeperion
+2026-05-15 06:14:23,413 [INFO] zeperion.graphs.pr_pipeline: Validated: branch=cursor/zeperion-live-test-43a2, repo=di-jiarong/zeperion
+→ validate_git
+
+2026-05-15 06:14:23,414 [INFO] zeperion.graphs.pr_pipeline: Committing changes
+2026-05-15 06:14:23,489 [INFO] zeperion.graphs.pr_pipeline: Committed: 99012afe - chore: zeperion automated commit (4 files)
+→ commit_changes
+
+2026-05-15 06:14:23,490 [INFO] zeperion.graphs.pr_pipeline: Pushing branch: cursor/zeperion-live-test-43a2
+2026-05-15 06:14:24,355 [INFO] zeperion.graphs.pr_pipeline: Pushed cursor/zeperion-live-test-43a2 to origin
+→ push_branch
+
+2026-05-15 06:14:24,356 [INFO] zeperion.graphs.pr_pipeline: Creating/updating PR: cursor/zeperion-live-test-43a2 -> dev
+2026-05-15 06:14:24,582 [INFO] zeperion.graphs.pr_pipeline: Creating new PR: feat: cursor/zeperion-live-test-43a2
+
+✗ Workflow failed: gh command failed: pull request create failed: GraphQL: 
+Resource not accessible by integration (createPullRequest)
