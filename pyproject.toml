@@ -42,7 +42,10 @@ dependencies = [
 anthropic = [
     "anthropic>=0.34.0",
 ]
-claude-code = []
+# Note: there is intentionally no ``claude-code`` extra. The
+# ClaudeCodeAgent shells out to the user-installed ``claude`` binary;
+# there is no Python-side dependency to declare. Install the CLI per
+# https://docs.anthropic.com/claude/docs/claude-code instead.
 github = [
     "PyGithub>=2.3.0",
 ]
@@ -81,9 +84,12 @@ dev = [
 zeperion = "zeperion.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/zeperion"
-Repository = "https://github.com/yourusername/zeperion"
-Issues = "https://github.com/yourusername/zeperion/issues"
+# TODO: replace with the canonical repo URL once the project has one.
+# The previous value (``yourusername/zeperion``) leaked the cookiecutter
+# placeholder into a published wheel.
+Homepage = "https://github.com/zeperion/zeperion"
+Repository = "https://github.com/zeperion/zeperion"
+Issues = "https://github.com/zeperion/zeperion/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
