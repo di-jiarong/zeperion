@@ -412,7 +412,10 @@ asyncio.run(main())
 
 ## 状态管理
 
-ZEPERION 使用 LangGraph 的 SQLite 检查点机制持久化状态，每个 `thread_id` 一份历史。
+ZEPERION 使用 LangGraph 的 SQLite 检查点机制持久化状态，每个 `thread_id`
+一份历史。**没显式传 `--thread-id` 时，默认取当前 git 分支名**（经过文件系统
+安全字符过滤），不在 git 仓库或处于 detached HEAD 时回退到 `"main"`。
+这意味着两条 PR 在不同分支上跑会自动隔离、互不覆盖。
 
 ```bash
 # 列出所有 thread_id 及当前阶段
@@ -425,7 +428,14 @@ zeperion status --thread-id feature-auth
 zeperion run --resume --thread-id feature-auth
 ```
 
-需要在脚本里直接读 checkpoint，可以使用 LangGraph 的官方 API：
+**命名建议**：
+
+- 用描述性的短名（`auth-system` / `payment-api` / `bug-fix-123`）。
+- 不要用随机串、不要在不同项目复用同一 `thread_id`、不要让两个并发
+  `zeperion run` 共享同一个 `thread_id`（会让 events.jsonl 和 checkpoint
+  同时被两个进程写入，是最难调试的一类损坏）。
+- 想直接读 checkpoint，用 LangGraph 官方 API（不要 `pickle.loads` 走
+  内部表）：
 
 ```python
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
