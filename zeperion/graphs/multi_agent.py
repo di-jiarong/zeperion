@@ -40,6 +40,7 @@ def create_multi_agent_graph(
     thread_id: str = "main",
     enable_checkpoint: Optional[bool] = None,
     checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
+    disable_pr_pipeline: bool = False,
 ) -> StateGraph:
     """Create multi-agent workflow graph.
 
@@ -542,6 +543,11 @@ def create_multi_agent_graph(
             return "blocked"
 
         if global_status == GlobalStatus.DONE:
+            if disable_pr_pipeline:
+                logger.info(
+                    "Workflow complete (--no-pr-pipeline, skipping PR Pipeline)"
+                )
+                return "end"
             if config.github_repo or config.github_token:
                 logger.info("Workflow complete, auto-entering PR Pipeline")
                 return "pr_pipeline"

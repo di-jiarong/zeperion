@@ -154,6 +154,14 @@ class TestAnthropicDeveloperWarning:
         assert out.file.getvalue() == ""
 
 
+class TestNoPRPipelineFlag:
+    def test_run_help_includes_no_pr_pipeline_flag(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["run", "--help"])
+        assert result.exit_code == 0, f"run --help crashed:\n{result.output}"
+        assert "--no-pr-pipeline" in result.output
+
+
 class TestVersionCommand:
     def test_version_prints_package_version(self) -> None:
         runner = CliRunner()

@@ -53,6 +53,7 @@ def _spawn_detached_run(
     thread_id: Optional[str],
     log_format: Optional[str],
     from_thread: Optional[str] = None,
+    no_pr_pipeline: bool = False,
 ) -> None:
     """Re-invoke ``zeperion run`` in a detached child process.
 
@@ -114,6 +115,8 @@ def _spawn_detached_run(
         argv.extend(["--log-format", log_format])
     if from_thread:
         argv.extend(["--from-thread", from_thread])
+    if no_pr_pipeline:
+        argv.append("--no-pr-pipeline")
 
     pid = spawn_detached(
         state_dir=state_dir,
@@ -348,6 +351,15 @@ def run(
             "(``foo-pr`` -> ``foo``)."
         ),
     ),
+    no_pr_pipeline: bool = typer.Option(
+        False,
+        "--no-pr-pipeline",
+        help=(
+            "Skip the automatic PR Pipeline sub-graph after the "
+            "multi-agent loop finishes, even if GITHUB_TOKEN / "
+            "github_repo are configured."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -369,6 +381,7 @@ def run(
             thread_id=thread_id,
             log_format=log_format,
             from_thread=from_thread,
+            no_pr_pipeline=no_pr_pipeline,
         )
         return
     if log_format:
@@ -420,6 +433,7 @@ def run(
                 config,
                 checkpointer=checkpointer,
                 thread_id=thread_id,
+                disable_pr_pipeline=no_pr_pipeline,
             )
 
     elif mode == "pr_pipeline":

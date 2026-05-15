@@ -1,0 +1,54 @@
+# Live test #2 config — exercises all 4 Phase 3 fixes:
+#
+#  P0-1 (PR_TITLE recovery): we'll run multi_agent with --thread-id
+#       live2, then pr_pipeline with --thread-id live2-pr; pr_pipeline
+#       should auto-detect the sibling and pull PR_TITLE from it.
+#
+#  P0-2 (relative path resolution): state_dir is RELATIVE here. The
+#       fix in PR #4 anchors it to this config file's parent dir
+#       (/workspace/.zeperion/), so artifacts land in
+#       /workspace/.zeperion/state/ no matter what CWD is at zeperion run.
+#
+#  P0-3 (no Co-Authored-By): pr_pipeline's commit_changes_node no
+#       longer appends 'Co-Authored-By: Claude Opus 4.7'. We'll inspect
+#       the final commit body to confirm.
+#
+#  P1-4 (Tester真跑): tester_verify_commands set below; Tester prompt
+#       gets real exit codes / stdout from these commands instead of
+#       just text-reasoning over the Developer's diff.
+
+requirement_file: ../requirement.txt   # relative — verifies P0-2
+state_dir: state                       # relative — verifies P0-2
+project_dir: ..                        # relative — verifies P0-2 (resolves to /workspace)
+
+planner_agent_type: anthropic
+developer_agent_type: claude_code
+tester_agent_type: anthropic
+
+planner_model: deepseek-v4-pro[1m]
+developer_model: deepseek-v4-pro[1m]
+tester_model: deepseek-v4-pro[1m]
+
+acknowledge_anthropic_developer_no_file_writes: true
+
+max_rounds: 3
+max_fix_attempts: 2
+
+claude_cli_tool: claude
+claude_cli_timeout: 600
+claude_cli_use_worktree: false
+
+# P1-4: Tester runs these BEFORE invoking the LLM. The prompt
+# template will instruct the agent to ground its verdict in real
+# exit codes from these commands instead of text-reasoning.
+tester_verify_commands:
+  - pytest -q tests/test_cli_smoke.py
+  - zeperion run --help | grep -q -- '--no-pr-pipeline'
+tester_verify_timeout_seconds: 120
+
+# PR pipeline target = dev (per user instruction). auto_merge stays
+# off — leave the PR open for human review.
+pr_target_branch: dev
+pr_auto_merge: false
+codex_poll_minutes: 30
+max_pr_fixer_rounds: 2
