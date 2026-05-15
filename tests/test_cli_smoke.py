@@ -32,9 +32,12 @@ def project_dir(tmp_path: Path) -> Path:
     (tmp_path / ".zeperion" / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".zeperion" / "config.yaml").write_text(
         # Bare minimum config; we won't actually run any workflows.
-        "requirement_file: ./requirement.txt\n"
-        "state_dir: .zeperion/state\n"
-        "project_dir: .\n"
+        # Absolute paths prevent the test from leaking into the real
+        # .zeperion/state when the fixture dir shadows it via relative paths
+        # (CliRunner inherits the parent process CWD, not the temp dir).
+        f"requirement_file: {tmp_path / 'requirement.txt'}\n"
+        f"state_dir: {tmp_path / '.zeperion' / 'state'}\n"
+        f"project_dir: {tmp_path}\n"
         "max_rounds: 1\n"
         "max_fix_attempts: 0\n"
         "planner_agent_type: claude_code\n"
@@ -149,3 +152,16 @@ class TestAnthropicDeveloperWarning:
         emitted = warn_if_anthropic_developer_lacks_file_writes(config, out)
         assert emitted is False
         assert out.file.getvalue() == ""
+
+
+class TestVersionCommand:
+    def test_version_prints_package_version(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["version"])
+        assert result.exit_code == 0, f"version crashed:\n{result.output}"
+        assert result.stdout.strip() == "zeperion 0.1.0"
+
+    def test_version_command_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["version", "--help"])
+        assert result.exit_code == 0

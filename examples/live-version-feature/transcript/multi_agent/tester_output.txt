@@ -1,0 +1,19 @@
+TEST_STATUS: PASS
+GLOBAL_STATUS: DONE
+TEST_CASES:
+- 用例1：test_version_prints_package_version – 断言 exit_code == 0，且
+  stdout.strip() 精确等于 "zeperion 0.1.0"，输出无额外字符（含颜色/表情/文案），符合“恰好格式”。
+- 用例2：test_version_command_help – 断言 exit_code == 0，帮助信息正常显示且
+  无调用配置文件逻辑，满足验收标准。
+- 全部已有测试（含历史失败的 test_list_with_no_runs）在临时绝对路径
+  环境下均通过，pytest -q 输出 10 passed，零失败。
+BUGS:
+- NONE
+FIX_REQUEST:
+- NONE
+LESSONS:
+- CliRunner 不自动切换到 tmp_path，fixture 中必须使用绝对路径（如
+  `tmp_path / ".zeperion/state"`）以避免无意中访问项目仓库下的真实状态文件，
+  保证测试自包含和可重复。
+- 对纯文本输出的命令（如 version），用 `stdout.strip() == expected`
+  代替 `in` 检查，可防止 Rich 标记或 stderr 污染漏检，提升断言精度。

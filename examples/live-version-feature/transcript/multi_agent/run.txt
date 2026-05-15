@@ -1,0 +1,49 @@
+Loading config: .zeperion/config.yaml
+Mode: multi_agent
+Thread ID: live-test
+Starting new workflow
+
+Starting workflow execution...
+
+2026-05-15 06:04:45,359 [INFO] zeperion.graphs.multi_agent: Planner: Round 1 | event='agent_start' model='deepseek-v4-pro[1m]' role='planner' round=1 thread_id='live-test'
+2026-05-15 06:04:45,363 [INFO] zeperion.agents.anthropic: Invoking planner with model deepseek-v4-pro[1m]
+2026-05-15 06:04:45,786 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/anthropic/v1/messages "HTTP/1.1 200 OK"
+2026-05-15 06:05:06,574 [INFO] zeperion.agents.anthropic: Received response: 862 chars
+2026-05-15 06:05:06,576 [INFO] zeperion.graphs.multi_agent: planner done in 21212ms | duration_ms=21212 event='agent_completed' fix_attempt=0 global_status='CONTINUE' role='planner' round=1 task_id='task_001' test_status='PENDING' thread_id='live-test'
+→ planner
+  Phase: PhaseType.DEVELOPMENT
+
+2026-05-15 06:05:06,578 [INFO] zeperion.graphs.multi_agent: Developer: Round 1, Fix attempt 0 | event='agent_start' fix_attempt=0 model='deepseek-v4-pro[1m]' role='developer' round=1 thread_id='live-test'
+2026-05-15 06:05:06,580 [INFO] zeperion.agents.claude_code: Invoking developer with model deepseek-v4-pro[1m]
+2026-05-15 06:06:44,925 [INFO] zeperion.graphs.multi_agent: developer done in 98343ms | duration_ms=98343 event='agent_completed' fix_attempt=0 global_status='CONTINUE' role='developer' round=1 task_id=None test_status='PENDING' thread_id='live-test'
+→ developer
+  Phase: PhaseType.TESTING
+
+2026-05-15 06:06:44,931 [INFO] zeperion.graphs.multi_agent: Tester: Round 1, Fix attempt 0 | event='agent_start' fix_attempt=0 model='deepseek-v4-pro[1m]' role='tester' round=1 thread_id='live-test'
+2026-05-15 06:06:44,934 [INFO] zeperion.agents.anthropic: Invoking tester with model deepseek-v4-pro[1m]
+2026-05-15 06:06:45,311 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/anthropic/v1/messages "HTTP/1.1 200 OK"
+2026-05-15 06:07:44,080 [INFO] zeperion.agents.anthropic: Received response: 737 chars
+2026-05-15 06:07:44,081 [INFO] zeperion.graphs.multi_agent: tester done in 59146ms | duration_ms=59146 event='agent_completed' fix_attempt=0 global_status='CONTINUE' role='tester' round=1 task_id=None test_status='FAIL' thread_id='live-test'
+2026-05-15 06:07:44,082 [INFO] zeperion.graphs.multi_agent: Test failed, retry fix attempt 1
+→ tester
+  Test: TestStatus.FAIL
+
+→ increment_fix
+  Phase: PhaseType.DEVELOPMENT
+
+2026-05-15 06:07:44,084 [INFO] zeperion.graphs.multi_agent: Developer: Round 1, Fix attempt 1 | event='agent_start' fix_attempt=1 model='deepseek-v4-pro[1m]' role='developer' round=1 thread_id='live-test'
+2026-05-15 06:07:44,085 [INFO] zeperion.agents.claude_code: Invoking developer with model deepseek-v4-pro[1m]
+2026-05-15 06:10:51,837 [INFO] zeperion.graphs.multi_agent: developer done in 187751ms | duration_ms=187751 event='agent_completed' fix_attempt=1 global_status='CONTINUE' role='developer' round=1 task_id=None test_status='PENDING' thread_id='live-test'
+→ developer
+  Phase: PhaseType.TESTING
+
+2026-05-15 06:10:51,842 [INFO] zeperion.graphs.multi_agent: Tester: Round 1, Fix attempt 1 | event='agent_start' fix_attempt=1 model='deepseek-v4-pro[1m]' role='tester' round=1 thread_id='live-test'
+2026-05-15 06:10:51,843 [INFO] zeperion.agents.anthropic: Invoking tester with model deepseek-v4-pro[1m]
+2026-05-15 06:10:52,222 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/anthropic/v1/messages "HTTP/1.1 200 OK"
+2026-05-15 06:11:49,647 [INFO] zeperion.agents.anthropic: Received response: 607 chars
+2026-05-15 06:11:49,647 [INFO] zeperion.graphs.multi_agent: tester done in 57804ms | duration_ms=57804 event='agent_completed' fix_attempt=1 global_status='DONE' role='tester' round=1 task_id=None test_status='PASS' thread_id='live-test'
+2026-05-15 06:11:49,648 [INFO] zeperion.graphs.multi_agent: Workflow complete (GitHub not configured, skipping PR Pipeline)
+→ tester
+  Test: TestStatus.PASS
+
+✓ Workflow completed!

@@ -28,6 +28,7 @@ from rich.table import Table
 from zeperion.config import load_config_from_yaml
 from zeperion.models import WorkflowConfig
 from zeperion.storage import StateStorage
+from zeperion import __version__
 
 app = typer.Typer(
     name="zeperion",
@@ -1149,6 +1150,12 @@ def serve(
         log_level="info",
         access_log=False,
     )
+
+
+@app.command()
+def version():
+    """Print the ZEPERION package version."""
+    console.print(f"zeperion {__version__}")
 
 
 if __name__ == "__main__":

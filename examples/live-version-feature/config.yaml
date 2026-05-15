@@ -1,0 +1,40 @@
+requirement_file: ./requirement.txt
+state_dir: .zeperion/state
+project_dir: .
+
+# DeepSeek's Anthropic-compatible proxy. Both backends pick the
+# upstream up via ANTHROPIC_BASE_URL (Python SDK) /
+# ANTHROPIC_AUTH_TOKEN (claude CLI) — already exported in the env.
+planner_agent_type: anthropic
+developer_agent_type: claude_code   # let it actually edit files
+tester_agent_type: anthropic
+
+# DeepSeek model names (sent verbatim to the upstream). Real Claude
+# names like "claude-opus-4-7" would 400 against this proxy.
+planner_model: deepseek-v4-pro[1m]
+developer_model: deepseek-v4-pro[1m]
+tester_model: deepseek-v4-pro[1m]
+
+# Plan-only fallback would also not change files, so don't bother.
+acknowledge_anthropic_developer_no_file_writes: true   # silence Phase-2 warning (developer is claude_code anyway)
+
+# Conservative bounds for a live test.
+max_rounds: 3
+max_fix_attempts: 2
+
+# Anthropic SDK configuration (timeout matches API_TIMEOUT_MS env).
+# zeperion's AnthropicAgent reads ANTHROPIC_API_KEY from env.
+
+# Claude Code CLI configuration.
+claude_cli_tool: claude
+claude_cli_timeout: 600
+# Run claude in the working tree directly (NOT in a temp worktree),
+# so PR Pipeline's git diff actually sees the changes.
+claude_cli_use_worktree: false
+
+# PR pipeline target = dev (per user instruction).
+pr_target_branch: dev
+# Do NOT auto-merge. Leave the PR open for manual review.
+pr_auto_merge: false
+codex_poll_minutes: 30
+max_pr_fixer_rounds: 2

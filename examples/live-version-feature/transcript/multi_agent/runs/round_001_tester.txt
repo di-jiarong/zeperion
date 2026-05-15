@@ -1,0 +1,13 @@
+TEST_STATUS: FAIL
+GLOBAL_STATUS: CONTINUE
+TEST_CASES:
+- test_version_prints_package_version (TestVersionCommand): PASS
+- test_version_command_help (TestVersionCommand): PASS
+- test_list_with_no_runs (TestListCommandDoesNotCrash): **FAIL** – 断言文本与当前输出不匹配（期待 `No checkpoints found`，实际输出 Rich 表单），属于已有失败，但导致 `pytest -q tests/test_cli_smoke.py` 无法全绿，违反验收标准第 8 条
+BUGS:
+- `test_list_with_no_runs` 在 `tests/test_cli_smoke.py` 中失败，与本次变更无关，但阻塞全绿验收
+FIX_REQUEST:
+- 修复 `test_list_with_no_runs` 的断言，使其与实际输出一致；或临时跳过该测试（若团队同意），以保证 `pytest -q tests/test_cli_smoke.py` 全部通过。修复方式示例：将断言改为检查 exit_code == 0 或更新期待的文本字符串。
+LESSONS:
+- 验收标准中“全绿”必须覆盖已有测试，不可仅凭“已有问题”豁免；测试套件需在验收前清理所有已知失败
+- 新增命令的测试应严格验证输出内容（如 `stdout.strip() == "zeperion 0.1.0"`），避免仅用 `in` 导致漏检额外输出
