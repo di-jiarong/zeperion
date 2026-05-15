@@ -138,9 +138,14 @@ Changed files:
 - file1.py
 - file2.py
 - ... (最多列出 20 个文件)
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ```
+
+> 历史版本会在 commit body 末尾追加一行
+> `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`，已删除：
+> 实际跑代码的 backend 不一定是 Claude（live test 跑过 DeepSeek，
+> 用户可以接 GPT/Llama），且这个邮箱也不是真实可映射地址。
+> Git 自己的 author 字段已经记录了真正运行 zeperion 的人，那才是
+> 诚实的归因。
 
 ### 阶段 3：Push Branch
 

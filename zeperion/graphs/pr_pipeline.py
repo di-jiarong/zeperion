@@ -204,7 +204,15 @@ async def commit_changes_node(state: PRPipelineState) -> dict:
             body_parts.append(f"- {path}")
         if len(staged_files) > 20:
             body_parts.append(f"- ... and {len(staged_files) - 20} more files")
-        body_parts.append("\nCo-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>")
+        # NB: previous versions appended a hard-coded
+        #     "Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+        # trailer here. That was actively misleading: zeperion supports
+        # arbitrary backends (the live test ran against
+        # deepseek-v4-pro[1m]; some users run on GPT or Llama via a
+        # custom BaseAgent), and ``noreply@anthropic.com`` is not a
+        # real GitHub-mappable address regardless of the model. Git's
+        # ``author`` field already records who ran zeperion; that's
+        # the honest attribution.
         commit_body = "\n".join(body_parts)
 
         full_message = f"{commit_subject}\n\n{commit_body}"

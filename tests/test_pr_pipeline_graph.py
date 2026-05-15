@@ -157,10 +157,19 @@ class TestPipelineHappyPath:
 
         client.is_git_repo.assert_awaited()
         # commit_changes_node now drives git through run_git directly.
-        assert any(
-            "commit" == (call.args[0][0] if call.args else None)
-            for call in client.run_git.await_args_list
-        ), "expected at least one `git commit` invocation"
+        commit_calls = [
+            call for call in client.run_git.await_args_list
+            if call.args and call.args[0] and call.args[0][0] == "commit"
+        ]
+        assert commit_calls, "expected at least one `git commit` invocation"
+        # Commit body must NOT contain a hard-coded Co-Authored-By
+        # trailer attributing the work to Claude. Multiple backends
+        # (DeepSeek, GPT, custom BaseAgent subclasses, ...) drive this
+        # workflow; lying about authorship in every commit is dishonest.
+        # Regression guard for a Phase-3 fix.
+        full_message = commit_calls[0].args[0][2]
+        assert "Co-Authored-By" not in full_message
+        assert "anthropic.com" not in full_message
         client.push_branch.assert_awaited_once_with("feature/widget")
         client.create_pr.assert_awaited_once()
         client.enable_auto_merge.assert_awaited_once_with(
