@@ -232,6 +232,17 @@ class WorkflowConfig(BaseModel):
             "the CLI exits."
         ),
     )
+    claude_cli_progress_interval_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "How often (seconds) ClaudeCodeAgent emits a 'still running' "
+            "heartbeat log line while waiting for ``claude --print`` to "
+            "finish. Live test runs of >5 minutes were silent for the "
+            "entire wait, indistinguishable from a hang. Set to 0 to "
+            "disable heartbeats entirely."
+        ),
+    )
 
     # Shell commands the Tester runs *before* the LLM is invoked, so
     # the agent's verdict is grounded in real test output instead of

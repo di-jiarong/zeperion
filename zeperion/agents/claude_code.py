@@ -40,6 +40,7 @@ class ClaudeCodeAgent(BaseAgent):
         use_worktree: bool = False,
         worktree_parent: Optional[str] = None,
         keep_worktree: bool = True,
+        progress_interval_seconds: int = 30,
     ):
         """Initialise the Claude Code agent.
 
@@ -63,6 +64,11 @@ class ClaudeCodeAgent(BaseAgent):
             keep_worktree: Keep the temporary worktree after invocation so
                 changes can be inspected or merged manually. When false the
                 worktree is removed after the invocation exits.
+            progress_interval_seconds: How often to emit a 'still running'
+                heartbeat log line while waiting for the CLI subprocess.
+                ``0`` disables. Defaults to 30s — long enough to stay out
+                of the way during fast runs, short enough that a 5-minute
+                Developer call (live test #2: 298s) doesn't look hung.
         """
         super().__init__(role, model)
         self.cli_tool = cli_tool
@@ -74,6 +80,7 @@ class ClaudeCodeAgent(BaseAgent):
         self.worktree_parent = Path(worktree_parent).resolve() if worktree_parent else None
         self.keep_worktree = keep_worktree
         self.last_worktree_dir: Optional[Path] = None
+        self.progress_interval_seconds = progress_interval_seconds
 
     def build_command(self, project_dir: Optional[Path] = None) -> list[str]:
         """Assemble the CLI argv list for one invocation."""
@@ -139,6 +146,19 @@ class ClaudeCodeAgent(BaseAgent):
                 f"Claude CLI not found: {self.cli_tool}"
             ) from exc
 
+        # Spawn a periodic heartbeat task so a multi-minute claude
+        # invocation isn't indistinguishable from a hang. live test #2
+        # had a 298-second Developer call with completely silent
+        # stdout — operators reasonably read that as "is it stuck?".
+        # The heartbeat runs concurrent with communicate(); whichever
+        # finishes first is fine. We cancel + await the heartbeat in
+        # the finally block to keep the event loop clean.
+        heartbeat_task = (
+            asyncio.create_task(self._heartbeat())
+            if self.progress_interval_seconds > 0
+            else None
+        )
+
         try:
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -152,6 +172,15 @@ class ClaudeCodeAgent(BaseAgent):
                     f"{self.role.value} invocation timed out after {self.timeout}s"
                 ) from exc
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    # Heartbeat is purely informational. Any exception
+                    # during cleanup must NOT mask the real
+                    # AgentInvocationError that may already be in flight.
+                    pass
             if self.use_worktree and not self.keep_worktree:
                 await self._remove_worktree(execution_dir)
 
@@ -172,6 +201,33 @@ class ClaudeCodeAgent(BaseAgent):
             )
 
         return self.parse_output(raw_output)
+
+    async def _heartbeat(self) -> None:
+        """Emit a 'still running' log line every ``progress_interval_seconds``.
+
+        Started concurrent with the CLI subprocess in :meth:`invoke`,
+        cancelled when the subprocess returns. The granularity is
+        deliberately coarse: enough to reassure an operator that
+        zeperion isn't hung, but not so noisy it drowns the real log.
+
+        Cancellation propagates as ``asyncio.CancelledError``. We
+        let it bubble up; the caller in ``invoke`` swallows it.
+        """
+        elapsed = 0
+        while True:
+            await asyncio.sleep(self.progress_interval_seconds)
+            elapsed += self.progress_interval_seconds
+            logger.info(
+                "%s still running (%ds elapsed)",
+                self.role.value,
+                elapsed,
+                extra={
+                    "event": "claude_cli_heartbeat",
+                    "role": self.role.value,
+                    "model": self.model,
+                    "elapsed_seconds": elapsed,
+                },
+            )
 
     async def _prepare_execution_dir(self) -> Path:
         """Return the directory where the Claude CLI should run."""
