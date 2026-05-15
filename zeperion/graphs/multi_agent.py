@@ -386,11 +386,56 @@ def create_multi_agent_graph(
         plan = storage.load_agent_output("planner") or ""
         dev_output = storage.load_agent_output("developer") or ""
 
+        # Run user-supplied verification commands BEFORE invoking the
+        # Tester LLM. Their stdout/stderr/exit codes get injected into
+        # the Tester prompt, so the agent's verdict is grounded in
+        # real test output rather than text-level reasoning over the
+        # Developer's claims. See examples/live-version-feature/NOTES.txt
+        # Finding 4 for the motivating case.
+        verify_results = []
+        if config.tester_verify_commands:
+            from zeperion.utils.verify import run_verify_commands
+
+            logger.info(
+                "Tester: running %s verification command(s)",
+                len(config.tester_verify_commands),
+                extra={
+                    "event": "tester_verify_started",
+                    "thread_id": thread_id,
+                    "round": state["round"],
+                    "fix_attempt": state["fix_attempt"],
+                    "command_count": len(config.tester_verify_commands),
+                },
+            )
+            verify_results = await run_verify_commands(
+                config.tester_verify_commands,
+                cwd=Path(config.project_dir),
+                timeout_seconds=config.tester_verify_timeout_seconds,
+            )
+            for r in verify_results:
+                storage.append_event(
+                    thread_id,
+                    {
+                        "event": "tester_verify_command",
+                        "role": "tester",
+                        "round": state["round"],
+                        "fix_attempt": state["fix_attempt"],
+                        "command": r.command,
+                        "exit_code": r.exit_code,
+                        "duration_ms": r.duration_ms,
+                        "timed_out": r.timed_out,
+                        "passed": r.passed,
+                        "stdout_len": len(r.stdout),
+                        "stderr_len": len(r.stderr),
+                    },
+                )
+
         prompt = template_manager.render_tester(
             requirement=requirement,
             plan=plan,
             dev_output=dev_output,
             lessons=state["lessons_learned"],
+            verify_results=verify_results,
         )
 
         try:
