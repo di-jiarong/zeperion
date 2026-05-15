@@ -76,8 +76,6 @@ def _make_github_mock(
 
     client.check_git_changes.return_value = has_changes
     client.get_last_commit_subject.return_value = "wip"
-    client.get_changed_files.return_value = ["a.py", "b.py"]
-    client.commit_changes.return_value = "deadbeef" * 5
     client.push_branch.return_value = None
 
     # commit_changes_node now talks to run_git directly. Stub the script
@@ -369,7 +367,15 @@ class TestPipelineEdgeCases:
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
 
-        client.commit_changes.assert_not_called()
+        # ``commit_changes_node`` calls ``run_git`` directly, not a
+        # high-level ``commit_changes`` helper. With ``has_changes=False``
+        # we expect zero ``git commit`` calls but the push to still
+        # happen so the PR can refresh against an up-to-date remote.
+        commit_calls = [
+            call for call in client.run_git.await_args_list
+            if call.args[0][:1] == ["commit"]
+        ]
+        assert commit_calls == []
         client.push_branch.assert_awaited_once()
         assert final["commit_sha"] is None  # No new commit created.
 

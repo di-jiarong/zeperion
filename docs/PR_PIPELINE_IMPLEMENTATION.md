@@ -20,10 +20,11 @@
 - **文件**: `zeperion/utils/github.py`
 - **实现**: `GitHubClient` 类（500+ 行）
 - **核心方法**:
-  - Git 操作：`run_git()`, `commit_changes()`, `push_branch()`, `get_current_branch()`
+  - Git 操作：`run_git()`, `push_branch()`, `get_current_branch()`
+    （commit 由 `commit_changes_node` 直接调 `run_git` 完成，不再走 helper）
   - GitHub 操作：`run_gh()`, `create_pr()`, `update_pr()`, `find_existing_pr()`
   - Codex 审查：`collect_codex_feedback()`, `enable_auto_merge()`
-  - 辅助方法：`check_git_changes()`, `get_changed_files()`, `generate_pr_body()`
+  - 辅助方法：`check_git_changes()`, `generate_pr_body()`
 
 ### ✅ Phase 2: 核心工作流（Task 31）
 

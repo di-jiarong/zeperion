@@ -170,50 +170,12 @@ class GitHubClient:
 
         return bool(untracked or modified)
 
-    async def get_changed_files(self) -> list[str]:
-        """Get list of changed files."""
-        # Untracked files
-        untracked = await self.run_git([
-            "ls-files", "--others", "--exclude-standard"
-        ])
-        untracked_files = untracked.split("\n") if untracked else []
-
-        # Modified files
-        modified = await self.run_git(["diff", "--name-only"])
-        modified_files = modified.split("\n") if modified else []
-
-        return list(set(untracked_files + modified_files))
-
     async def get_last_commit_subject(self) -> str:
         """Get the subject of the last commit."""
         try:
             return await self.run_git(["log", "-1", "--format=%s"])
         except RuntimeError:
             return "Initial commit"
-
-    async def commit_changes(self, message: str, body: str = "") -> str:
-        """
-        Commit all changes.
-
-        Args:
-            message: Commit message (subject)
-            body: Commit body (optional)
-
-        Returns:
-            Commit SHA
-        """
-        # Stage all changes
-        await self.run_git(["add", "-A"])
-
-        # Commit
-        full_message = message
-        if body:
-            full_message += f"\n\n{body}"
-
-        await self.run_git(["commit", "-m", full_message])
-
-        # Get commit SHA
-        return await self.run_git(["rev-parse", "HEAD"])
 
     async def push_branch(self, branch: str) -> None:
         """Push branch to origin."""
