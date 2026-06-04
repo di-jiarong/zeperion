@@ -123,6 +123,7 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "tester_agent_type": config.tester_agent_type,
         "max_rounds": config.max_rounds,
         "max_fix_attempts": config.max_fix_attempts,
+        "max_total_tokens": config.max_total_tokens,
         "enable_reviewer": config.enable_reviewer,
         "project_dir": config.project_dir,
         "state_dir": config.state_dir,
