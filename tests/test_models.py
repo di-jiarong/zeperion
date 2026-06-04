@@ -74,6 +74,7 @@ class TestWorkflowConfig:
         assert config.tester_agent_type == "pi"
         assert config.max_rounds == 10
         assert config.max_fix_attempts == 3
+        assert config.max_total_tokens == 0
         assert config.enable_reviewer is True
         assert config.project_dir == "."
         assert config.state_dir == ".zeperion/state"

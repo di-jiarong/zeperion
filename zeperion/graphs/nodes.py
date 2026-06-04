@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent
 from zeperion.models import (
+    AgentOutput,
     GlobalStatus,
     PhaseType,
     ReviewStatus,
@@ -22,6 +23,9 @@ from zeperion.utils.time import iso_now
 from zeperion.utils.tracing import trace_agent
 
 logger = logging.getLogger(__name__)
+
+# Callback that may set role-specific OTEL span attributes after invocation.
+SpanAttrSetter = Callable[[Any, AgentOutput], None]
 
 
 class MultiAgentNodes:
@@ -159,22 +163,114 @@ class MultiAgentNodes:
         for lesson in lessons:
             self.storage.append_lesson(lesson)
 
-    async def planner_node(self, state: WorkflowState) -> WorkflowState:
-        """Planner agent node."""
+    async def _invoke_agent(
+        self,
+        *,
+        name: str,
+        agent: BaseAgent,
+        model: str,
+        prompt: str,
+        state: WorkflowState,
+        span_attrs: Optional[SpanAttrSetter] = None,
+    ) -> tuple[Optional[AgentOutput], Optional[dict]]:
+        """Shared scaffold around a single agent invocation.
+
+        Handles the boilerplate every role repeats verbatim: the start
+        log + ``agent_started`` event, the timed ``trace_agent`` span,
+        ``AgentInvocationError`` -> BLOCKED conversion, and result/lessons
+        bookkeeping. The only per-role variation is the prompt (built by
+        the caller) and the optional ``span_attrs`` callback.
+
+        Returns ``(output, None)`` on success or ``(None, error_patch)``
+        when the fallback chain was exhausted — callers must return the
+        error patch unchanged so the graph routes straight to ``blocked``.
+        """
         logger.info(
-            "Planner: Round %s",
+            "%s: round=%s fix_attempt=%s",
+            name,
             state["round"],
+            state.get("fix_attempt"),
             extra={
                 "event": "agent_start",
-                "role": "planner",
+                "role": name,
                 "round": state["round"],
+                "fix_attempt": state.get("fix_attempt"),
                 "thread_id": self.thread_id,
-                "model": self.config.planner_model,
+                "model": model,
             },
         )
+        self._record_agent_started(name, state)
 
-        self._record_agent_started("planner", state)
+        try:
+            async with trace_agent(
+                name,
+                model=model,
+                thread_id=self.thread_id,
+                round_=state["round"],
+                fix_attempt=state.get("fix_attempt"),
+            ) as span:
+                started_at = time.monotonic()
+                output = await agent.invoke(prompt, state.get(f"{name}_session_id"))
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
+                if span_attrs is not None:
+                    span_attrs(span, output)
+        except AgentInvocationError as exc:
+            return None, self._agent_invocation_failed(name, state, exc)
 
+        self._record_agent_result(name, state, output, duration_ms)
+        self._append_lessons(output.lessons)
+        return output, None
+
+    def _apply_parse_error(
+        self, name: str, output: AgentOutput, patch: dict
+    ) -> None:
+        """Force BLOCKED when a status-owning role emitted unparseable output."""
+        if output.parse_error:
+            patch["phase"] = PhaseType.BLOCKED
+            patch["last_error"] = (
+                f"{name} output parse failure: {output.parse_error}"
+            )[:500]
+
+    def _apply_budget(
+        self, state: WorkflowState, output: AgentOutput, patch: dict
+    ) -> None:
+        """Accumulate token spend and force BLOCKED when the cap is hit.
+
+        Always records the running ``total_tokens`` into ``patch`` (so the
+        guardrail survives checkpoint resume). When ``max_total_tokens`` is
+        positive and the new total meets/exceeds it, the workflow is routed
+        to ``blocked`` via ``global_status=BLOCKED``. A pre-existing
+        ``last_error`` (e.g. a parse failure) is preserved.
+        """
+        previous = state.get("total_tokens", 0) or 0
+        spent = output.usage.total_tokens if output.usage else 0
+        new_total = previous + spent
+        patch["total_tokens"] = new_total
+
+        cap = self.config.max_total_tokens
+        if cap and new_total >= cap:
+            logger.warning(
+                "Token budget exhausted (%s >= max_total_tokens=%s); blocking",
+                new_total,
+                cap,
+                extra={
+                    "event": "token_budget_exceeded",
+                    "thread_id": self.thread_id,
+                    "total_tokens": new_total,
+                    "max_total_tokens": cap,
+                },
+            )
+            patch["phase"] = PhaseType.BLOCKED
+            patch["global_status"] = GlobalStatus.BLOCKED
+            if not patch.get("last_error"):
+                patch["last_error"] = (
+                    f"Token budget exceeded: {new_total} >= "
+                    f"max_total_tokens={cap}. Human intervention required."
+                )
+
+    async def planner_node(self, state: WorkflowState) -> WorkflowState:
+        """Planner agent node."""
         current_plan = self.storage.load_agent_output("planner")
         review_report = self.storage.load_agent_output("reviewer")
         test_report = self.storage.load_agent_output("tester")
@@ -195,25 +291,21 @@ class MultiAgentNodes:
             round_num=state["round"],
         )
 
-        try:
-            async with trace_agent(
-                "planner",
-                model=self.config.planner_model,
-                thread_id=self.thread_id,
-                round_=state["round"],
-            ) as span:
-                started_at = time.monotonic()
-                output = await self.planner.invoke(prompt, state.get("planner_session_id"))
-                duration_ms = int((time.monotonic() - started_at) * 1000)
-                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
-                if output.task_id:
-                    span.set_attribute("zeperion.task_id", output.task_id)
-                span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
-        except AgentInvocationError as exc:
-            return self._agent_invocation_failed("planner", state, exc)
+        def _span_attrs(span: Any, output: AgentOutput) -> None:
+            if output.task_id:
+                span.set_attribute("zeperion.task_id", output.task_id)
+            span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
 
-        self._record_agent_result("planner", state, output, duration_ms)
-        self._append_lessons(output.lessons)
+        output, error_patch = await self._invoke_agent(
+            name="planner",
+            agent=self.planner,
+            model=self.config.planner_model,
+            prompt=prompt,
+            state=state,
+            span_attrs=_span_attrs,
+        )
+        if error_patch is not None:
+            return error_patch
 
         state_patch: dict = {
             "phase": PhaseType.DEVELOPMENT,
@@ -224,31 +316,12 @@ class MultiAgentNodes:
         }
         if output.pr_title:
             state_patch["pr_title"] = output.pr_title
-        if output.parse_error:
-            state_patch["phase"] = PhaseType.BLOCKED
-            state_patch["last_error"] = (
-                f"planner output parse failure: {output.parse_error}"
-            )[:500]
+        self._apply_parse_error("planner", output, state_patch)
+        self._apply_budget(state, output, state_patch)
         return state_patch
 
     async def developer_node(self, state: WorkflowState) -> WorkflowState:
         """Developer agent node."""
-        logger.info(
-            "Developer: Round %s, Fix attempt %s",
-            state["round"],
-            state["fix_attempt"],
-            extra={
-                "event": "agent_start",
-                "role": "developer",
-                "round": state["round"],
-                "fix_attempt": state["fix_attempt"],
-                "thread_id": self.thread_id,
-                "model": self.config.developer_model,
-            },
-        )
-
-        self._record_agent_started("developer", state)
-
         plan = self.storage.load_agent_output("planner") or ""
         test_report = self.storage.load_agent_output("tester")
 
@@ -261,51 +334,32 @@ class MultiAgentNodes:
             uses_claude_code=self.developer_can_edit_files,
         )
 
-        try:
-            async with trace_agent(
-                "developer",
-                model=self.config.developer_model,
-                thread_id=self.thread_id,
-                round_=state["round"],
-                fix_attempt=state["fix_attempt"],
-            ) as span:
-                started_at = time.monotonic()
-                output = await self.developer.invoke(prompt, state.get("developer_session_id"))
-                duration_ms = int((time.monotonic() - started_at) * 1000)
-                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
-                span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
-        except AgentInvocationError as exc:
-            return self._agent_invocation_failed("developer", state, exc)
+        def _span_attrs(span: Any, output: AgentOutput) -> None:
+            span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
 
-        self._record_agent_result("developer", state, output, duration_ms)
-        self._append_lessons(output.lessons)
+        output, error_patch = await self._invoke_agent(
+            name="developer",
+            agent=self.developer,
+            model=self.config.developer_model,
+            prompt=prompt,
+            state=state,
+            span_attrs=_span_attrs,
+        )
+        if error_patch is not None:
+            return error_patch
 
-        return {
+        patch = {
             "phase": PhaseType.REVIEWING
             if self.config.enable_reviewer
             else PhaseType.TESTING,
             "lessons_learned": output.lessons,
             "updated_at": iso_now(),
         }
+        self._apply_budget(state, output, patch)
+        return patch
 
     async def reviewer_node(self, state: WorkflowState) -> WorkflowState:
         """Reviewer agent node."""
-        logger.info(
-            "Reviewer: Round %s, Fix attempt %s",
-            state["round"],
-            state["fix_attempt"],
-            extra={
-                "event": "agent_start",
-                "role": "reviewer",
-                "round": state["round"],
-                "fix_attempt": state["fix_attempt"],
-                "thread_id": self.thread_id,
-                "model": self.config.reviewer_model,
-            },
-        )
-
-        self._record_agent_started("reviewer", state)
-
         plan = self.storage.load_agent_output("planner") or ""
         dev_output = self.storage.load_agent_output("developer") or ""
 
@@ -316,28 +370,23 @@ class MultiAgentNodes:
             lessons=state["lessons_learned"],
         )
 
-        try:
-            async with trace_agent(
-                "reviewer",
-                model=self.config.reviewer_model,
-                thread_id=self.thread_id,
-                round_=state["round"],
-                fix_attempt=state["fix_attempt"],
-            ) as span:
-                started_at = time.monotonic()
-                output = await self.reviewer.invoke(prompt, state.get("reviewer_session_id"))
-                duration_ms = int((time.monotonic() - started_at) * 1000)
-                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
-                span.set_attribute(
-                    "zeperion.review_status",
-                    getattr(output.review_status, "value", str(output.review_status)),
-                )
-                span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
-        except AgentInvocationError as exc:
-            return self._agent_invocation_failed("reviewer", state, exc)
+        def _span_attrs(span: Any, output: AgentOutput) -> None:
+            span.set_attribute(
+                "zeperion.review_status",
+                getattr(output.review_status, "value", str(output.review_status)),
+            )
+            span.set_attribute("zeperion.agent.lessons_count", len(output.lessons))
 
-        self._record_agent_result("reviewer", state, output, duration_ms)
-        self._append_lessons(output.lessons)
+        output, error_patch = await self._invoke_agent(
+            name="reviewer",
+            agent=self.reviewer,
+            model=self.config.reviewer_model,
+            prompt=prompt,
+            state=state,
+            span_attrs=_span_attrs,
+        )
+        if error_patch is not None:
+            return error_patch
 
         updates = {
             "review_status": output.review_status,
@@ -347,33 +396,15 @@ class MultiAgentNodes:
         }
 
         if output.parse_error:
-            updates["phase"] = PhaseType.BLOCKED
-            updates["last_error"] = (
-                f"reviewer output parse failure: {output.parse_error}"
-            )[:500]
+            self._apply_parse_error("reviewer", output, updates)
         elif output.review_status in (ReviewStatus.FAIL, ReviewStatus.BLOCKED):
             updates["last_error"] = output.raw_output[-500:]
 
+        self._apply_budget(state, output, updates)
         return updates
 
     async def tester_node(self, state: WorkflowState) -> WorkflowState:
         """Tester agent node."""
-        logger.info(
-            "Tester: Round %s, Fix attempt %s",
-            state["round"],
-            state["fix_attempt"],
-            extra={
-                "event": "agent_start",
-                "role": "tester",
-                "round": state["round"],
-                "fix_attempt": state["fix_attempt"],
-                "thread_id": self.thread_id,
-                "model": self.config.tester_model,
-            },
-        )
-
-        self._record_agent_started("tester", state)
-
         plan = self.storage.load_agent_output("planner") or ""
         dev_output = self.storage.load_agent_output("developer") or ""
         review_output = self.storage.load_agent_output("reviewer") or ""
@@ -427,27 +458,22 @@ class MultiAgentNodes:
             verify_results=verify_results,
         )
 
-        try:
-            async with trace_agent(
-                "tester",
-                model=self.config.tester_model,
-                thread_id=self.thread_id,
-                round_=state["round"],
-                fix_attempt=state["fix_attempt"],
-            ) as span:
-                started_at = time.monotonic()
-                output = await self.tester.invoke(prompt, state.get("tester_session_id"))
-                duration_ms = int((time.monotonic() - started_at) * 1000)
-                span.set_attribute("zeperion.agent.duration_ms", duration_ms)
-                span.set_attribute(
-                    "zeperion.test_status",
-                    getattr(output.test_status, "value", str(output.test_status)),
-                )
-        except AgentInvocationError as exc:
-            return self._agent_invocation_failed("tester", state, exc)
+        def _span_attrs(span: Any, output: AgentOutput) -> None:
+            span.set_attribute(
+                "zeperion.test_status",
+                getattr(output.test_status, "value", str(output.test_status)),
+            )
 
-        self._record_agent_result("tester", state, output, duration_ms)
-        self._append_lessons(output.lessons)
+        output, error_patch = await self._invoke_agent(
+            name="tester",
+            agent=self.tester,
+            model=self.config.tester_model,
+            prompt=prompt,
+            state=state,
+            span_attrs=_span_attrs,
+        )
+        if error_patch is not None:
+            return error_patch
 
         updates = {
             "test_status": output.test_status,
@@ -457,11 +483,9 @@ class MultiAgentNodes:
         }
 
         if output.parse_error:
-            updates["phase"] = PhaseType.BLOCKED
-            updates["last_error"] = (
-                f"tester output parse failure: {output.parse_error}"
-            )[:500]
+            self._apply_parse_error("tester", output, updates)
         elif output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
             updates["last_error"] = output.raw_output[-500:]
 
+        self._apply_budget(state, output, updates)
         return updates

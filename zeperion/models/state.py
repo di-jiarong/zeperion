@@ -101,6 +101,12 @@ class WorkflowState(TypedDict):
     developer_session_id: Optional[str]
     reviewer_session_id: Optional[str]
     tester_session_id: Optional[str]
+    # Cumulative token spend across every agent invocation in this run.
+    # Lives in state (not just in-memory on the nodes object) so the
+    # ``max_total_tokens`` guardrail survives checkpoint resume. Reads use
+    # ``state.get("total_tokens", 0)`` so older checkpoints lacking the
+    # key resume cleanly.
+    total_tokens: int
     updated_at: str  # ISO 8601 timestamp
 
 
@@ -223,6 +229,26 @@ class WorkflowConfig(BaseModel):
     # multi-task plans, cheap enough to recover from operator error.
     max_rounds: int = Field(default=10, ge=1)
     max_fix_attempts: int = Field(default=3, ge=0)
+    # Cumulative LLM token budget across all roles for a single
+    # multi-agent run. ``0`` (the default) means *unlimited* — the
+    # round/fix-attempt caps remain the only stop conditions. When set
+    # to a positive value, the workflow is forced to BLOCKED as soon as
+    # the running token total (summed from every agent's reported
+    # ``usage``) meets or exceeds the cap. This complements ``max_rounds``
+    # (which only bounds iteration count) with a hard spend ceiling, so a
+    # pathological run on a real ``pi``/``claude_code`` backend cannot burn
+    # an unbounded amount of money before a human looks at it. Backends
+    # that do not report token usage contribute 0 and therefore never
+    # trip the cap.
+    max_total_tokens: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Cumulative token budget for one multi-agent run (0 = "
+            "unlimited). Forces BLOCKED once the summed agent token usage "
+            "reaches the cap."
+        ),
+    )
     enable_reviewer: bool = Field(
         default=True,
         description=(
@@ -441,6 +467,7 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
         developer_session_id=None,
         reviewer_session_id=None,
         tester_session_id=None,
+        total_tokens=0,
         updated_at=iso_now(),
     )
 

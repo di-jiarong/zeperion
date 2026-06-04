@@ -356,6 +356,46 @@ class TestWorkflowGraph:
         assert all("duration_ms" in e for e in completed)
 
     @pytest.mark.asyncio
+    async def test_token_budget_blocks_run(self, test_config, mock_agent_outputs):
+        """A cumulative token cap forces BLOCKED mid-run.
+
+        The planner reports 600 tokens; with ``max_total_tokens=500`` the
+        very first node must trip the guardrail, set ``global_status=BLOCKED``
+        and route straight to the ``blocked`` terminal without ever
+        reaching the developer/tester (so their outputs are left unused).
+        """
+        from zeperion.models import TokenUsage
+
+        planner_costly = mock_agent_outputs["planner"].model_copy(
+            update={"usage": TokenUsage(input_tokens=400, output_tokens=200)}
+        )
+        FakeAgent.outputs = [
+            planner_costly,
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
+            mock_agent_outputs["tester_pass"],
+        ]
+
+        budget_config = test_config.model_copy(update={"max_total_tokens": 500})
+        graph = create_multi_agent_graph(
+            budget_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(budget_config)
+
+        merged_state = dict(initial_state)
+        async for event in graph.astream(
+            initial_state, {"configurable": {"thread_id": "budget"}}
+        ):
+            for node_state in event.values():
+                merged_state.update(node_state)
+
+        assert merged_state["global_status"] == GlobalStatus.BLOCKED
+        assert merged_state["total_tokens"] == 600
+        assert "Token budget exceeded" in (merged_state["last_error"] or "")
+        # Developer/reviewer/tester never ran, so their outputs remain queued.
+        assert len(FakeAgent.outputs) == 3
+
+    @pytest.mark.asyncio
     async def test_retry_on_test_failure(self, test_config, mock_agent_outputs):
         """Test retry logic when tests fail."""
         FakeAgent.outputs = [

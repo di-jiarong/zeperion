@@ -180,6 +180,7 @@ def get_default_config() -> Dict[str, Any]:
         "tester_agent_type": defaults["tester_agent_type"].default,
         "max_rounds": defaults["max_rounds"].default,
         "max_fix_attempts": defaults["max_fix_attempts"].default,
+        "max_total_tokens": defaults["max_total_tokens"].default,
         "enable_reviewer": defaults["enable_reviewer"].default,
         "project_dir": defaults["project_dir"].default,
         "state_dir": defaults["state_dir"].default,
