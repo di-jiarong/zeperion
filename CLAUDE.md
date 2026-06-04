@@ -31,7 +31,11 @@ zeperion/
     nodes.py           # Planner / Developer / Reviewer / Tester node implementations
     routes.py          # Multi-agent routing decisions
     control.py         # Small graph control nodes (increment/block)
-    pr_pipeline.py     # commit → push → PR → Codex → auto-merge StateGraph
+    pr_pipeline/       # commit → push → PR → Codex → auto-merge (package)
+      nodes.py         #   git/commit/push/PR/codex/merge/fixer node impls
+      routes.py        #   decide_next_action (Codex verdict → next node)
+      handoff.py       #   Planner → PR pipeline title/task handoff helpers
+      graph.py         #   create_pr_pipeline_graph StateGraph assembly
   models/state.py      # TypedDict states + WorkflowConfig (Pydantic)
   parsers/section_parser.py  # Lenient TASK_ID/STATUS/LESSONS extractor
   prompts/templates/   # Jinja2 templates for planner/developer/reviewer/tester

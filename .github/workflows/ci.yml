@@ -36,5 +36,22 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Run Ruff
+      # Blocking gate: pyflakes correctness (F) + import ordering (I).
+      # The whole tree is verified isort-clean, so I is safe to enforce.
+      - name: Run Ruff (blocking — correctness + import order)
         run: python -m ruff check zeperion tests examples/auth-system/run_demo.py --select F,I
+
+      # The wider style/modernise rule set (E/N/W/UP) is surfaced but NOT
+      # yet blocking: the codebase predates the rules (mostly UP045
+      # ``Optional[X]`` -> ``X | None`` modernisation). Clean incrementally,
+      # then fold these into the blocking step above.
+      - name: Run Ruff (non-blocking — style + modernise)
+        continue-on-error: true
+        run: python -m ruff check zeperion tests examples/auth-system/run_demo.py --select E,N,W,UP
+
+      # Type checking is advisory until the annotation debt in the graph
+      # and CLI layers is paid down (mypy is configured strict in
+      # pyproject.toml: disallow_untyped_defs).
+      - name: Run mypy (non-blocking)
+        continue-on-error: true
+        run: python -m mypy zeperion,I
