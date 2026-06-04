@@ -204,7 +204,7 @@ class TestE2EPRPipelineWithRealGitAndCheckpointer:
         ckpt_db = real_git_repo / ".zeperion" / "checkpoints.sqlite"
         ckpt_db.parent.mkdir(parents=True, exist_ok=True)
 
-        with patch("zeperion.graphs.pr_pipeline.GitHubClient", factory):
+        with patch("zeperion.graphs.pr_pipeline.nodes.GitHubClient", factory):
             async with open_zeperion_checkpointer(str(ckpt_db)) as saver:
                 graph = create_pr_pipeline_graph(cfg, checkpointer=saver)
                 final = await graph.ainvoke(
@@ -258,7 +258,7 @@ class TestE2EPRPipelineWithRealGitAndCheckpointer:
         ckpt_db = real_git_repo / ".zeperion" / "checkpoints.sqlite"
         ckpt_db.parent.mkdir(parents=True, exist_ok=True)
 
-        with patch("zeperion.graphs.pr_pipeline.GitHubClient", factory):
+        with patch("zeperion.graphs.pr_pipeline.nodes.GitHubClient", factory):
             async with open_zeperion_checkpointer(str(ckpt_db)) as saver:
                 graph = create_pr_pipeline_graph(cfg, checkpointer=saver)
                 await graph.ainvoke(
@@ -295,7 +295,7 @@ class TestE2EPRPipelineWithRealGitAndCheckpointer:
         cfg = _config(real_git_repo)
         ckpt_db = real_git_repo / ".zeperion" / "checkpoints.sqlite"
 
-        with patch("zeperion.graphs.pr_pipeline.GitHubClient", factory):
+        with patch("zeperion.graphs.pr_pipeline.nodes.GitHubClient", factory):
             async with open_zeperion_checkpointer(str(ckpt_db)) as saver:
                 graph = create_pr_pipeline_graph(cfg, checkpointer=saver)
                 await graph.ainvoke(

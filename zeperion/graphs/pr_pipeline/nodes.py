@@ -1,13 +1,14 @@
-"""PR Pipeline workflow graph."""
+"""Node implementations for the PR pipeline graph.
+
+``GitHubClient`` and ``create_agent`` are imported at module level so
+tests can monkeypatch ``zeperion.graphs.pr_pipeline.nodes.GitHubClient``
+/ ``...nodes.create_agent`` and have the patch observed by the node
+functions defined here.
+"""
 
 import logging
-from pathlib import Path
-from typing import Literal, Optional
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph import END, StateGraph
-
-from zeperion.agents.base import AgentInvocationError, _clean_pr_title
+from zeperion.agents.base import AgentInvocationError
 from zeperion.agents.factory import create_agent
 from zeperion.models import (
     AgentRole,
@@ -16,68 +17,12 @@ from zeperion.models import (
     PRPipelineState,
     WorkflowConfig,
 )
-from zeperion.parsers import SectionParser
 from zeperion.prompts import get_template_manager
-from zeperion.storage import StateStorage
 from zeperion.utils.github import GitHubClient
 from zeperion.utils.time import iso_now
 from zeperion.utils.tracing import trace_node_async
 
 logger = logging.getLogger(__name__)
-
-
-def derive_sibling_multi_agent_thread(thread_id: str) -> Optional[str]:
-    """Heuristic: ``"foo-pr"`` -> ``"foo"``. Otherwise ``None``.
-
-    The README's recommended pattern is to run multi_agent on
-    ``--thread-id X`` and then PR pipeline on ``--thread-id X-pr``,
-    so the trailing ``-pr`` convention is reliable enough to use as
-    a default for the planner-handoff lookup. Users with a different
-    convention should pass ``--from-thread`` explicitly.
-    """
-    if thread_id.endswith("-pr") and len(thread_id) > 3:
-        return thread_id[:-3]
-    return None
-
-
-def load_planner_handoff_from_sibling_thread(
-    state_dir: Path, sibling_thread_id: str
-) -> dict[str, Optional[str]]:
-    """Read ``state_dir/threads/<sibling>/planner_output.txt`` and
-    extract the PR_TITLE / TASK_ID the Planner emitted.
-
-    Returns ``{"pr_title": ..., "task_id": ...}`` with either value
-    set to ``None`` when the file is missing, the field is absent,
-    or parsing fails. Never raises — a missing handoff is a benign
-    fall-through to the PR pipeline's existing fallback behaviour
-    (generic "chore: zeperion automated commit" subject + branch-name
-    PR title).
-
-    Why the file rather than the LangGraph checkpoint:
-
-    * Reading checkpoints requires opening an async SQLite saver,
-      pulling the latest tuple, and decoding msgpack — a lot of
-      ceremony for two strings.
-    * The Planner already writes ``planner_output.txt`` via
-      ``StateStorage.save_agent_output`` after every round, so the
-      file is always at most one round stale, which matches what
-      the operator sees in ``zeperion status``.
-    * Reading a text file makes this helper easy to unit-test
-      without spinning up an async event loop.
-    """
-    storage = StateStorage(state_dir, thread_id=sibling_thread_id)
-    raw = storage.load_agent_output("planner")
-    if not raw:
-        return {"pr_title": None, "task_id": None}
-    parser = SectionParser(raw)
-    # Mirror the cleaning that BaseAgent.parse_output normally applies
-    # to a Planner-emitted PR_TITLE — strips ``**bold**`` / ``"quoted"``
-    # decorations, collapses to single line, truncates at 72 chars,
-    # rejects placeholder values like ``"none"`` / ``"task_xxx"``.
-    return {
-        "pr_title": _clean_pr_title(parser.extract_field("PR_TITLE")),
-        "task_id": parser.extract_field("TASK_ID"),
-    }
 
 
 async def validate_git_node(state: PRPipelineState) -> dict:
@@ -420,30 +365,6 @@ async def check_codex_review_node(state: PRPipelineState) -> dict:
             "updated_at": iso_now(),
         }
 
-
-def decide_next_action(
-    state: PRPipelineState,
-) -> Literal["auto_merge", "wait", "pr_fixer", "end"]:
-    """Decide the next node after ``check_codex_review``.
-
-    - ``APPROVED``     → ``auto_merge``
-    - ``NEEDS_FIXES``  → ``pr_fixer`` (let the bot address the comments)
-    - ``WAITING`` / ``PENDING`` → ``wait``
-    - Anything else (defensive) → ``end``
-    """
-    codex_status = state["codex_status"]
-
-    if codex_status == CodexStatus.APPROVED:
-        logger.info("→ Proceeding to auto-merge")
-        return "auto_merge"
-    if codex_status == CodexStatus.NEEDS_FIXES:
-        logger.warning("→ Routing to pr_fixer (Codex left actionable comments)")
-        return "pr_fixer"
-    if codex_status in (CodexStatus.WAITING, CodexStatus.PENDING):
-        logger.info("→ Waiting for review")
-        return "wait"
-    logger.error(f"Unknown codex_status {codex_status!r}, ending workflow")
-    return "end"
 
 
 def _build_auto_merge_node(config: WorkflowConfig):
@@ -797,76 +718,3 @@ async def wait_for_review_node(state: PRPipelineState) -> dict:
         "updated_at": iso_now(),
     }
 
-
-def create_pr_pipeline_graph(
-    config: WorkflowConfig,
-    *,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-    enable_checkpoint: Optional[bool] = None,
-    checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
-) -> StateGraph:
-    """Create PR Pipeline workflow graph.
-
-    Workflow:
-    1. Validate Git/GitHub environment
-    2. Commit changes
-    3. Push to GitHub
-    4. Create or update PR
-    5. Check Codex review status
-    6. Auto-merge (if approved) or wait for review
-
-    Args:
-        config: Workflow configuration.
-        checkpointer: Optional LangGraph checkpointer; caller-managed.
-        enable_checkpoint: Deprecated; pass ``checkpointer`` instead.
-        checkpoint_path: Deprecated; ignored.
-    """
-    if checkpoint_path is not None:
-        logger.warning(
-            "create_pr_pipeline_graph(checkpoint_path=...) is deprecated and ignored; "
-            "pass an explicit checkpointer instead."
-        )
-    if enable_checkpoint is False and checkpointer is not None:
-        raise ValueError(
-            "enable_checkpoint=False is incompatible with an explicit checkpointer"
-        )
-
-    logger.info("Creating PR Pipeline graph")
-
-    workflow = StateGraph(PRPipelineState)
-
-    workflow.add_node("validate_git", validate_git_node)
-    workflow.add_node("commit_changes", commit_changes_node)
-    workflow.add_node("push_branch", push_branch_node)
-    workflow.add_node("create_or_update_pr", create_or_update_pr_node)
-    workflow.add_node("check_codex_review", check_codex_review_node)
-    workflow.add_node("auto_merge", _build_auto_merge_node(config))
-    workflow.add_node("wait_for_review", wait_for_review_node)
-    workflow.add_node("pr_fixer", _build_pr_fixer_node(config))
-
-    workflow.set_entry_point("validate_git")
-    workflow.add_edge("validate_git", "commit_changes")
-    workflow.add_edge("commit_changes", "push_branch")
-    workflow.add_edge("push_branch", "create_or_update_pr")
-    workflow.add_edge("create_or_update_pr", "check_codex_review")
-
-    workflow.add_conditional_edges(
-        "check_codex_review",
-        decide_next_action,
-        {
-            "auto_merge": "auto_merge",
-            "wait": "wait_for_review",
-            "pr_fixer": "pr_fixer",
-            "end": END,
-        },
-    )
-
-    workflow.add_edge("auto_merge", END)
-    workflow.add_edge("wait_for_review", END)
-    # After fixing, exit and let the next external trigger re-enter the graph
-    # to observe Codex's reaction; this avoids busy-waiting inside the node.
-    workflow.add_edge("pr_fixer", END)
-
-    if checkpointer is not None:
-        return workflow.compile(checkpointer=checkpointer)
-    return workflow.compile()

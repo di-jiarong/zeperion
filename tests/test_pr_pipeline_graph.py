@@ -146,7 +146,7 @@ class TestPipelineHappyPath:
         client = _make_github_mock(codex_thumbs=1, codex_reviewed_commit="abc123")
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -212,9 +212,9 @@ class TestPipelineNeedsFixes:
         fake_agent.invoke.return_value = MagicMock()  # AgentOutput stand-in
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -258,7 +258,7 @@ class TestPipelineWaiting:
         )
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -281,7 +281,7 @@ class TestPipelineWaiting:
         )
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -318,7 +318,7 @@ class TestPipelineEdgeCases:
         )
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -351,7 +351,7 @@ class TestPipelineEdgeCases:
         client.run_git.side_effect = _git
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -374,7 +374,7 @@ class TestPipelineEdgeCases:
         )
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -396,7 +396,7 @@ class TestPipelineEdgeCases:
         client = _make_github_mock()
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             with pytest.raises(Exception, match="GITHUB_TOKEN"):
@@ -408,7 +408,7 @@ class TestPipelineEdgeCases:
         client.is_git_repo.return_value = False
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             graph = create_pr_pipeline_graph(_config())
             with pytest.raises(Exception, match="git repository"):
@@ -452,7 +452,7 @@ class TestCodexThreshold:
         state["pr_number"] = 99
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await check_codex_review_node(state)
 
@@ -496,9 +496,9 @@ class TestPipelineFixerEdgeCases:
         fake_agent = AsyncMock()
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -533,9 +533,9 @@ class TestPipelineFixerEdgeCases:
         fake_agent.invoke.return_value = MagicMock()
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -567,9 +567,9 @@ class TestPipelineFixerEdgeCases:
         fake_agent.invoke.side_effect = AgentInvocationError("rate limit")
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             graph = create_pr_pipeline_graph(_config())
             final = await graph.ainvoke(_initial_state())
@@ -607,7 +607,7 @@ class TestCodexRereviewDebounce:
         state["last_codex_review_request_commit"] = "abc123"
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await wait_for_review_node(state)
 
@@ -631,7 +631,7 @@ class TestCodexRereviewDebounce:
         state["last_codex_review_request_commit"] = "abc123"  # different
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await wait_for_review_node(state)
 
@@ -672,9 +672,9 @@ class TestCodexRereviewDebounce:
         state["last_codex_review_request_commit"] = "deadbeef" * 5
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             result = await node(state)
 
@@ -709,7 +709,7 @@ class TestCreatePRTitleFallback:
         state["pr_title"] = None  # Planner did not provide a title
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await create_or_update_pr_node(state)
 
@@ -734,7 +734,7 @@ class TestCreatePRTitleFallback:
         state["pr_title"] = "feat: add /version endpoint"
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await create_or_update_pr_node(state)
 
@@ -754,7 +754,7 @@ class TestCreatePRTitleFallback:
         state["pr_title"] = None
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await create_or_update_pr_node(state)
 
@@ -779,7 +779,7 @@ class TestAutoMergeBehaviour:
         state["pr_url"] = "https://github.com/owner/repo/pull/77"
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await node(state)
 
@@ -802,7 +802,7 @@ class TestAutoMergeBehaviour:
         state["pr_url"] = "https://github.com/owner/repo/pull/77"
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await node(state)
 
@@ -823,7 +823,7 @@ class TestAutoMergeBehaviour:
         state["pr_url"] = "https://github.com/owner/repo/pull/77"
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ):
             result = await node(state)
 
@@ -857,9 +857,9 @@ class TestPRFixerAttemptsCap:
         state["pr_fixer_attempts"] = 2  # already at cap
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             result = await node(state)
 
@@ -894,9 +894,9 @@ class TestPRFixerAttemptsCap:
         state["pr_fixer_attempts"] = 1  # halfway
 
         with patch(
-            "zeperion.graphs.pr_pipeline.GitHubClient", return_value=client
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
         ), patch(
-            "zeperion.graphs.pr_pipeline.create_agent", return_value=fake_agent
+            "zeperion.graphs.pr_pipeline.nodes.create_agent", return_value=fake_agent
         ):
             result = await node(state)
 
