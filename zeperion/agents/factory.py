@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Sequence, Type
 
-from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
+from zeperion.agents import AnthropicAgent, ClaudeCodeAgent, PiAgent
 from zeperion.agents.base import BaseAgent
 from zeperion.agents.fallback import maybe_wrap_with_fallbacks
 from zeperion.models import AgentRole, WorkflowConfig
@@ -22,6 +22,8 @@ def resolve_agent_class(agent_type: str) -> Type[BaseAgent]:
         return AnthropicAgent
     if normalized == "claude_code":
         return ClaudeCodeAgent
+    if normalized == "pi":
+        return PiAgent
     raise ValueError(f"Unsupported agent type: {agent_type}")
 
 
@@ -44,6 +46,18 @@ def _instantiate(
             worktree_parent=config.claude_cli_worktree_parent,
             keep_worktree=config.claude_cli_keep_worktree,
             progress_interval_seconds=config.claude_cli_progress_interval_seconds,
+        )
+    if agent_class is PiAgent:
+        return PiAgent(
+            role=role,
+            model=model,
+            cli_tool=config.pi_cli_tool,
+            timeout=config.pi_cli_timeout,
+            project_dir=config.project_dir,
+            extra_args=config.pi_cli_extra_args,
+            no_session=config.pi_rpc_no_session,
+            progress_interval_seconds=config.pi_rpc_progress_interval_seconds,
+            auto_respond_ui_requests=config.pi_rpc_auto_respond_ui_requests,
         )
     return agent_class(role=role, model=model)
 

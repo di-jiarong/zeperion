@@ -4,7 +4,7 @@ ZEPERION 支持多种 LLM 提供商。本文档说明如何选择和实现自定
 
 ## 内置 Agent
 
-### AnthropicAgent（推荐）
+### AnthropicAgent
 
 **特点**：
 - 直接调用 Anthropic API
@@ -56,6 +56,33 @@ agent = ClaudeCodeAgent(
 **要求**：
 - 安装 `claude` CLI 工具
 - 配置 Claude Code 认证
+
+### PiAgent（推荐用于 Pi Coding Agent 工作流）
+
+**特点**：
+- 通过 subprocess 调用 Pi Coding Agent RPC 模式
+- 支持 `planner_agent_type` / `developer_agent_type` / `reviewer_agent_type` / `tester_agent_type: pi`
+- 适合配合 `.pi/APPEND_SYSTEM.md` 和 `.pi/skills/*` 使用
+
+**使用方式**：
+
+```python
+from zeperion.agents import PiAgent
+from zeperion.models import AgentRole
+
+agent = PiAgent(
+    role=AgentRole.DEVELOPER,
+    model="gpt-5",
+    cli_tool="pi",
+    timeout=600,
+    project_dir=".",
+)
+```
+
+**要求**：
+- 安装 `pi` CLI 工具
+- 配置 Pi Coding Agent 认证
+- 在配置中为需要真实改文件的角色设置 `*_agent_type: pi`
 
 ## 实现自定义 Agent
 
@@ -122,6 +149,20 @@ VERIFY_HINTS:
 - 测试点1
 BLOCKERS:
 - NONE
+LESSONS:
+- 经验1
+```
+
+**Reviewer 输出**：
+```
+REVIEW_STATUS: PASS
+GLOBAL_STATUS: CONTINUE
+FINDINGS:
+- NONE
+FIX_REQUEST:
+- NONE
+VERIFY_HINTS:
+- 测试点1
 LESSONS:
 - 经验1
 ```

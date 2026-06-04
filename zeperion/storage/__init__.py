@@ -51,6 +51,7 @@ class StateStorage:
         self.pipeline_state_file = self.thread_dir / "pipeline_state.json"
         self.planner_output_file = self.thread_dir / "planner_output.txt"
         self.developer_output_file = self.thread_dir / "developer_output.txt"
+        self.reviewer_output_file = self.thread_dir / "reviewer_output.txt"
         self.tester_output_file = self.thread_dir / "tester_output.txt"
         self.lessons_file = self.state_dir / "lessons_learned.txt"
         self.runs_dir = self.state_dir / "runs"
@@ -201,6 +202,7 @@ class StateStorage:
             self.pipeline_state_file,
             self.planner_output_file,
             self.developer_output_file,
+            self.reviewer_output_file,
             self.tester_output_file,
         ]:
             if file.exists():

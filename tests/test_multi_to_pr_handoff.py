@@ -31,13 +31,12 @@ import pytest
 
 from zeperion.graphs.multi_agent import create_multi_agent_graph
 from zeperion.models import (
-    AgentRole,
     GlobalStatus,
     PhaseType,
     PRPhase,
+    ReviewStatus,
     TestStatus,
     WorkflowConfig,
-    create_initial_state,
 )
 
 
@@ -65,6 +64,7 @@ def _build_bridge_node(tmp_path: Path):
         max_fix_attempts=0,
         planner_agent_type="claude_code",
         developer_agent_type="claude_code",
+        reviewer_agent_type="claude_code",
         tester_agent_type="claude_code",
     )
     graph = create_multi_agent_graph(cfg, enable_checkpoint=False)
@@ -86,11 +86,13 @@ def _ws_state(**overrides: Any) -> dict:
         "task_id": "task_001",
         "pr_title": "feat: add GET /uptime endpoint",
         "test_status": TestStatus.PASS,
+        "review_status": ReviewStatus.PASS,
         "global_status": GlobalStatus.DONE,
         "last_error": None,
         "lessons_learned": [],
         "planner_session_id": None,
         "developer_session_id": None,
+        "reviewer_session_id": None,
         "tester_session_id": None,
         "updated_at": "2026-05-14T00:00:00+00:00",
     }

@@ -2,25 +2,24 @@
 
 **多智能体开发与 PR 交付管线框架**
 
-ZEPERION 是一个基于 LangGraph 的多智能体协作框架，用于自动化软件开发工作流。它通过 Planner、Developer、Tester 三个智能体的协作，实现从需求到代码交付的完整闭环，并支持自动化 GitHub PR 创建、审查和合并。
+ZEPERION 是一个基于 LangGraph 的多智能体协作框架，用于自动化软件开发工作流。它通过 Planner、Developer、Reviewer、Tester 四个智能体的协作，实现从需求到代码交付的完整闭环，并支持自动化 GitHub PR 创建、审查和合并。
 
-> **⚠️ 重要：默认 `anthropic` agent 不会修改你的项目文件**
+> **⚠️ 重要：`anthropic` agent 不会修改你的项目文件**
 >
 > `AnthropicAgent` 只发起一次 `messages.create` 调用并解析返回文本，
-> **不带任何工具能力**（没有 file IO，没有 shell）。在 `multi_agent`
-> 模式下使用默认配置时，Planner/Developer/Tester 三个 agent 只会产出
-> 文本到 `.zeperion/state/threads/<thread_id>/*_output.txt`，**不会写入
-> 任何源代码**。
+> **不带任何工具能力**（没有 file IO，没有 shell）。如果把 Developer
+> 配成 `anthropic`，工作流会产出文本到
+> `.zeperion/state/threads/<thread_id>/*_output.txt`，但**不会写入任何源代码**。
 >
-> 如果想让 agent 真正改文件，必须把对应 role（通常是 Developer）切到
-> `claude_code` agent 类型 —— 它通过 `claude --print` CLI 调起 Claude Code，
-> 由 CLI 自身完成文件读写：
+> 默认配置已经把 Developer / Reviewer / Tester 放在 `pi` 后端上。`pi` 通过 Pi Coding Agent 的
+> JSONL RPC 模式调起本地 Pi CLI；`claude_code` 通过 `claude --print`
+> CLI 调起 Claude Code。文件读写由对应 CLI 自身完成：
 >
 > ```yaml
-> developer_agent_type: claude_code
+> developer_agent_type: pi
 > ```
 >
-> 这件事 README 之前没有讲清楚，请先看完这一段再决定怎么用。
+> 如果你只想生成计划和建议，可以显式改回 `anthropic`，并确认你接受“不改文件”的行为。
 
 ## 特性
 
@@ -30,6 +29,7 @@ ZEPERION 是一个基于 LangGraph 的多智能体协作框架，用于自动化
 - **并发安全**：StateGraph 原子状态更新，无文件轮询
 - **可测试性**：模块化设计，易于单元测试和 mock
 - **可扩展性**：插件化 Agent 架构，支持自定义智能体
+- **Pi Coding Agent 支持**：可用 `pi` 后端驱动 Planner/Developer/Tester/PR Fixer
 - **PR 自动化**：自动创建 PR、等待 Codex 审查、启用 auto-merge
 
 ## 工作模式
@@ -50,6 +50,11 @@ ZEPERION 支持两种工作模式：
        │
        ▼
 ┌─────────────┐
+│  Reviewer   │  审查实现质量、范围和风险
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
 │   Tester    │  测试验收，反馈问题
 └──────┬──────┘
        │
@@ -60,13 +65,20 @@ ZEPERION 支持两种工作模式：
 **状态机**：
 
 ```
-PLANNING ──→ DEVELOPMENT ──→ TESTING
-    ↑            │              │
-    │            ▼              ▼
-    └────── (fix) ←────── (pass/fail)
-                              │
-                              ▼
-                          COMPLETED
+PLANNING ──→ DEVELOPMENT ──→ REVIEWING ──→ TESTING
+    ↑            │              │             │
+    │            ▼              ▼             ▼
+    └────── (fix) ←────── (review fail) ←── (test fail)
+                                             │
+                                             ▼
+                                         COMPLETED
+```
+
+Reviewer 默认开启，负责在测试前审查 Developer 本轮实现是否符合计划、是否有明显遗漏或回归风险。
+如果只想保留旧的 Developer → Tester 流程，可以在配置中设置：
+
+```yaml
+enable_reviewer: false
 ```
 
 ### 2. PR Pipeline 模式（GitHub 交付）
@@ -174,6 +186,52 @@ zeperion status --thread-id feature-auth
 zeperion run --mode multi_agent --resume --thread-id feature-auth
 ```
 
+#### 使用 Pi Coding Agent 执行开发
+
+安装并配置 Pi CLI 后，在 `.zeperion/config.yaml` 中把需要真实读写文件的角色切到
+`pi`：
+
+```yaml
+developer_agent_type: pi
+reviewer_agent_type: pi
+tester_agent_type: pi
+
+pi_cli_tool: pi
+pi_cli_timeout: 600
+pi_rpc_no_session: true
+pi_rpc_progress_interval_seconds: 30
+pi_rpc_auto_respond_ui_requests: true
+```
+
+`PiAgent` 会启动 `pi --mode rpc --no-session`，把 ZEPERION 渲染出的
+Planner/Developer/Tester/PR Fixer prompt 作为 RPC 请求发送给 Pi，并继续复用
+ZEPERION 的结构化输出解析规则（例如 `GLOBAL_STATUS`、`TEST_STATUS`、
+`PR_TITLE`）。这意味着工作流编排、状态恢复、测试验收、PR Pipeline 都保持不变，
+只是实际代码执行后端从 Claude Code/纯文本 Anthropic 切换为 Pi。
+
+#### Pi 项目上下文、Skills 与 Guard Extension
+
+仓库内置了一套 `.pi/` 配置，供 Pi Coding Agent 在本项目中直接使用：
+
+```
+.pi/
+  APPEND_SYSTEM.md                 # 永久追加的 ZEPERION 行为规范
+  settings.json                    # 项目级 Pi 设置
+  skills/
+    zeperion-plan/                 # Planner 输出契约
+    zeperion-review/               # Reviewer 审查契约
+    zeperion-test/                 # Tester 验收契约
+    zeperion-ship/                 # 交付/commit 前检查
+    zeperion-checkpoint/           # 风险操作前 git checkpoint
+  extensions/
+    zeperion-guard.ts              # 危险命令确认、敏感路径写入保护
+```
+
+`APPEND_SYSTEM.md` 放的是不可遗忘的硬约束，例如结构化输出 marker、Reviewer
+和 Tester 的职责边界、禁止提交 `.zeperion/state` 等。skills 可在 Pi 里按需触发，
+例如 `/skill:zeperion-review` 或 `/skill:zeperion-test`。guard extension 会在
+Pi 执行危险 bash、写入 `.env` / `.zeperion/state` / `.git` 等路径时进行拦截或确认。
+
 ### PR Pipeline 模式（GitHub 交付）
 
 #### 前置条件
@@ -278,21 +336,29 @@ zeperion run --mode multi_agent --resume --thread-id auth-system
 # 入口需求
 requirement_file: ./requirement.txt
 
-# 三个 role 各自的 agent 后端：anthropic（API）或 claude_code（CLI）
+# 四个 role 各自的 agent 后端：anthropic（API）、pi（Pi CLI）或 claude_code（Claude Code CLI）
 planner_agent_type: anthropic
-developer_agent_type: anthropic    # 想真正改文件请改成 claude_code
-tester_agent_type: anthropic
+developer_agent_type: pi            # 默认会真正改文件
+reviewer_agent_type: pi
+tester_agent_type: pi
 
 # 模型
 planner_model: claude-opus-4-7
 developer_model: claude-sonnet-4-6
+reviewer_model: claude-sonnet-4-6
 tester_model: claude-opus-4-7
 
 # 工作流
 max_rounds: 10                     # 默认 10；从 50 降下来防止解析失败时烧 token
 max_fix_attempts: 3
 
-# Claude Code CLI 调谐（只有 developer/tester_agent_type=claude_code 时才用得上）
+# Pi RPC 调谐（只有 *_agent_type=pi 时才用得上）
+pi_cli_tool: pi
+pi_cli_timeout: 600
+pi_rpc_no_session: false
+pi_rpc_auto_respond_ui_requests: true
+
+# Claude Code CLI 调谐（只有 *_agent_type=claude_code 时才用得上）
 # 实际 CLI flag 由 ClaudeCodeAgent 内部拼装（--print --model --add-dir
 # --permission-mode），无法通过配置覆盖。
 claude_cli_tool: claude
@@ -311,21 +377,20 @@ pr_target_branch: main             # 默认 main
 pr_auto_merge: true                # APPROVED 后是否启用 auto-merge
 codex_poll_minutes: 30
 max_pr_fixer_rounds: 5             # pr_fixer 最多自动改几轮，防 ping-pong
-  
-  # Codex 审查配置
-  codex:
-    approval_threshold: 1      # 👍 数量阈值（>= 1 视为批准）
-    comments_threshold: 5      # 评论数量阈值（> 5 视为需要修复）
-    wait_interval: 60          # 轮询间隔（秒）
 ```
 
 ### Agent 类型说明
 
-**AnthropicAgent（推荐）**：
+**PiAgent（默认写代码后端）**：
+- 通过 subprocess 调用 Pi Coding Agent 的 JSONL RPC 模式
+- 能读写文件、跑命令，适合 Developer / Reviewer / Tester
+- 需要本地安装 `pi` CLI
+
+**AnthropicAgent**：
 - 直接调用 Anthropic API
-- 独立运行，不依赖 Claude Code
+- 独立运行，不依赖本地编码 CLI
 - 需要设置 `ANTHROPIC_API_KEY` 环境变量
-- 适合生产环境和 CI/CD
+- 不带工具能力，适合 Planner 或“只产出建议”的 dry-run
 
 **ClaudeCodeAgent**：
 - 通过 subprocess 调用 Claude Code CLI
@@ -337,12 +402,14 @@ max_pr_fixer_rounds: 5             # pr_fixer 最多自动改几轮，防 ping-p
 
 ### 自定义 Agent
 
-仓库自带的 Agent 只有两种：
+仓库自带的 Agent 有三种：
 
 - `AnthropicAgent` — 直接调 Anthropic Messages API。**不带工具能力，
   只产出文本**（见顶部黄牌）。适合 Planner / Tester。
+- `PiAgent` — 通过 `pi --mode rpc` 调起 Pi Coding Agent。CLI 自身可读写文件，
+  是默认 Developer / Reviewer / Tester 后端。
 - `ClaudeCodeAgent` — 通过 subprocess 调用 `claude --print` CLI。
-  CLI 自身可读写文件，是 Developer 真正能"改代码"的唯一路径。
+  CLI 自身可读写文件，也可以作为 Developer 后端。
 
 要自己接其他后端（OpenAI / Gemini / Ollama / Azure 等），继承
 `BaseAgent` 并实现 `invoke()`，复用 `self.parse_output(raw)` 即可

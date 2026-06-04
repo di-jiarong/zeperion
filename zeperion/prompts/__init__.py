@@ -5,7 +5,6 @@ from typing import Optional
 
 from jinja2 import Environment, FileSystemLoader
 
-
 PACKAGED_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
@@ -145,6 +144,29 @@ class PromptTemplate:
             comments=comments,
             lessons=lessons or [],
             uses_claude_code=uses_claude_code,
+        )
+
+    def render_reviewer(
+        self,
+        requirement: str,
+        plan: str,
+        dev_output: str,
+        lessons: Optional[list[str]] = None,
+    ) -> str:
+        """Render reviewer prompt.
+
+        Args:
+            requirement: User requirement text.
+            plan: Current plan from planner.
+            dev_output: Developer's output.
+            lessons: Lessons learned so far.
+        """
+        return self.render(
+            "reviewer.txt",
+            requirement=requirement,
+            plan=plan,
+            dev_output=dev_output,
+            lessons=lessons or [],
         )
 
     def render_tester(

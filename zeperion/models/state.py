@@ -14,6 +14,7 @@ class AgentRole(str, Enum):
     """Agent roles in the workflow."""
     PLANNER = "planner"
     DEVELOPER = "developer"
+    REVIEWER = "reviewer"
     TESTER = "tester"
     PR_FIXER = "pr_fixer"
 
@@ -22,6 +23,7 @@ class PhaseType(str, Enum):
     """Workflow phases."""
     PLANNING = "planning"
     DEVELOPMENT = "development"
+    REVIEWING = "reviewing"
     TESTING = "testing"
     COMPLETED = "completed"
     BLOCKED = "blocked"
@@ -40,6 +42,15 @@ class TestStatus(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     ERROR = "ERROR"
+    PENDING = "PENDING"
+
+
+class ReviewStatus(str, Enum):
+    """Reviewer verdict for developer output."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    BLOCKED = "BLOCKED"
     PENDING = "PENDING"
 
 
@@ -82,11 +93,13 @@ class WorkflowState(TypedDict):
     task_id: Optional[str]
     pr_title: Optional[str]
     test_status: TestStatus
+    review_status: ReviewStatus
     global_status: GlobalStatus
     last_error: Optional[str]
     lessons_learned: Annotated[list[str], lambda x, y: x + y]  # Append reducer
     planner_session_id: Optional[str]
     developer_session_id: Optional[str]
+    reviewer_session_id: Optional[str]
     tester_session_id: Optional[str]
     updated_at: str  # ISO 8601 timestamp
 
@@ -107,11 +120,13 @@ class PRPipelineState(TypedDict):
     # historical reasons; we keep a single shared key so handovers preserve
     # the Planner-proposed title.
     test_status: TestStatus
+    review_status: ReviewStatus
     global_status: GlobalStatus
     last_error: Optional[str]
     lessons_learned: Annotated[list[str], lambda x, y: x + y]
     planner_session_id: Optional[str]
     developer_session_id: Optional[str]
+    reviewer_session_id: Optional[str]
     tester_session_id: Optional[str]
     updated_at: str
 
@@ -153,6 +168,7 @@ class WorkflowConfig(BaseModel):
 
     planner_model: str = Field(default="claude-opus-4-7")
     developer_model: str = Field(default="claude-sonnet-4-6")
+    reviewer_model: str = Field(default="claude-sonnet-4-6")
     tester_model: str = Field(default="claude-opus-4-7")
 
     # Optional fallback model chains, ordered by preference (most-preferred
@@ -165,11 +181,21 @@ class WorkflowConfig(BaseModel):
     # Sonnet outage falls back to Opus instead of taking down the round.
     planner_fallback_models: list[str] = Field(default_factory=list)
     developer_fallback_models: list[str] = Field(default_factory=list)
+    reviewer_fallback_models: list[str] = Field(default_factory=list)
     tester_fallback_models: list[str] = Field(default_factory=list)
 
-    planner_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
-    developer_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
-    tester_agent_type: Literal["anthropic", "claude_code"] = Field(default="anthropic")
+    planner_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
+        default="anthropic"
+    )
+    developer_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
+        default="pi"
+    )
+    reviewer_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
+        default="pi"
+    )
+    tester_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
+        default="pi"
+    )
 
     # Operators occasionally configure ``developer_agent_type=anthropic``
     # without realising the AnthropicAgent has no tool / file-IO
@@ -197,6 +223,13 @@ class WorkflowConfig(BaseModel):
     # multi-task plans, cheap enough to recover from operator error.
     max_rounds: int = Field(default=10, ge=1)
     max_fix_attempts: int = Field(default=3, ge=0)
+    enable_reviewer: bool = Field(
+        default=True,
+        description=(
+            "Run a Reviewer agent after Developer and before Tester. "
+            "Review failures are sent back to Developer as fix attempts."
+        ),
+    )
 
     project_dir: str = Field(default=".")
     state_dir: str = Field(default=".zeperion/state")
@@ -241,6 +274,43 @@ class WorkflowConfig(BaseModel):
             "finish. Live test runs of >5 minutes were silent for the "
             "entire wait, indistinguishable from a hang. Set to 0 to "
             "disable heartbeats entirely."
+        ),
+    )
+
+    pi_cli_tool: str = Field(
+        default="pi",
+        description="Executable used by PiAgent.",
+    )
+    pi_cli_timeout: int = Field(
+        default=600,
+        ge=1,
+        description="Hard timeout in seconds for one PiAgent invocation.",
+    )
+    pi_cli_extra_args: list[str] = Field(
+        default_factory=list,
+        description="Extra command-line arguments appended to `pi --mode rpc`.",
+    )
+    pi_rpc_no_session: bool = Field(
+        default=True,
+        description=(
+            "Run PiAgent with `--no-session` so each workflow role invocation "
+            "is self-contained. Set false only if your Pi setup manages "
+            "sessions externally."
+        ),
+    )
+    pi_rpc_progress_interval_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "How often (seconds) PiAgent emits a heartbeat log while waiting "
+            "for the RPC process to finish. Set to 0 to disable."
+        ),
+    )
+    pi_rpc_auto_respond_ui_requests: bool = Field(
+        default=True,
+        description=(
+            "Auto-confirm Pi RPC extension UI requests so headless automated "
+            "development can continue without an interactive prompt."
         ),
     )
 
@@ -327,6 +397,7 @@ class AgentOutput(BaseModel):
     """Parsed output from an agent."""
     task_id: Optional[str] = None
     test_status: Optional[TestStatus] = None
+    review_status: Optional[ReviewStatus] = None
     global_status: Optional[GlobalStatus] = None
     pr_title: Optional[str] = Field(
         default=None,
@@ -362,11 +433,13 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
         task_id=None,
         pr_title=None,
         test_status=TestStatus.PENDING,
+        review_status=ReviewStatus.PENDING,
         global_status=GlobalStatus.CONTINUE,
         last_error=None,
         lessons_learned=[],
         planner_session_id=None,
         developer_session_id=None,
+        reviewer_session_id=None,
         tester_session_id=None,
         updated_at=iso_now(),
     )
@@ -410,6 +483,7 @@ def create_initial_pr_state(
             fix_attempt=0,
             task_id=None,
             test_status=TestStatus.PASS,
+            review_status=ReviewStatus.PASS,
             # NOTE: pr_title is set below in the PR-specific block; the
             # multi-agent WorkflowState field stays ``None`` here because we
             # are bootstrapping a PR pipeline run with no planner upstream.
@@ -418,6 +492,7 @@ def create_initial_pr_state(
             lessons_learned=[],
             planner_session_id=None,
             developer_session_id=None,
+            reviewer_session_id=None,
             tester_session_id=None,
             updated_at=iso_now(),
             pr_phase=PRPhase.INIT,

@@ -32,16 +32,17 @@ Design notes
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
+_SPAWNED_ARGV_BY_PID: dict[int, str] = {}
 
 
 def _runs_dir(state_dir: Path, thread_id: str) -> Path:
@@ -54,6 +55,10 @@ def pidfile_path(state_dir: Path, thread_id: str) -> Path:
 
 def logfile_path(state_dir: Path, thread_id: str) -> Path:
     return _runs_dir(state_dir, thread_id) / "run.log"
+
+
+def argvfile_path(state_dir: Path, thread_id: str) -> Path:
+    return _runs_dir(state_dir, thread_id) / "run.argv.json"
 
 
 def write_pidfile(state_dir: Path, thread_id: str, pid: int) -> Path:
@@ -79,6 +84,10 @@ def clear_pidfile(state_dir: Path, thread_id: str) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+    try:
+        argvfile_path(state_dir, thread_id).unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _is_zombie(pid: int) -> bool:
@@ -95,6 +104,17 @@ def _is_zombie(pid: int) -> bool:
             if line.startswith("State:"):
                 return "Z" in line.split(maxsplit=1)[1]
     except (OSError, FileNotFoundError):
+        pass
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        return proc.returncode == 0 and "Z" in proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
         pass
     return False
 
@@ -113,7 +133,7 @@ def is_alive(pid: int) -> bool:
         os.kill(pid, 0)
     except OSError as exc:
         return exc.errno == errno.EPERM  # alive but owned by another user
-    if sys.platform == "linux" and _is_zombie(pid):
+    if _is_zombie(pid):
         return False
     return True
 
@@ -145,8 +165,39 @@ def _proc_cmdline(pid: int) -> str:
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except (OSError, FileNotFoundError):
+        pass
+    else:
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    if pid in _SPAWNED_ARGV_BY_PID:
+        return _SPAWNED_ARGV_BY_PID[pid]
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
         return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _recorded_cmdline(state_dir: Path, thread_id: str, pid: int) -> str:
+    if pid in _SPAWNED_ARGV_BY_PID:
+        return _SPAWNED_ARGV_BY_PID[pid]
+    try:
+        payload = json.loads(argvfile_path(state_dir, thread_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if payload.get("pid") != pid:
+        return ""
+    argv = payload.get("argv")
+    if not isinstance(argv, list):
+        return ""
+    return " ".join(str(part) for part in argv)
 
 
 _ZEPERION_CMDLINE_NEEDLES: tuple[str, ...] = (
@@ -160,9 +211,7 @@ def looks_like_zeperion(pid: int) -> bool:
     """Best-effort check that ``pid`` is one of ours.
 
     On Linux we read ``/proc/<pid>/cmdline``; on platforms without
-    procfs (which we don't really support, but be polite about it)
-    we conservatively answer True so a manual ``zeperion stop`` can
-    still proceed. This matters because between the time the pidfile
+    procfs we fall back to ``ps``. This matters because between the time the pidfile
     was written and ``stop`` is invoked, the OS may have recycled
     the pid for an unrelated process — killing that would be very
     user-hostile.
@@ -176,8 +225,15 @@ def looks_like_zeperion(pid: int) -> bool:
     """
     cmdline = _proc_cmdline(pid)
     if not cmdline:
-        return sys.platform != "linux"
+        return False
     padded = cmdline + " "  # so the trailing-space needle matches at EOL
+    return any(needle in padded for needle in _ZEPERION_CMDLINE_NEEDLES)
+
+
+def _cmdline_looks_like_zeperion(cmdline: str) -> bool:
+    if not cmdline:
+        return False
+    padded = cmdline + " "
     return any(needle in padded for needle in _ZEPERION_CMDLINE_NEEDLES)
 
 
@@ -204,8 +260,9 @@ def spawn_detached(
     devnull = open(os.devnull, "rb")
     log_fp = open(log_path, "ab", buffering=0)
     try:
+        argv_list = list(argv)
         proc = subprocess.Popen(
-            list(argv),
+            argv_list,
             stdin=devnull,
             stdout=log_fp,
             stderr=log_fp,
@@ -213,6 +270,14 @@ def spawn_detached(
             close_fds=True,
             env=env,
         )
+        _SPAWNED_ARGV_BY_PID[proc.pid] = " ".join(argv_list)
+        try:
+            argvfile_path(state_dir, thread_id).write_text(
+                json.dumps({"pid": proc.pid, "argv": argv_list}),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("failed to record argv for detached pid %s: %s", proc.pid, exc)
     finally:
         # The child inherited copies via Popen; we close the parent's
         # copies right away to avoid leaking fds in long-lived CLIs.
@@ -249,7 +314,12 @@ def stop_detached(
         clear_pidfile(state_dir, thread_id)
         return ("not_running", pid)
 
-    if not looks_like_zeperion(pid):
+    recorded_cmdline = _recorded_cmdline(state_dir, thread_id, pid)
+    if recorded_cmdline:
+        is_ours = _cmdline_looks_like_zeperion(recorded_cmdline)
+    else:
+        is_ours = looks_like_zeperion(pid)
+    if not is_ours:
         return ("foreign", pid)
 
     if not force:

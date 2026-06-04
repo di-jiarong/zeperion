@@ -20,14 +20,13 @@ verdicts in actual command output. These tests pin its contract:
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 
 from zeperion.utils.verify import (
-    CommandResult,
     MAX_OUTPUT_BYTES,
+    CommandResult,
     run_verify_command,
     run_verify_commands,
 )

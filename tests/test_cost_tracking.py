@@ -19,12 +19,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from zeperion.agents.anthropic import _extract_usage
 from zeperion.models import AgentOutput, TokenUsage
 from zeperion.utils.timeline import TimelineEvent, summarise
-
 
 # ---------------------------------------------------------------------------
 # TokenUsage / AgentOutput

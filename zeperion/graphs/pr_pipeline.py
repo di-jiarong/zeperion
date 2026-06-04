@@ -653,9 +653,9 @@ def _build_pr_fixer_node(config: WorkflowConfig):
             }
 
         template_manager = get_template_manager(config.prompts_dir)
-        uses_claude_code = (
+        developer_can_edit_files = (
             (config.developer_agent_type or "").lower().replace("-", "_")
-            == "claude_code"
+            in {"claude_code", "pi"}
         )
         prompt = template_manager.render_pr_fixer(
             pr_number=pr_number,
@@ -663,7 +663,7 @@ def _build_pr_fixer_node(config: WorkflowConfig):
             pr_target_branch=pr_target_branch,
             comments=comments,
             lessons=None,
-            uses_claude_code=uses_claude_code,
+            uses_claude_code=developer_can_edit_files,
         )
 
         agent = create_agent(

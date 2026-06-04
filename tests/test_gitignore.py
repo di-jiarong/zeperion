@@ -8,7 +8,6 @@ import pytest
 
 from zeperion.utils.gitignore import ensure_gitignore_entries
 
-
 HEADER = "# ZEPERION runtime artifacts (do not commit)"
 ENTRIES = [".zeperion/state/", ".zeperion/logs/"]
 

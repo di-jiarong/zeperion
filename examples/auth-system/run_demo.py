@@ -33,7 +33,6 @@ real project directory.
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import sys
 from pathlib import Path
@@ -43,11 +42,11 @@ from zeperion.graphs import create_multi_agent_graph
 from zeperion.models import (
     AgentOutput,
     GlobalStatus,
+    ReviewStatus,
     TestStatus,
     WorkflowConfig,
     create_initial_state,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_DIR = Path(__file__).resolve().parent
@@ -256,6 +255,7 @@ LESSONS:
 
 
 SCRIPTED_OUTPUTS: list[AgentOutput] = []
+_REVIEWER_PASS = "REVIEW_STATUS: PASS\nGLOBAL_STATUS: CONTINUE\nLESSONS:\n- Review passed\n"
 
 
 def _seed(role_outputs: Iterable[tuple[str, str, dict]]) -> None:
@@ -277,12 +277,18 @@ _seed([
                                         "lessons": ["第一轮先打地基"]}),
     ("developer", _DEVELOPER_R1,      {"global_status": GlobalStatus.CONTINUE,
                                         "lessons": ["passlib[bcrypt] 自带兼容层"]}),
+    ("reviewer",  _REVIEWER_PASS,     {"review_status": ReviewStatus.PASS,
+                                        "global_status": GlobalStatus.CONTINUE,
+                                        "lessons": ["Review passed"]}),
     ("tester",    _TESTER_R1,         {"test_status": TestStatus.FAIL,
                                         "global_status": GlobalStatus.CONTINUE,
                                         "lessons": ["created_at 用 server_default"]}),
     # Round 1 fix attempt
     ("developer", _DEVELOPER_R1_FIX,  {"global_status": GlobalStatus.CONTINUE,
                                         "lessons": ["失败分支不要返回 None"]}),
+    ("reviewer",  _REVIEWER_PASS,     {"review_status": ReviewStatus.PASS,
+                                        "global_status": GlobalStatus.CONTINUE,
+                                        "lessons": ["Review passed"]}),
     ("tester",    _TESTER_R1_FIX,     {"test_status": TestStatus.PASS,
                                         "global_status": GlobalStatus.CONTINUE,
                                         "lessons": ["修完 created_at 后 alembic 不再 spurious diff"]}),
@@ -292,6 +298,9 @@ _seed([
                                         "lessons": ["限流先做 stub"]}),
     ("developer", _DEVELOPER_R2,      {"global_status": GlobalStatus.CONTINUE,
                                         "lessons": ["内存 RateLimiter 仅用于测试"]}),
+    ("reviewer",  _REVIEWER_PASS,     {"review_status": ReviewStatus.PASS,
+                                        "global_status": GlobalStatus.CONTINUE,
+                                        "lessons": ["Review passed"]}),
     ("tester",    _TESTER_R2,         {"test_status": TestStatus.PASS,
                                         "global_status": GlobalStatus.DONE,
                                         "lessons": ["先拆任务再实现，节奏更顺"]}),

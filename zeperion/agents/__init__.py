@@ -16,6 +16,7 @@ from zeperion.agents.base import (
 if TYPE_CHECKING:  # pragma: no cover - type-only imports
     from zeperion.agents.anthropic import AnthropicAgent
     from zeperion.agents.claude_code import ClaudeCodeAgent
+    from zeperion.agents.pi import PiAgent
 
 __all__ = [
     "AgentError",
@@ -24,12 +25,14 @@ __all__ = [
     "BaseAgent",
     "AnthropicAgent",
     "ClaudeCodeAgent",
+    "PiAgent",
 ]
 
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "AnthropicAgent": ("zeperion.agents.anthropic", "AnthropicAgent"),
     "ClaudeCodeAgent": ("zeperion.agents.claude_code", "ClaudeCodeAgent"),
+    "PiAgent": ("zeperion.agents.pi", "PiAgent"),
 }
 
 

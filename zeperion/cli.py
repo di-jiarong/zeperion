@@ -2,18 +2,21 @@
 
 import asyncio
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from zeperion import __version__
+from zeperion.config import load_config_from_yaml
+from zeperion.models import WorkflowConfig
+from zeperion.storage import StateStorage
 from zeperion.utils.checkpoint import open_zeperion_checkpointer
-from zeperion.utils.threading import default_thread_id
-from zeperion.utils.timeline import (
-    derive_in_flight,
-    read_events,
-    summarise,
-)
 from zeperion.utils.process import (
     logfile_path,
     pidfile_path,
@@ -22,14 +25,12 @@ from zeperion.utils.process import (
     stop_detached,
     write_pidfile,
 )
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-
-from zeperion.config import load_config_from_yaml
-from zeperion.models import WorkflowConfig
-from zeperion.storage import StateStorage
-from zeperion import __version__
+from zeperion.utils.threading import default_thread_id
+from zeperion.utils.timeline import (
+    derive_in_flight,
+    read_events,
+    summarise,
+)
 
 app = typer.Typer(
     name="zeperion",
@@ -77,6 +78,8 @@ def _spawn_detached_run(
         config = load_config_from_yaml(config_path)
     except Exception as exc:
         console.print(f"[red]Error:[/red] Failed to load config: {exc}")
+        raise typer.Exit(1)
+    if not validate_configured_cli_backends(config, console):
         raise typer.Exit(1)
 
     resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
@@ -152,7 +155,7 @@ def warn_if_anthropic_developer_lacks_file_writes(
 
     Returns:
         ``True`` if a warning was actually printed, ``False`` if it
-        was suppressed (either because the role is on ``claude_code``
+        was suppressed (either because the role is on ``claude_code``/``pi``
         or because the operator opted out via
         ``acknowledge_anthropic_developer_no_file_writes: true``).
 
@@ -173,12 +176,49 @@ def warn_if_anthropic_developer_lacks_file_writes(
         "in [dim].zeperion/state/threads/<id>/*_output.txt[/dim], but no "
         "source code will be touched.\n"
         "    To make Developer actually edit files, set "
+        "[cyan]developer_agent_type: pi[/cyan] or "
         "[cyan]developer_agent_type: claude_code[/cyan] in your config.\n"
         "    To silence this warning when you knowingly want a plan-only "
         "run, set [cyan]acknowledge_anthropic_developer_no_file_writes: "
         "true[/cyan]."
     )
     return True
+
+
+def validate_configured_cli_backends(config: WorkflowConfig, out: Console) -> bool:
+    """Fail early when a configured local coding CLI is not installed."""
+    required_tools: dict[str, set[str]] = {}
+    role_agent_types = {
+        "planner": config.planner_agent_type,
+        "developer": config.developer_agent_type,
+        "reviewer": config.reviewer_agent_type,
+        "tester": config.tester_agent_type,
+    }
+    for role, agent_type in role_agent_types.items():
+        if agent_type == "pi":
+            required_tools.setdefault(config.pi_cli_tool, set()).add(role)
+        elif agent_type == "claude_code":
+            required_tools.setdefault(config.claude_cli_tool, set()).add(role)
+
+    missing = {
+        tool: sorted(roles)
+        for tool, roles in required_tools.items()
+        if shutil.which(tool) is None
+    }
+    if not missing:
+        return True
+
+    for tool, roles in missing.items():
+        out.print(
+            f"[red]Error:[/red] Required CLI [cyan]{tool}[/cyan] was not found "
+            f"for role(s): {', '.join(roles)}."
+        )
+    out.print(
+        "Install the missing CLI or choose another backend with "
+        "[cyan]zeperion init --backend claude_code[/cyan] / "
+        "[cyan]zeperion init --backend anthropic[/cyan]."
+    )
+    return False
 
 
 def _load_workflow_state_from_checkpoint(
@@ -221,6 +261,15 @@ def _load_workflow_state_from_checkpoint(
 def init(
     project_dir: str = typer.Argument(".", help="Project directory to initialize"),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
+    backend: str = typer.Option(
+        "pi",
+        "--backend",
+        "-b",
+        help=(
+            "Backend for code-writing roles: pi | claude_code | anthropic. "
+            "Planner remains anthropic by default."
+        ),
+    ),
 ):
     """
     Initialize a new ZEPERION project.
@@ -231,6 +280,15 @@ def init(
     - requirement.txt (if not exists)
     """
     project_path = Path(project_dir).resolve()
+    backend = backend.strip().lower()
+    valid_backends = {"pi", "claude_code", "anthropic"}
+    if backend not in valid_backends:
+        console.print(
+            f"[red]Error:[/red] Unsupported backend [cyan]{backend}[/cyan]. "
+            "Choose one of: pi, claude_code, anthropic."
+        )
+        raise typer.Exit(1)
+
     console.print(f"[bold]Initializing ZEPERION project in:[/bold] {project_path}")
 
     # Create directories
@@ -247,12 +305,19 @@ def init(
         console.print(f"[yellow]⚠ Config file already exists:[/yellow] {config_file}")
         console.print("  Use --force to overwrite")
     else:
-        from zeperion.config import save_config_to_yaml, get_default_config
+        from zeperion.config import get_default_config, save_config_to_yaml
 
         default_config = get_default_config()
+        default_config["developer_agent_type"] = backend
+        default_config["reviewer_agent_type"] = backend
+        default_config["tester_agent_type"] = backend
         config = WorkflowConfig(**default_config)
         save_config_to_yaml(config, config_file)
         console.print(f"✓ Created config: {config_file.relative_to(project_path)}")
+        console.print(
+            "  Backend: Planner=anthropic, "
+            f"Developer/Reviewer/Tester={backend}"
+        )
 
     # Create requirement file template
     requirement_file = project_path / "requirement.txt"
@@ -403,6 +468,8 @@ def run(
         raise typer.Exit(1)
 
     console.print(f"[bold]Mode:[/bold] {mode}")
+    if not validate_configured_cli_backends(config, console):
+        raise typer.Exit(1)
 
     # Auto-derive a per-branch thread_id so two PRs running in parallel
     # don't clobber each other's state files. ``default_thread_id``
@@ -576,139 +643,19 @@ def ship(
     individually resumable via ``zeperion run --resume --mode ...
     --thread-id <X|X-pr>`` if anything dies mid-flight.
     """
-    if log_format:
-        configure_logging(level=logging.INFO, log_format=log_format)
+    from zeperion.cli_ship import load_ship_config, run_ship_command
 
-    config_path = Path(config_file)
-    if not config_path.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
-        console.print("Run 'zeperion init' first")
+    config, config_path = load_ship_config(config_file=config_file, console=console)
+    if not validate_configured_cli_backends(config, console):
         raise typer.Exit(1)
-    try:
-        config = load_config_from_yaml(config_path)
-    except Exception as exc:
-        console.print(f"[red]Error:[/red] Failed to load config: {exc}")
-        raise typer.Exit(1)
-
-    # Upfront GitHub-config check — fails fast BEFORE we burn any
-    # LLM tokens on the multi_agent phase. The previous "auto-enter
-    # PR Pipeline from multi_agent" path discovered missing GitHub
-    # creds only AFTER the entire multi_agent run had succeeded;
-    # ship makes that an early exit.
-    if not (config.github_repo or config.github_token):
-        console.print(
-            "[red]Error:[/red] ``zeperion ship`` requires GitHub "
-            "configuration. Set ``github_repo`` in config or "
-            "``GITHUB_TOKEN`` in env. To run multi_agent without "
-            "pushing a PR, use ``zeperion run --mode multi_agent "
-            "--no-pr-pipeline`` instead."
-        )
-        raise typer.Exit(1)
-
-    multi_thread = default_thread_id(thread_id, project_dir=config.project_dir)
-    pr_thread = f"{multi_thread}-pr"
-    state_dir = Path(config.state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = state_dir / "checkpoints.db"
-
-    console.print(f"[bold]Loading config:[/bold] {config_path}")
-    console.print(f"[bold]Multi-agent thread:[/bold] {multi_thread}")
-    console.print(f"[bold]PR pipeline thread:[/bold] {pr_thread}")
     warn_if_anthropic_developer_lacks_file_writes(config, console)
-
-    from zeperion.graphs import create_multi_agent_graph, create_pr_pipeline_graph
-    from zeperion.graphs.pr_pipeline import (
-        load_planner_handoff_from_sibling_thread,
+    run_ship_command(
+        config=config,
+        config_path=config_path,
+        thread_id=thread_id,
+        log_format=log_format,
+        console=console,
     )
-    from zeperion.models import (
-        GlobalStatus,
-        create_initial_pr_state,
-        create_initial_state,
-    )
-
-    async def run_ship() -> None:
-        # ----- Phase 1: multi_agent -----
-        console.print("\n[bold cyan]── Phase 1: multi_agent ──[/bold cyan]")
-        ma_initial = create_initial_state(config)
-        ma_cfg = {"configurable": {"thread_id": multi_thread}}
-        ma_final: dict = {}
-
-        async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
-            # disable_pr_pipeline=True is critical: we want phase 2 to
-            # be its own top-level invocation (with its own checkpointer
-            # and its own resumable thread_id), not a nested sub-graph
-            # without a checkpointer.
-            graph = create_multi_agent_graph(
-                config,
-                checkpointer=saver,
-                thread_id=multi_thread,
-                disable_pr_pipeline=True,
-            )
-            async for event in graph.astream(ma_initial, ma_cfg):
-                for node_name, node_state in event.items():
-                    console.print(f"[cyan]→ {node_name}[/cyan]")
-                    ma_final.update(node_state)
-
-        # The state we accumulated above is *patches* from each node
-        # — convert enum-typed status fields the same way the status
-        # panel does so the precondition check below is reliable.
-        global_status = ma_final.get("global_status")
-        gs_value = getattr(global_status, "value", str(global_status or ""))
-        if gs_value != GlobalStatus.DONE.value:
-            console.print(
-                f"\n[yellow]\u26a0  Multi-agent finished with "
-                f"global_status={gs_value!r}, not DONE. "
-                f"Skipping PR pipeline.[/yellow]"
-            )
-            console.print(
-                f"Inspect: zeperion status -t {multi_thread}\n"
-                f"Resume:  zeperion run --resume --mode multi_agent -t {multi_thread}"
-            )
-            raise typer.Exit(1)
-
-        # ----- Phase 2: pr_pipeline -----
-        console.print("\n[bold cyan]── Phase 2: pr_pipeline ──[/bold cyan]")
-        handoff = load_planner_handoff_from_sibling_thread(state_dir, multi_thread)
-        if handoff["pr_title"] or handoff["task_id"]:
-            console.print(
-                f"[dim]Recovered PR handoff from {multi_thread}: "
-                f"pr_title={handoff['pr_title']!r} "
-                f"task_id={handoff['task_id']!r}[/dim]"
-            )
-
-        pr_initial = create_initial_pr_state(config)
-        if handoff["pr_title"]:
-            pr_initial["pr_title"] = handoff["pr_title"]
-        if handoff["task_id"]:
-            pr_initial["task_id"] = handoff["task_id"]
-
-        pr_cfg = {"configurable": {"thread_id": pr_thread}}
-        async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
-            graph = create_pr_pipeline_graph(config, checkpointer=saver)
-            async for event in graph.astream(pr_initial, pr_cfg):
-                for node_name, node_state in event.items():
-                    console.print(f"[cyan]→ {node_name}[/cyan]")
-
-        console.print(
-            "\n[bold green]\u2713 Ship complete![/bold green] "
-            f"(multi_agent thread=[cyan]{multi_thread}[/cyan], "
-            f"pr_pipeline thread=[cyan]{pr_thread}[/cyan])"
-        )
-
-    try:
-        asyncio.run(run_ship())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]\u26a0 Ship interrupted[/yellow]")
-        console.print(
-            f"Resume multi_agent: zeperion run --resume --mode multi_agent -t {multi_thread}\n"
-            f"Resume pr_pipeline: zeperion run --resume --mode pr_pipeline -t {pr_thread}"
-        )
-        raise typer.Exit(130)
-    except typer.Exit:
-        raise
-    except Exception as exc:
-        console.print(f"\n[red]\u2717 Ship failed:[/red] {exc}")
-        raise typer.Exit(1)
 
 
 @app.command()
@@ -1420,7 +1367,7 @@ def serve(
         f"[bold green]\u2713 ZEPERION web UI[/bold green]  "
         f"http://[cyan]{host}[/cyan]:[cyan]{port}[/cyan]/threads"
     )
-    console.print(f"[dim]Ctrl-C to stop. Logs below:[/dim]\n")
+    console.print("[dim]Ctrl-C to stop. Logs below:[/dim]\n")
     uvicorn.run(
         web_app,
         host=host,

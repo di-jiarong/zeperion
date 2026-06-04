@@ -29,8 +29,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from zeperion.graphs.pr_pipeline import (
     derive_sibling_multi_agent_thread,
     load_planner_handoff_from_sibling_thread,

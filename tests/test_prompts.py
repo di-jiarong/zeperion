@@ -1,6 +1,5 @@
 """Tests for prompt templates."""
 
-import pytest
 from pathlib import Path
 
 from zeperion.prompts import PromptTemplate, get_template_manager
@@ -15,6 +14,7 @@ class TestPromptTemplate:
         assert manager.templates_dir.exists()
         assert (manager.templates_dir / "planner.txt").exists()
         assert (manager.templates_dir / "developer.txt").exists()
+        assert (manager.templates_dir / "reviewer.txt").exists()
         assert (manager.templates_dir / "tester.txt").exists()
 
     def test_render_planner_minimal(self):
@@ -112,6 +112,25 @@ class TestPromptTemplate:
         assert "Check edge cases" in prompt
         assert "TEST_STATUS:" in prompt
         assert "TEST_CASES:" in prompt
+
+    def test_render_reviewer(self):
+        """Test reviewer prompt."""
+        manager = PromptTemplate()
+        prompt = manager.render_reviewer(
+            requirement="Build a REST API",
+            plan="Implement user authentication",
+            dev_output="Implemented JWT authentication",
+            lessons=["Check scope before tests"],
+        )
+
+        assert "代码审查智能体" in prompt
+        assert "Build a REST API" in prompt
+        assert "Implement user authentication" in prompt
+        assert "Implemented JWT authentication" in prompt
+        assert "Check scope before tests" in prompt
+        assert "REVIEW_STATUS:" in prompt
+        assert "FINDINGS:" in prompt
+        assert "FIX_REQUEST:" in prompt
 
     def test_render_pr_fixer_lists_comments_and_format(self):
         """PR Fixer prompt should embed every Codex comment and the required output markers."""

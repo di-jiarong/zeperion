@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 # Reserved attributes on a LogRecord (we don't want to dump them all
 # verbatim into the structured payload).

@@ -3,7 +3,13 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
+from zeperion.models import (
+    AgentOutput,
+    AgentRole,
+    GlobalStatus,
+    ReviewStatus,
+    TestStatus,
+)
 from zeperion.parsers.section_parser import (
     MissingRequiredFieldError,
     SectionParser,
@@ -63,6 +69,12 @@ SYSTEM_PROMPT_BY_ROLE: dict[AgentRole, str] = {
         "ALWAYS emit the requested machine-readable fields verbatim "
         "(GLOBAL_STATUS, CHANGES, VERIFY_HINTS, BLOCKERS, LESSONS). Do not "
         "set GLOBAL_STATUS: DONE — only the Planner or Tester may do that."
+    ),
+    AgentRole.REVIEWER: (
+        "You are the Reviewer agent. Review the Developer's actual result for "
+        "scope, quality, regressions, and missing implementation work. ALWAYS "
+        "emit the requested machine-readable fields verbatim "
+        "(REVIEW_STATUS, GLOBAL_STATUS, FINDINGS, FIX_REQUEST, LESSONS)."
     ),
     AgentRole.TESTER: (
         "You are the Tester agent. Verify the implementation against the "
@@ -125,11 +137,14 @@ class BaseAgent(ABC):
     # this set: it never owns ``GLOBAL_STATUS`` (the parser collapses
     # any DONE claim back to CONTINUE further down).
     _GLOBAL_STATUS_REQUIRED_ROLES: frozenset[AgentRole] = frozenset(
-        {AgentRole.PLANNER, AgentRole.TESTER}
+        {AgentRole.PLANNER, AgentRole.REVIEWER, AgentRole.TESTER}
     )
     # Roles whose ``TEST_STATUS`` line is similarly mandatory.
     _TEST_STATUS_REQUIRED_ROLES: frozenset[AgentRole] = frozenset(
         {AgentRole.TESTER}
+    )
+    _REVIEW_STATUS_REQUIRED_ROLES: frozenset[AgentRole] = frozenset(
+        {AgentRole.REVIEWER}
     )
 
     def parse_output(self, raw_output: str) -> AgentOutput:
@@ -170,6 +185,19 @@ class BaseAgent(ABC):
                 "TEST_STATUS", TestStatus, TestStatus.PENDING
             )
 
+        if self.role in self._REVIEW_STATUS_REQUIRED_ROLES:
+            try:
+                review_status = parser.extract_required_enum(
+                    "REVIEW_STATUS", ReviewStatus
+                )
+            except MissingRequiredFieldError as exc:
+                parse_error = f"{parse_error}; {exc}" if parse_error else str(exc)
+                review_status = ReviewStatus.PENDING
+        else:
+            review_status = parser.extract_enum(
+                "REVIEW_STATUS", ReviewStatus, ReviewStatus.PENDING
+            )
+
         if self.role in self._GLOBAL_STATUS_REQUIRED_ROLES:
             try:
                 global_status = parser.extract_required_enum(
@@ -202,6 +230,7 @@ class BaseAgent(ABC):
             task_id=task_id,
             pr_title=pr_title,
             test_status=test_status,
+            review_status=review_status,
             global_status=global_status,
             lessons=lessons,
             raw_output=raw_output,

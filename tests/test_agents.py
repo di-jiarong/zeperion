@@ -1,13 +1,21 @@
 """Tests for Agent implementations."""
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
-from zeperion.agents import ClaudeCodeAgent
+from zeperion.agents import ClaudeCodeAgent, PiAgent
 from zeperion.agents.anthropic import _extract_text
 from zeperion.agents.base import _clean_pr_title
-from zeperion.models import AgentOutput, AgentRole, GlobalStatus, TestStatus
+from zeperion.models import (
+    AgentOutput,
+    AgentRole,
+    GlobalStatus,
+    ReviewStatus,
+    TestStatus,
+)
 
 
 class TestClaudeCodeAgent:
@@ -172,6 +180,37 @@ LESSONS:
         assert result.parse_error is not None
         assert "TEST_STATUS" in result.parse_error
 
+    def test_parse_output_reviewer_requires_review_status(self):
+        """Reviewer forgetting REVIEW_STATUS → BLOCKED + parse_error."""
+        agent = ClaudeCodeAgent(role=AgentRole.REVIEWER, model="claude-sonnet-4-6")
+
+        raw_output = """
+GLOBAL_STATUS: CONTINUE
+FINDINGS:
+- forgot verdict
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.global_status == GlobalStatus.BLOCKED
+        assert result.review_status == ReviewStatus.PENDING
+        assert result.parse_error is not None
+        assert "REVIEW_STATUS" in result.parse_error
+
+    def test_parse_output_reviewer_pass(self):
+        """Reviewer output exposes REVIEW_STATUS."""
+        agent = ClaudeCodeAgent(role=AgentRole.REVIEWER, model="claude-sonnet-4-6")
+
+        raw_output = """
+REVIEW_STATUS: PASS
+GLOBAL_STATUS: CONTINUE
+FINDINGS:
+- NONE
+"""
+        result = agent.parse_output(raw_output)
+
+        assert result.review_status == ReviewStatus.PASS
+        assert result.global_status == GlobalStatus.CONTINUE
+
     def test_parse_output_lessons_various_formats(self):
         """Test lessons parsing with various bullet formats."""
         agent = ClaudeCodeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
@@ -257,7 +296,7 @@ GLOBAL_STATUS: CONTINUE
         assert agent.model == "claude-sonnet-4-6"
         assert agent.cli_tool == "custom-cli"
         assert agent.timeout == 300
-        assert str(agent.project_dir) == "/tmp"
+        assert str(agent.project_dir) == str(Path("/tmp").resolve())
 
     def test_build_command_matches_real_cli_surface(self, tmp_path):
         """``build_command`` must emit the flags the real ``claude`` CLI accepts."""
@@ -431,6 +470,104 @@ GLOBAL_STATUS: CONTINUE
 
         with pytest.raises(AgentInvocationError, match="empty output"):
             await agent.invoke("hi")
+
+
+class TestPiAgent:
+    """Test PiAgent RPC functionality."""
+
+    def test_build_command_matches_rpc_surface(self, tmp_path):
+        agent = PiAgent(
+            role=AgentRole.DEVELOPER,
+            model="gpt-5",
+            cli_tool="custom-pi",
+            project_dir=str(tmp_path),
+            extra_args=["--debug"],
+        )
+
+        cmd = agent.build_command()
+
+        assert cmd[:3] == ["custom-pi", "--mode", "rpc"]
+        assert "--no-session" in cmd
+        assert ["--model", "gpt-5"] == cmd[cmd.index("--model") : cmd.index("--model") + 2]
+        assert cmd[-1] == "--debug"
+
+    @pytest.mark.asyncio
+    async def test_invoke_writes_agent_request_and_parses_final_message(
+        self, tmp_path, monkeypatch
+    ):
+        captured: dict = {}
+
+        class FakeStdin:
+            def __init__(self):
+                self.buffer = b""
+                self.closed = False
+
+            def write(self, data):
+                self.buffer += data
+
+            async def drain(self):
+                captured["stdin"] = self.buffer
+
+            def close(self):
+                self.closed = True
+
+        class FakeStdout:
+            def __init__(self):
+                self.lines = [
+                    b'{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"GLOBAL_STATUS: CONTINUE\\nLESSONS:\\n- pi ok\\n"}]}}\n',
+                    b'{"type":"agent_end"}\n',
+                ]
+
+            async def readline(self):
+                if not self.lines:
+                    return b""
+                return self.lines.pop(0)
+
+        class FakeStderr:
+            async def read(self, _n):
+                return b""
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStdout()
+                self.stderr = FakeStderr()
+
+            async def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["cwd"] = kwargs.get("cwd")
+            return FakeProcess()
+
+        monkeypatch.setattr("shutil.which", lambda tool: f"/bin/{tool}")
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = PiAgent(
+            role=AgentRole.DEVELOPER,
+            model="gpt-5",
+            project_dir=str(tmp_path),
+            progress_interval_seconds=0,
+        )
+        result = await agent.invoke("Do work")
+
+        request = json.loads(captured["stdin"].decode("utf-8").splitlines()[0])
+        assert captured["cwd"] == str(tmp_path.resolve())
+        assert captured["cmd"][:3] == ("pi", "--mode", "rpc")
+        assert request["type"] == "prompt"
+        assert "Do work" in request["message"]
+        assert "DEVELOPER ROLE CONTRACT" in request["message"]
+        assert result.global_status == GlobalStatus.CONTINUE
+        assert result.lessons == ["pi ok"]
 
 
 class TestCleanPRTitle:

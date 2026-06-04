@@ -6,17 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from zeperion.config import save_config_to_yaml
-from zeperion.agents import AnthropicAgent, ClaudeCodeAgent
-from zeperion.graphs import create_multi_agent_graph
+from zeperion.agents import AnthropicAgent, ClaudeCodeAgent, PiAgent
 from zeperion.agents.factory import (
     create_agent as _create_agent,
+)
+from zeperion.agents.factory import (
     resolve_agent_class as _resolve_agent_class,
 )
+from zeperion.config import save_config_to_yaml
+from zeperion.graphs import create_multi_agent_graph
 from zeperion.models import (
     AgentOutput,
     AgentRole,
     GlobalStatus,
+    ReviewStatus,
     TestStatus,
     WorkflowConfig,
     create_initial_state,
@@ -99,6 +102,16 @@ def mock_agent_outputs():
             global_status=GlobalStatus.CONTINUE,
             lessons=["Implemented add and subtract"],
             raw_output="LESSONS:\n- Implemented add and subtract",
+        ),
+        "reviewer_pass": AgentOutput(
+            task_id=None,
+            review_status=ReviewStatus.PASS,
+            global_status=GlobalStatus.CONTINUE,
+            lessons=["Implementation ready for tests"],
+            raw_output=(
+                "REVIEW_STATUS: PASS\nGLOBAL_STATUS: CONTINUE\nLESSONS:\n"
+                "- Implementation ready for tests"
+            ),
         ),
         "tester_pass": AgentOutput(
             task_id=None,
@@ -202,6 +215,7 @@ class TestWorkflowGraph:
         assert _resolve_agent_class("anthropic") is AnthropicAgent
         assert _resolve_agent_class("claude_code") is ClaudeCodeAgent
         assert _resolve_agent_class("claude-code") is ClaudeCodeAgent
+        assert _resolve_agent_class("pi") is PiAgent
 
         with pytest.raises(ValueError):
             _resolve_agent_class("unknown")
@@ -239,6 +253,39 @@ class TestWorkflowGraph:
         )
         assert agent.keep_worktree is False
 
+    def test_create_pi_agent_from_config(self, test_config):
+        """Test creating PiAgent with configured RPC settings."""
+        config = WorkflowConfig(
+            requirement_file=test_config.requirement_file,
+            developer_agent_type="pi",
+            developer_model="gpt-5",
+            project_dir=test_config.project_dir,
+            state_dir=test_config.state_dir,
+            prompts_dir=test_config.prompts_dir,
+            pi_cli_tool="custom-pi",
+            pi_cli_timeout=234,
+            pi_cli_extra_args=["--debug"],
+            pi_rpc_no_session=False,
+            pi_rpc_progress_interval_seconds=12,
+            pi_rpc_auto_respond_ui_requests=False,
+        )
+
+        agent = _create_agent(
+            config.developer_agent_type,
+            role=AgentRole.DEVELOPER,
+            model=config.developer_model,
+            config=config,
+        )
+
+        assert isinstance(agent, PiAgent)
+        assert agent.cli_tool == "custom-pi"
+        assert agent.timeout == 234
+        assert str(agent.project_dir) == str(Path(test_config.project_dir).resolve())
+        assert agent.extra_args == ["--debug"]
+        assert agent.no_session is False
+        assert agent.progress_interval_seconds == 12
+        assert agent.auto_respond_ui_requests is False
+
     @pytest.mark.asyncio
     async def test_graph_creation(self, test_config):
         """Test graph creation."""
@@ -253,6 +300,7 @@ class TestWorkflowGraph:
         FakeAgent.outputs = [
             mock_agent_outputs["planner"],
             mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
             mock_agent_outputs["tester_pass"],
         ]
 
@@ -279,6 +327,7 @@ class TestWorkflowGraph:
         run_dir = Path(test_config.state_dir) / "runs" / "main"
         assert (run_dir / "round_001_planner.txt").exists()
         assert (run_dir / "round_001_developer.txt").exists()
+        assert (run_dir / "round_001_reviewer.txt").exists()
         assert (run_dir / "round_001_tester.txt").exists()
 
         events = [
@@ -292,8 +341,18 @@ class TestWorkflowGraph:
         # about.
         completed = [e for e in events if e["event"] == "agent_completed"]
         started = [e for e in events if e["event"] == "agent_started"]
-        assert [e["role"] for e in completed] == ["planner", "developer", "tester"]
-        assert [e["role"] for e in started] == ["planner", "developer", "tester"]
+        assert [e["role"] for e in completed] == [
+            "planner",
+            "developer",
+            "reviewer",
+            "tester",
+        ]
+        assert [e["role"] for e in started] == [
+            "planner",
+            "developer",
+            "reviewer",
+            "tester",
+        ]
         assert all("duration_ms" in e for e in completed)
 
     @pytest.mark.asyncio
@@ -302,8 +361,10 @@ class TestWorkflowGraph:
         FakeAgent.outputs = [
             mock_agent_outputs["planner"],
             mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
             mock_agent_outputs["tester_fail"],  # First attempt fails
             mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
             mock_agent_outputs["tester_pass"],  # Second attempt passes
         ]
 
@@ -335,6 +396,7 @@ class TestWorkflowGraph:
             requirement_file=test_config.requirement_file,
             planner_model=test_config.planner_model,
             developer_model=test_config.developer_model,
+            reviewer_model=test_config.reviewer_model,
             tester_model=test_config.tester_model,
             max_rounds=2,
             max_fix_attempts=1,
@@ -346,11 +408,12 @@ class TestWorkflowGraph:
         continue_output = AgentOutput(
             task_id="task",
             test_status=TestStatus.PASS,
+            review_status=ReviewStatus.PASS,
             global_status=GlobalStatus.CONTINUE,
             lessons=["Continue"],
             raw_output="GLOBAL_STATUS: CONTINUE",
         )
-        FakeAgent.outputs = [continue_output] * 6
+        FakeAgent.outputs = [continue_output] * 8
 
         graph = create_multi_agent_graph(
             test_config, agent_class=FakeAgent, enable_checkpoint=False
@@ -386,9 +449,11 @@ class TestNoPRPipeline:
             requirement_file=test_config.requirement_file,
             planner_model=test_config.planner_model,
             developer_model=test_config.developer_model,
+            reviewer_model=test_config.reviewer_model,
             tester_model=test_config.tester_model,
             planner_agent_type=test_config.planner_agent_type,
             developer_agent_type=test_config.developer_agent_type,
+            reviewer_agent_type=test_config.reviewer_agent_type,
             tester_agent_type=test_config.tester_agent_type,
             max_rounds=3,
             max_fix_attempts=2,
@@ -402,6 +467,7 @@ class TestNoPRPipeline:
         FakeAgent.outputs = [
             mock_agent_outputs["planner"],
             mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
             mock_agent_outputs["tester_pass"],
         ]
 
@@ -441,13 +507,28 @@ class TestCLIIntegration:
         loaded_config = load_config_from_yaml(config_file)
 
         assert loaded_config.planner_model == test_config.planner_model
+        assert loaded_config.reviewer_model == test_config.reviewer_model
         assert loaded_config.planner_agent_type == test_config.planner_agent_type
         assert loaded_config.developer_agent_type == test_config.developer_agent_type
+        assert loaded_config.reviewer_agent_type == test_config.reviewer_agent_type
         assert loaded_config.tester_agent_type == test_config.tester_agent_type
+        assert loaded_config.enable_reviewer == test_config.enable_reviewer
         assert loaded_config.project_dir == test_config.project_dir
         assert loaded_config.claude_cli_tool == test_config.claude_cli_tool
         assert loaded_config.claude_cli_timeout == test_config.claude_cli_timeout
         assert loaded_config.claude_cli_use_worktree == test_config.claude_cli_use_worktree
         assert loaded_config.claude_cli_worktree_parent == test_config.claude_cli_worktree_parent
         assert loaded_config.claude_cli_keep_worktree == test_config.claude_cli_keep_worktree
+        assert loaded_config.pi_cli_tool == test_config.pi_cli_tool
+        assert loaded_config.pi_cli_timeout == test_config.pi_cli_timeout
+        assert loaded_config.pi_cli_extra_args == test_config.pi_cli_extra_args
+        assert loaded_config.pi_rpc_no_session == test_config.pi_rpc_no_session
+        assert (
+            loaded_config.pi_rpc_progress_interval_seconds
+            == test_config.pi_rpc_progress_interval_seconds
+        )
+        assert (
+            loaded_config.pi_rpc_auto_respond_ui_requests
+            == test_config.pi_rpc_auto_respond_ui_requests
+        )
         assert loaded_config.max_rounds == test_config.max_rounds

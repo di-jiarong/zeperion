@@ -20,12 +20,9 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
-
-import pytest
 
 from zeperion.utils.process import (
     is_alive,
@@ -36,7 +33,6 @@ from zeperion.utils.process import (
     stop_detached,
     write_pidfile,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

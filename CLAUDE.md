@@ -5,7 +5,7 @@ This file orients AI coding assistants working in this repository. Keep it in sy
 ## What this repo is
 
 ZEPERION is a **LangGraph + Python package** (`zeperion/`) that orchestrates a
-Planner → Developer → Tester loop and an optional PR delivery sub-pipeline
+Planner → Developer → Reviewer → Tester loop and an optional PR delivery sub-pipeline
 (commit → push → PR → Codex review → auto-merge).
 
 A second, legacy bash implementation has been moved to the
@@ -25,19 +25,22 @@ editable install).
 
 ```
 zeperion/
-  agents/              # BaseAgent + AnthropicAgent + ClaudeCodeAgent (lazy-imported)
+  agents/              # BaseAgent + AnthropicAgent + ClaudeCodeAgent + PiAgent
   graphs/
-    multi_agent.py     # Planner → Developer → Tester StateGraph
+    multi_agent.py     # StateGraph assembly for Planner → Developer → Reviewer → Tester
+    nodes.py           # Planner / Developer / Reviewer / Tester node implementations
+    routes.py          # Multi-agent routing decisions
+    control.py         # Small graph control nodes (increment/block)
     pr_pipeline.py     # commit → push → PR → Codex → auto-merge StateGraph
   models/state.py      # TypedDict states + WorkflowConfig (Pydantic)
   parsers/section_parser.py  # Lenient TASK_ID/STATUS/LESSONS extractor
-  prompts/templates/   # Jinja2 templates (planner.txt, developer.txt, tester.txt)
+  prompts/templates/   # Jinja2 templates for planner/developer/reviewer/tester
   storage/             # File-level state + per-thread isolation
   utils/github.py      # gh CLI wrapper, Codex bot detection, paginated API
   utils/time.py        # iso_now() / utc_strftime() (timezone-aware)
   cli.py               # `zeperion init|run|status|list`
 
-tests/                 # pytest suite (64 tests at time of writing)
+tests/                 # pytest suite (370+ tests at time of writing)
 # Legacy bash version lives on the `legacy/bash-harness` branch only.
 ```
 
@@ -100,7 +103,8 @@ State ownership rules:
 | Role | Reads | Writes (state) | May set `GLOBAL_STATUS=DONE`? |
 |------|-------|----------------|--------------------------------|
 | Planner | requirement + previous plan + latest test report + lessons | `task_id`, `global_status`, `phase=DEVELOPMENT`, `lessons` | Yes |
-| Developer | requirement + current plan + test report + lessons | `phase=TESTING`, `lessons` (no `global_status`) | **No** (silently collapsed to `CONTINUE` in `BaseAgent.parse_output`) |
+| Developer | requirement + current plan + reviewer/tester reports + lessons | `phase=REVIEWING` (or `TESTING` when reviewer is disabled), `lessons` (no `global_status`) | **No** (silently collapsed to `CONTINUE` in `BaseAgent.parse_output`) |
+| Reviewer | requirement + plan + developer output + lessons | `review_status`, `global_status`, `last_error`, `lessons` | Yes |
 | Tester | requirement + plan + developer output + lessons | `test_status`, `global_status`, `last_error`, `lessons` | Yes |
 
 `BaseAgent.parse_output` is shared by all backends; do **not** add role-specific
@@ -112,7 +116,8 @@ and `AgentOutput` model together.
 `BaseAgent.parse_output` distinguishes "missing-but-tolerable" from
 "missing-is-a-bug" via two role sets defined on the class:
 
-* `_GLOBAL_STATUS_REQUIRED_ROLES = {PLANNER, TESTER}`
+* `_GLOBAL_STATUS_REQUIRED_ROLES = {PLANNER, REVIEWER, TESTER}`
+* `_REVIEW_STATUS_REQUIRED_ROLES = {REVIEWER}`
 * `_TEST_STATUS_REQUIRED_ROLES   = {TESTER}`
 
 When a role in those sets emits output without the corresponding field
@@ -131,15 +136,17 @@ tool definitions, no file IO, no shell. It returns text. That text
 gets parsed and written to `*_output.txt` artifacts but **no source
 code is touched**. Operators wanting the workflow to actually edit
 project files must set the corresponding role's `*_agent_type` to
-`claude_code` (which shells out to the `claude` CLI; the CLI itself
-does the file writes). This used to be undocumented and was the most
-common source of "I ran zeperion and nothing changed in my repo"
+`pi` or `claude_code`. `PiAgent` shells out to Pi Coding Agent via
+`pi --mode rpc`; `ClaudeCodeAgent` shells out to the `claude` CLI. The
+CLI itself does the file writes. This used to be undocumented and was
+the most common source of "I ran zeperion and nothing changed in my repo"
 confusion.
 
 ## Prompt output contract (parsed by `SectionParser`)
 
 - **Planner**: `TASK_ID:`, `GLOBAL_STATUS: CONTINUE | DONE | BLOCKED`, `PLAN:`, `RISKS:`, `HANDOFF_TO_DEVELOPER:`, `LESSONS:`
 - **Developer**: `GLOBAL_STATUS: CONTINUE | BLOCKED`, `CHANGES:`, `VERIFY_HINTS:`, `BLOCKERS:`, `LESSONS:`
+- **Reviewer**: `REVIEW_STATUS: PASS | FAIL | BLOCKED`, `GLOBAL_STATUS: CONTINUE | DONE | BLOCKED`, `FINDINGS:`, `FIX_REQUEST:`, `VERIFY_HINTS:`, `LESSONS:`
 - **Tester**: `TEST_STATUS: PASS | FAIL | ERROR`, `GLOBAL_STATUS: CONTINUE | DONE | BLOCKED`, `TEST_CASES:`, `BUGS:`, `FIX_REQUEST:`, `LESSONS:`
 
 Parsing is case-insensitive and tolerant of surrounding prose, but the field
@@ -212,7 +219,7 @@ Encoded in `zeperion/utils/github.py`:
   `load_workflow_state`. The multi-agent graph never wrote that JSON
   file; the LangGraph SQLite checkpoint is the source of truth.
 - Don't claim in docs that `AnthropicAgent` writes files. It does not.
-  Use `claude_code` for any role that needs to modify the project.
+  Use `pi` or `claude_code` for any role that needs to modify the project.
 - Don't resurrect the bash harness on `main`. It lives on
   `legacy/bash-harness` and should stay there; the Python package is the
   single source of truth going forward.

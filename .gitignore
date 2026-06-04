@@ -151,6 +151,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.conda-zeperion/
 env/
 venv/
 ENV/

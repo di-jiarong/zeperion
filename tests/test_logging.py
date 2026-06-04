@@ -9,7 +9,6 @@ import logging
 import pytest
 
 from zeperion.utils.logging import (
-    HumanFormatter,
     JsonFormatter,
     configure_logging,
 )

@@ -40,11 +40,11 @@ from zeperion.models import (
     PhaseType,
     PRPhase,
     PRPipelineState,
+    ReviewStatus,
     TestStatus,
     WorkflowConfig,
 )
 from zeperion.utils.checkpoint import open_zeperion_checkpointer
-
 
 # ---------------------------------------------------------------------------
 # Repo fixture
@@ -155,11 +155,13 @@ def _initial_state(planner_title: str | None = None) -> PRPipelineState:
         "task_id": "calc_v1",  # The legendary task_id from the bug.
         "pr_title": planner_title,
         "test_status": TestStatus.PASS,
+        "review_status": ReviewStatus.PASS,
         "global_status": GlobalStatus.DONE,
         "last_error": None,
         "lessons_learned": [],
         "planner_session_id": None,
         "developer_session_id": None,
+        "reviewer_session_id": None,
         "tester_session_id": None,
         "updated_at": "2026-05-14T00:00:00+00:00",
         "pr_phase": PRPhase.INIT,

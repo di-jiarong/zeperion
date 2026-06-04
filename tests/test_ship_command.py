@@ -27,7 +27,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from zeperion.cli import app, ship
+from zeperion.cli import app
+from zeperion.cli_ship import run_ship_command
 
 
 @pytest.fixture
@@ -112,6 +113,51 @@ class TestShipFailsFastWithoutGitHub:
         assert "--no-pr-pipeline" in result.output
 
 
+class TestShipFailsFastWithoutConfiguredCli:
+    def test_ship_with_missing_pi_cli_exits_before_workflow(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr("zeperion.cli.shutil.which", lambda _tool: None)
+
+        (tmp_path / ".zeperion").mkdir(parents=True)
+        config = {
+            "requirement_file": "./requirement.txt",
+            "state_dir": ".zeperion/state",
+            "project_dir": ".",
+            "max_rounds": 1,
+            "max_fix_attempts": 0,
+            "planner_agent_type": "anthropic",
+            "developer_agent_type": "pi",
+            "reviewer_agent_type": "pi",
+            "tester_agent_type": "anthropic",
+            "pi_cli_tool": "missing-pi",
+            "github_repo": "owner/repo",
+        }
+        (tmp_path / ".zeperion" / "config.yaml").write_text(
+            yaml.safe_dump(config), encoding="utf-8"
+        )
+        (tmp_path / "requirement.txt").write_text("dummy", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "ship",
+                "-c",
+                str(tmp_path / ".zeperion" / "config.yaml"),
+                "--thread-id",
+                "test-ship",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "missing-pi" in result.output
+        assert "developer" in result.output
+        assert "reviewer" in result.output
+
+
 class TestShipUsesDisablePRPipeline:
     """Defensive structural check — the ship command body MUST pass
     ``disable_pr_pipeline=True`` to ``create_multi_agent_graph``,
@@ -130,7 +176,7 @@ class TestShipUsesDisablePRPipeline:
         # because the latter would require booting a full async loop
         # for a structural assertion. ``inspect.getsource`` is
         # robust to refactors that keep the kwarg.
-        source = inspect.getsource(ship)
+        source = inspect.getsource(run_ship_command)
         assert "disable_pr_pipeline=True" in source, (
             "zeperion ship must build the multi_agent graph with "
             "disable_pr_pipeline=True so phase 2 (pr_pipeline) is "

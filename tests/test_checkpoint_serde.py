@@ -16,6 +16,7 @@ from zeperion.models.state import (
     GlobalStatus,
     PhaseType,
     PRPhase,
+    ReviewStatus,
     TestStatus,
 )
 from zeperion.utils.checkpoint import (
@@ -36,6 +37,7 @@ class TestAllowlistCoverage:
             GlobalStatus,
             PhaseType,
             PRPhase,
+            ReviewStatus,
             TestStatus,
         }
         assert set(ZEPERION_ALLOWED_MSGPACK_TYPES) == expected
@@ -57,6 +59,7 @@ class TestRoundTrip:
         return {
             "phase": PhaseType.DEVELOPMENT,
             "test_status": TestStatus.PASS,
+            "review_status": ReviewStatus.PASS,
             "global_status": GlobalStatus.CONTINUE,
             "pr_phase": PRPhase.CHECK_REVIEW,
             "codex_status": CodexStatus.NEEDS_FIXES,

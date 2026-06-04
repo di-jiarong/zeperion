@@ -27,8 +27,8 @@ import pytest
 from zeperion.graphs import create_multi_agent_graph
 from zeperion.models import (
     AgentOutput,
-    AgentRole,
     GlobalStatus,
+    ReviewStatus,
     TestStatus,
     WorkflowConfig,
     create_initial_state,
@@ -96,7 +96,7 @@ def _make_config(project: Path, **overrides) -> WorkflowConfig:
 
 
 def _seed_outputs(global_status_done_after_first_round: bool = True) -> None:
-    """Seed a 1-round (planner -> developer -> tester) script that
+    """Seed a 1-round (planner -> developer -> reviewer -> tester) script that
     finishes in PASS+DONE so the graph terminates cleanly."""
     final_global = (
         GlobalStatus.DONE
@@ -117,6 +117,13 @@ def _seed_outputs(global_status_done_after_first_round: bool = True) -> None:
             global_status=GlobalStatus.CONTINUE,
             lessons=[],
             raw_output="GLOBAL_STATUS: CONTINUE\n",
+        ),
+        AgentOutput(
+            task_id=None,
+            review_status=ReviewStatus.PASS,
+            global_status=GlobalStatus.CONTINUE,
+            lessons=[],
+            raw_output="REVIEW_STATUS: PASS\nGLOBAL_STATUS: CONTINUE\n",
         ),
         AgentOutput(
             task_id=None,

@@ -33,6 +33,7 @@ from zeperion.models.state import (
     GlobalStatus,
     PhaseType,
     PRPhase,
+    ReviewStatus,
     TestStatus,
 )
 
@@ -47,6 +48,7 @@ ZEPERION_ALLOWED_MSGPACK_TYPES: tuple[type, ...] = (
     GlobalStatus,
     PhaseType,
     PRPhase,
+    ReviewStatus,
     TestStatus,
 )
 
