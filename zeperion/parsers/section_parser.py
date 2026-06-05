@@ -42,6 +42,11 @@ class MissingRequiredFieldError(ValueError):
 # next-section boundary in extract_section. ``-`` is last so it is literal.
 _LINE_PREFIX = r"[ \t#>*_`-]*"
 
+# Trailing part of a section *label* line after its colon: optional spaces,
+# then optional mirror markers (so ``**PLAN:**`` and ``## PLAN:`` both close
+# cleanly), then optional spaces to end of line.
+_SECTION_LABEL_TAIL = r"[ \t]*[*_`#>-]*[ \t]*"
+
 
 class SectionParser:
     """
@@ -84,12 +89,27 @@ class SectionParser:
         """
         # Normalize field name for matching (allow spaces and underscores)
         normalized = field_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*(.+?)\s*$"
+        # Two line shapes, tried most-specific first:
+        #   1. Decorated *label*: ``**GLOBAL_STATUS:** CONTINUE`` or
+        #      ``## TASK_ID: t1``. The markers belong to the label, so the
+        #      mirrored run right after the colon is consumed and kept out
+        #      of the value.
+        #   2. Plain label: ``TEST_STATUS: **PASS**``. No leading markers,
+        #      so everything after the colon (bold value included) is the
+        #      value, preserved verbatim for downstream decoration
+        #      stripping in enum/pr-title handling.
+        decorated = (
+            rf"(?i)^[ \t]*[#>*_`-]+[ \t]*{normalized}\s*:"
+            rf"[ \t]*[*_`#>-]*[ \t]*(.+?)\s*$"
+        )
+        plain = rf"(?i)^[ \t]*{normalized}\s*:\s*(.+?)\s*$"
 
-        match = re.search(pattern, self.text, re.MULTILINE)
-        if match:
-            value = match.group(1).strip()
-            return value if value else None
+        for pattern in (decorated, plain):
+            match = re.search(pattern, self.text, re.MULTILINE)
+            if match:
+                value = match.group(1).strip()
+                if value:
+                    return value
         return None
 
     def extract_enum(
@@ -114,23 +134,9 @@ class SectionParser:
         if not value:
             return default
 
-        # Try exact match before normalisation (cheapest path).
-        try:
-            return enum_class(value)
-        except (ValueError, KeyError):
-            pass
-
-        normalized = _strip_decorations(value)
-        if normalized:
-            try:
-                return enum_class(normalized)
-            except (ValueError, KeyError):
-                pass
-
-        value_upper = (normalized or value).upper()
-        for member in enum_class:
-            if member.value.upper() == value_upper:
-                return member
+        resolved = _resolve_enum(value, enum_class)
+        if resolved is not None:
+            return resolved
 
         logger.warning(
             f"Invalid {field_name} value: '{value}', using default: {default}"
@@ -160,22 +166,9 @@ class SectionParser:
         if not value:
             raise MissingRequiredFieldError(field_name)
 
-        try:
-            return enum_class(value)
-        except (ValueError, KeyError):
-            pass
-
-        normalized = _strip_decorations(value)
-        if normalized:
-            try:
-                return enum_class(normalized)
-            except (ValueError, KeyError):
-                pass
-
-        value_upper = (normalized or value).upper()
-        for member in enum_class:
-            if member.value.upper() == value_upper:
-                return member
+        resolved = _resolve_enum(value, enum_class)
+        if resolved is not None:
+            return resolved
 
         raise MissingRequiredFieldError(field_name, value)
 
@@ -205,9 +198,11 @@ class SectionParser:
         Returns:
             Section content (stripped)
         """
-        # Find section start
+        # Find section start. ``_SECTION_LABEL_TAIL`` lets a decorated
+        # label like ``**PLAN:**`` (trailing bold) or ``## PLAN:`` close
+        # cleanly — the markers after the colon are part of the label.
         normalized = section_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*$"
+        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:{_SECTION_LABEL_TAIL}$"
         match = re.search(pattern, self.text, re.MULTILINE)
 
         if not match:
@@ -313,7 +308,7 @@ class SectionParser:
             True if section exists
         """
         normalized = section_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*$"
+        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:{_SECTION_LABEL_TAIL}$"
         return re.search(pattern, self.text, re.MULTILINE) is not None
 
 
@@ -326,6 +321,48 @@ _DECORATION_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r'^"(.+?)"$'),           # "quoted"
     re.compile(r"^'(.+?)'$"),           # 'quoted'
 )
+
+
+# Leading run of whitespace + Markdown markers that a bold/heading field
+# name can leave glued to the *value*: ``**GLOBAL_STATUS:** CONTINUE`` is
+# captured as ``** CONTINUE``. Stripping this lead (for enum resolution
+# only) recovers ``CONTINUE``.
+_LEADING_MARKER_RUN = re.compile(r"^[\s*_`#>-]+")
+
+
+def _resolve_enum(value: str, enum_class: Type[Any]) -> Optional[Any]:
+    """Best-effort resolve ``value`` to a member of ``enum_class``.
+
+    Tries, in order: the raw value, the decoration-stripped value, and the
+    value with a leading Markdown-marker run removed (covers bold/heading
+    field names like ``**GLOBAL_STATUS:** CONTINUE`` whose value captures
+    as ``** CONTINUE``). Returns the member or ``None`` if nothing matches.
+    """
+    candidates: list[str] = [value]
+
+    stripped = _strip_decorations(value)
+    if stripped and stripped not in candidates:
+        candidates.append(stripped)
+
+    lead = _LEADING_MARKER_RUN.sub("", value).strip()
+    if lead and lead not in candidates:
+        candidates.append(lead)
+        lead_stripped = _strip_decorations(lead)
+        if lead_stripped and lead_stripped not in candidates:
+            candidates.append(lead_stripped)
+
+    for cand in candidates:
+        try:
+            return enum_class(cand)
+        except (ValueError, KeyError):
+            pass
+
+    for cand in candidates:
+        cand_upper = cand.upper()
+        for member in enum_class:
+            if member.value.upper() == cand_upper:
+                return member
+    return None
 
 
 def _strip_decorations(value: str) -> str:

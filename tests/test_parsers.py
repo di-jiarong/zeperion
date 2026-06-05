@@ -59,6 +59,44 @@ TEST_STATUS :PASS
             == GlobalStatus.CONTINUE
         )
 
+    def test_extract_field_bold_label(self):
+        """``**FIELD:** value`` — markers wrap the *label*, not the value.
+
+        Regression: Opus emitted ``**GLOBAL_STATUS:** CONTINUE`` and
+        ``**TASK_ID:** task_001``; the closing ``**`` after the colon used
+        to leak into the value (``** CONTINUE`` / ``** task_001``), which
+        broke enum resolution (BLOCKED) and polluted TASK_ID/PR_TITLE.
+        """
+        text = """
+**TASK_ID:** task_001
+**GLOBAL_STATUS:** CONTINUE
+"""
+        parser = SectionParser(text)
+        assert parser.extract_field("TASK_ID") == "task_001"
+        assert parser.extract_field("GLOBAL_STATUS") == "CONTINUE"
+        assert (
+            parser.extract_required_enum("GLOBAL_STATUS", GlobalStatus)
+            == GlobalStatus.CONTINUE
+        )
+
+    def test_extract_field_plain_label_keeps_bold_value(self):
+        """A bold *value* under a plain label must still resolve."""
+        parser = SectionParser("TEST_STATUS: **PASS**.")
+        assert parser.extract_required_enum("TEST_STATUS", TestStatus) == TestStatus.PASS
+
+    def test_extract_section_bold_label(self):
+        """``**PLAN:**`` (trailing bold on the label) opens a section."""
+        text = """
+**PLAN:**
+- step one
+**RISKS:**
+- risk one
+"""
+        parser = SectionParser(text)
+        assert parser.has_section("PLAN")
+        assert parser.extract_section("PLAN") == "- step one"
+        assert parser.extract_section("RISKS") == "- risk one"
+
     def test_extract_section_markdown_heading_prefix(self):
         """``## SECTION:`` headings parse and bound each other."""
         text = """

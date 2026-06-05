@@ -32,6 +32,8 @@ from zeperion.utils.timeline import (
     summarise,
 )
 
+logger = logging.getLogger(__name__)
+
 app = typer.Typer(
     name="zeperion",
     help="Multi-agent development and PR delivery pipeline framework",
@@ -606,14 +608,61 @@ def run(
     console.print("\n[bold green]Starting workflow execution...[/bold green]\n")
 
     async def run_workflow():
+        # Track the final phase/status as the stream advances so we can
+        # emit a single terminal ``workflow_finished`` event. Without it
+        # ``events.jsonl`` has no "the run is over" marker, so
+        # ``zeperion logs --follow`` (which tails that file) hangs after
+        # the last agent and never tells the user the workflow ended.
+        final_phase = None
+        final_global = None
+        final_test = None
         try:
             async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
                 graph = build_graph(saver)
                 async for event in graph.astream(initial_state, config_obj):
                     for node_name, node_state in event.items():
                         _print_node_progress(node_name, node_state)
+                        if isinstance(node_state, dict):
+                            if node_state.get("phase") is not None:
+                                final_phase = node_state["phase"]
+                            if node_state.get("global_status") is not None:
+                                final_global = node_state["global_status"]
+                            if node_state.get("test_status") is not None:
+                                final_test = node_state["test_status"]
 
-            console.print("[bold green]\u2713 Workflow completed![/bold green]")
+            phase_str = _enum_str(final_phase) if final_phase is not None else None
+            global_str = _enum_str(final_global) if final_global is not None else None
+            test_str = _enum_str(final_test) if final_test is not None else None
+
+            try:
+                StateStorage(
+                    Path(config.state_dir), thread_id=thread_id
+                ).append_event(
+                    thread_id,
+                    {
+                        "event": "workflow_finished",
+                        "phase": phase_str,
+                        "global_status": global_str,
+                        "test_status": test_str,
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - best-effort marker
+                logger.warning("Could not write workflow_finished event: %s", exc)
+
+            blocked = (phase_str or "").lower() == "blocked" or (
+                global_str or ""
+            ).upper() == "BLOCKED"
+            if blocked:
+                console.print(
+                    "[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow] "
+                    "[dim](an agent could not proceed — check the last "
+                    "agent's output / last_error)[/dim]"
+                )
+            else:
+                tail = f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
+                console.print(
+                    f"[bold green]\u2713 Workflow completed![/bold green]{tail}"
+                )
 
         except KeyboardInterrupt:
             console.print("\n[yellow]\u26a0 Workflow interrupted[/yellow]")
@@ -1190,12 +1239,30 @@ def logs(
             parts.append(f"[green]{ev.global_status}[/green]")
         return " ".join(parts)
 
+    def _print_terminal(ev) -> None:
+        """Print a clear end-of-run banner for the terminal event."""
+        gs = (ev.global_status or "").upper()
+        if gs == "BLOCKED" or (ev.raw.get("phase") or "").lower() == "blocked":
+            console.print(
+                "\n[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow]"
+            )
+        else:
+            tail = f" [dim]({ev.global_status})[/dim]" if ev.global_status else ""
+            console.print(
+                f"\n[bold green]\u2713 Workflow finished[/bold green]{tail}"
+            )
+
     # Print the existing tail first.
     seen = 0
     events = read_events(Path(config.state_dir), thread_id)
     for ev in events[-tail:]:
         console.print(_render(ev))
     seen = len(events)
+
+    # If the run already ended, say so and don't tail into the void.
+    if events and events[-1].event == "workflow_finished":
+        _print_terminal(events[-1])
+        return
 
     if not follow:
         # Bonus: surface any in-flight agent so a static `logs`
@@ -1220,9 +1287,18 @@ def logs(
             time.sleep(poll_interval)
             current = read_events(Path(config.state_dir), thread_id)
             if len(current) > seen:
-                for ev in current[seen:]:
+                new_events = current[seen:]
+                for ev in new_events:
                     console.print(_render(ev))
                 seen = len(current)
+                # Stop tailing once the workflow signals it's done.
+                terminal = next(
+                    (e for e in new_events if e.event == "workflow_finished"),
+                    None,
+                )
+                if terminal is not None:
+                    _print_terminal(terminal)
+                    return
             elif len(current) < seen:
                 # File got smaller — likely rotated/reset. Re-baseline
                 # and keep going rather than blowing up.
