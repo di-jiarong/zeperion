@@ -25,10 +25,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,17 @@ class TimelineEvent:
 
     timestamp: str  # ISO 8601 string as stored
     event: str  # "agent_started" / "agent_completed" / etc.
-    role: Optional[str]
-    round: Optional[int]
-    fix_attempt: Optional[int]
-    duration_ms: Optional[int]
-    task_id: Optional[str]
-    test_status: Optional[str]
-    global_status: Optional[str]
+    role: str | None
+    round: int | None
+    fix_attempt: int | None
+    duration_ms: int | None
+    task_id: str | None
+    test_status: str | None
+    global_status: str | None
     raw: dict
 
     @classmethod
-    def from_raw(cls, raw: dict) -> "TimelineEvent":
+    def from_raw(cls, raw: dict) -> TimelineEvent:
         return cls(
             timestamp=str(raw.get("timestamp", "")),
             event=str(raw.get("event", "")),
@@ -63,7 +63,7 @@ class TimelineEvent:
             raw=raw,
         )
 
-    def parsed_timestamp(self) -> Optional[datetime]:
+    def parsed_timestamp(self) -> datetime | None:
         """Parse the timestamp; return None on malformed input."""
         if not self.timestamp:
             return None
@@ -78,8 +78,8 @@ class InFlightAgent:
     """A still-running agent invocation, inferred from event pairing."""
 
     role: str
-    round: Optional[int]
-    fix_attempt: Optional[int]
+    round: int | None
+    fix_attempt: int | None
     started_at: datetime
     elapsed_seconds: float
 
@@ -130,7 +130,7 @@ def _key(ev: TimelineEvent) -> tuple:
 def derive_in_flight(
     events: Iterable[TimelineEvent],
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> list[InFlightAgent]:
     """Pair ``agent_started`` with ``agent_completed`` and emit the unpaired ones.
 
@@ -166,6 +166,95 @@ def derive_in_flight(
             )
         )
     return out
+
+
+def _shorten(text: str, limit: int = 80) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def describe_event(ev: TimelineEvent) -> str:
+    """Render one timeline event as a compact human-readable sentence."""
+    role = ev.role or ev.raw.get("role")
+    round_part = f" r{ev.round}" if ev.round is not None else ""
+    duration_part = f" ({ev.duration_ms}ms)" if ev.duration_ms is not None else ""
+
+    if ev.event == "agent_started":
+        return f"{role or 'agent'} started{round_part}"
+
+    if ev.event == "agent_completed":
+        status = ev.global_status or ev.test_status
+        status_part = f" -> {status}" if status else ""
+        return f"{role or 'agent'} completed{round_part}{status_part}{duration_part}"
+
+    if ev.event == "tester_verify_started":
+        count = ev.raw.get("command_count")
+        if isinstance(count, int):
+            return f"tester started {count} verify command(s){round_part}"
+        return f"tester started verify commands{round_part}"
+
+    if ev.event == "tester_verify_command":
+        command = _shorten(str(ev.raw.get("command", "")), 96)
+        exit_code = ev.raw.get("exit_code")
+        passed = ev.raw.get("passed")
+        verdict = "passed" if passed is True else "failed"
+        if ev.raw.get("timed_out"):
+            verdict = "timed out"
+        return f"verify {verdict}: {command} (exit={exit_code}){duration_part}"
+
+    if ev.event == "workflow_finished":
+        phase = ev.raw.get("phase") or "unknown"
+        global_status = ev.raw.get("global_status")
+        tail = f" / {global_status}" if global_status else ""
+        return f"workflow finished: {phase}{tail}"
+
+    return ev.event.replace("_", " ")
+
+
+def explain_blocker(last_error: str | None, events: Iterable[TimelineEvent]) -> list[str]:
+    """Suggest next operator actions for a blocked or failed workflow."""
+    if not last_error:
+        return [
+            "Open the latest agent output above, then resume after addressing the missing context."
+        ]
+
+    error = last_error.lower()
+    hints: list[str] = []
+
+    if "pi cli not found" in error or ("claude" in error and "not found" in error):
+        hints.append(
+            "Install the configured coding CLI, or switch the role backend in .zeperion/config.yaml."
+        )
+    elif "anthropic" in error and ("api" in error or "key" in error):
+        hints.append("Check the Anthropic credentials used by the Planner backend.")
+    elif "parse" in error or "output parse" in error:
+        hints.append(
+            "Inspect the latest agent output; the model likely missed the required structured fields."
+        )
+    elif "token budget" in error:
+        hints.append("Raise max_total_tokens or narrow the requirement before resuming.")
+    elif "test_status: fail" in error or "fix_request" in error or "bugs:" in error:
+        hints.append(
+            "Read the Tester report, fix the smallest failing case, then run zeperion run --resume."
+        )
+
+    failed_verify = [
+        e
+        for e in events
+        if e.event == "tester_verify_command"
+        and (e.raw.get("passed") is False or e.raw.get("timed_out") is True)
+    ]
+    if failed_verify:
+        command = _shorten(str(failed_verify[-1].raw.get("command", "")), 96)
+        hints.append(f"Last verification problem came from: {command}")
+
+    if not hints:
+        hints.append(
+            "Run zeperion logs --follow for the full trace, then resume once the issue is fixed."
+        )
+    return hints
 
 
 def summarise(events: Iterable[TimelineEvent]) -> dict:

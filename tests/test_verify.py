@@ -27,6 +27,7 @@ import pytest
 from zeperion.utils.verify import (
     MAX_OUTPUT_BYTES,
     CommandResult,
+    detect_verify_commands,
     run_verify_command,
     run_verify_commands,
 )
@@ -154,9 +155,7 @@ class TestMultipleCommands:
         assert marker.read_text(encoding="utf-8").splitlines() == ["a", "b", "c"]
 
     @pytest.mark.asyncio
-    async def test_failure_does_not_abort_remaining_commands(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_failure_does_not_abort_remaining_commands(self, tmp_path: Path) -> None:
         # A failed early command must not skip later ones — the
         # Tester wants to see ALL results to score the run.
         results = await run_verify_commands(
@@ -181,3 +180,27 @@ class TestMultipleCommands:
         )
         assert len(results) == 1
         assert "only-real" in results[0].stdout
+
+
+class TestDetectVerifyCommands:
+    def test_detects_pytest_project(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        assert detect_verify_commands(tmp_path) == ["pytest -q"]
+
+    def test_detects_node_test_runner(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}}',
+            encoding="utf-8",
+        )
+        assert detect_verify_commands(tmp_path) == ["npm test"]
+
+    def test_prefers_pnpm_when_lockfile_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}}',
+            encoding="utf-8",
+        )
+        (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
+        assert detect_verify_commands(tmp_path) == ["pnpm test"]
+
+    def test_ambiguous_project_returns_empty(self, tmp_path: Path) -> None:
+        assert detect_verify_commands(tmp_path) == []

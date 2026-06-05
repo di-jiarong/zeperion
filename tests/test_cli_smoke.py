@@ -15,6 +15,7 @@ subcommand against a fresh project directory.
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -104,23 +105,35 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert (tmp_path / ".zeperion" / "config.yaml").exists()
         assert (tmp_path / "requirement.txt").exists()
 
-        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(
-            encoding="utf-8"
-        )
+        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
         assert "planner_agent_type: anthropic" in config_text
         assert "developer_agent_type: pi" in config_text
         assert "reviewer_agent_type: pi" in config_text
         assert "tester_agent_type: pi" in config_text
+        assert "tester_verify_commands: []" in config_text
         assert "Developer/Reviewer/Tester=pi" in result.output
+        assert "none detected" in result.output
+
+    def test_init_detects_pytest_verify_command(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\nname = 'target'\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["init", str(tmp_path)])
+        assert result.exit_code == 0, f"init crashed:\n{result.output}"
+
+        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
+        assert "tester_verify_commands:" in config_text
+        assert "- pytest -q" in config_text
+        assert "Tester will run" in result.output
 
     def test_init_backend_claude_code(self, tmp_path: Path) -> None:
         runner = CliRunner()
         result = runner.invoke(app, ["init", str(tmp_path), "--backend", "claude_code"])
         assert result.exit_code == 0, f"init crashed:\n{result.output}"
 
-        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(
-            encoding="utf-8"
-        )
+        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
         assert "planner_agent_type: anthropic" in config_text
         assert "developer_agent_type: claude_code" in config_text
         assert "reviewer_agent_type: claude_code" in config_text
@@ -132,9 +145,7 @@ class TestInitCommandSucceedsOnEmptyDir:
         result = runner.invoke(app, ["init", str(tmp_path), "--backend", "anthropic"])
         assert result.exit_code == 0, f"init crashed:\n{result.output}"
 
-        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(
-            encoding="utf-8"
-        )
+        config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
         assert "planner_agent_type: anthropic" in config_text
         assert "developer_agent_type: anthropic" in config_text
         assert "reviewer_agent_type: anthropic" in config_text
@@ -253,6 +264,82 @@ class TestNoPRPipelineFlag:
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0, f"run --help crashed:\n{result.output}"
         assert "--no-pr-pipeline" in result.output
+
+
+class TestDoctorCommand:
+    def test_doctor_reports_missing_tester_verification(
+        self, project_dir: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["doctor", "-c", str(project_dir / ".zeperion" / "config.yaml")],
+        )
+        assert result.exit_code == 1
+        assert "Tester verification" in result.output
+        assert "tester_verify_commands" in result.output
+
+
+class TestVerifyCommand:
+    def test_verify_runs_override_command(self, project_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "verify",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "--command",
+                "echo ok",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "All verification commands passed" in result.output
+
+    def test_verify_fails_without_commands(self, project_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["verify", "-c", str(project_dir / ".zeperion" / "config.yaml")],
+        )
+        assert result.exit_code == 1
+        assert "No verification commands configured" in result.output
+
+
+class TestLogsCommand:
+    def test_logs_uses_human_event_description(self, project_dir: Path) -> None:
+        events_path = project_dir / ".zeperion" / "state" / "runs" / "demo" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-14T14:05:00+00:00",
+                    "event": "tester_verify_command",
+                    "role": "tester",
+                    "round": 1,
+                    "command": "pytest -q",
+                    "exit_code": 2,
+                    "passed": False,
+                    "duration_ms": 123,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "logs",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "-t",
+                "demo",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "verify failed: pytest -q (exit=2) (123ms)" in result.output
 
 
 class TestVersionCommand:

@@ -20,6 +20,8 @@ from pathlib import Path
 
 from zeperion.utils.timeline import (
     derive_in_flight,
+    describe_event,
+    explain_blocker,
     read_events,
     summarise,
 )
@@ -81,7 +83,7 @@ class TestReadEvents:
         path = tmp_path / "runs" / "t1" / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         good = _event("agent_completed", role="planner", round_=1)
-        path.write_text(good + "\n{\"event\": \"agent_st", encoding="utf-8")
+        path.write_text(good + '\n{"event": "agent_st', encoding="utf-8")
         events = read_events(tmp_path, "t1")
         assert len(events) == 1
         assert events[0].event == "agent_completed"
@@ -118,9 +120,7 @@ class TestDeriveInFlight:
         events = read_events(tmp_path, "t1")
         assert derive_in_flight(events) == []
 
-    def test_completion_in_different_round_does_not_close_started(
-        self, tmp_path: Path
-    ) -> None:
+    def test_completion_in_different_round_does_not_close_started(self, tmp_path: Path) -> None:
         # Regression: pairing must include ``round``. If we keyed on
         # ``role`` alone, the round-2 completion below would wrongly
         # close the round-3 started event and we'd miss a live agent.
@@ -195,3 +195,55 @@ class TestSummarise:
         assert out["completed_agent_calls"] == 2
         assert out["total_agent_ms"] == 3500
         assert out["last_round"] == 2
+
+
+class TestDescribeEvent:
+    def test_describes_verify_command_failure(self, tmp_path: Path) -> None:
+        _write_events(
+            tmp_path,
+            "t1",
+            [
+                _event(
+                    "tester_verify_command",
+                    role="tester",
+                    command="pytest -q",
+                    exit_code=2,
+                    passed=False,
+                    duration_ms=123,
+                )
+            ],
+        )
+        event = read_events(tmp_path, "t1")[0]
+        assert describe_event(event) == "verify failed: pytest -q (exit=2) (123ms)"
+
+    def test_describes_workflow_finished(self, tmp_path: Path) -> None:
+        _write_events(
+            tmp_path,
+            "t1",
+            [_event("workflow_finished", phase="completed", global_status="DONE")],
+        )
+        event = read_events(tmp_path, "t1")[0]
+        assert describe_event(event) == "workflow finished: completed / DONE"
+
+
+class TestExplainBlocker:
+    def test_parse_error_hint(self) -> None:
+        hints = explain_blocker("tester output parse failure: missing TEST_STATUS", [])
+        assert any("structured fields" in h for h in hints)
+
+    def test_failed_verify_command_hint(self, tmp_path: Path) -> None:
+        _write_events(
+            tmp_path,
+            "t1",
+            [
+                _event(
+                    "tester_verify_command",
+                    role="tester",
+                    command="pytest -q",
+                    exit_code=1,
+                    passed=False,
+                )
+            ],
+        )
+        hints = explain_blocker("TEST_STATUS: FAIL", read_events(tmp_path, "t1"))
+        assert any("pytest -q" in h for h in hints)

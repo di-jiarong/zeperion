@@ -36,9 +36,7 @@ _PATH_FIELDS_RELATIVE_TO_CONFIG: tuple[str, ...] = (
 )
 
 
-def _resolve_relative_paths(
-    config_dict: Dict[str, Any], config_dir: Path
-) -> Dict[str, Any]:
+def _resolve_relative_paths(config_dict: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
     """Return a copy of ``config_dict`` with relative path fields anchored
     to ``config_dir``.
 
@@ -92,9 +90,7 @@ def load_config_from_yaml(config_path: Path) -> WorkflowConfig:
         if not config_dict:
             raise ValueError("Config file is empty")
 
-        config_dict = _resolve_relative_paths(
-            config_dict, config_path.resolve().parent
-        )
+        config_dict = _resolve_relative_paths(config_dict, config_path.resolve().parent)
         return WorkflowConfig(**config_dict)
 
     except yaml.YAMLError as e:
@@ -138,6 +134,8 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "pi_rpc_no_session": config.pi_rpc_no_session,
         "pi_rpc_progress_interval_seconds": config.pi_rpc_progress_interval_seconds,
         "pi_rpc_auto_respond_ui_requests": config.pi_rpc_auto_respond_ui_requests,
+        "tester_verify_commands": config.tester_verify_commands,
+        "tester_verify_timeout_seconds": config.tester_verify_timeout_seconds,
         "pr_target_branch": config.pr_target_branch,
         "pr_auto_merge": config.pr_auto_merge,
     }
@@ -207,10 +205,8 @@ def get_default_config() -> Dict[str, Any]:
         "pi_cli_timeout": defaults["pi_cli_timeout"].default,
         "pi_cli_extra_args": list(defaults["pi_cli_extra_args"].default_factory()),
         "pi_rpc_no_session": defaults["pi_rpc_no_session"].default,
-        "pi_rpc_progress_interval_seconds": defaults[
-            "pi_rpc_progress_interval_seconds"
-        ].default,
-        "pi_rpc_auto_respond_ui_requests": defaults[
-            "pi_rpc_auto_respond_ui_requests"
-        ].default,
+        "pi_rpc_progress_interval_seconds": defaults["pi_rpc_progress_interval_seconds"].default,
+        "pi_rpc_auto_respond_ui_requests": defaults["pi_rpc_auto_respond_ui_requests"].default,
+        "tester_verify_commands": list(defaults["tester_verify_commands"].default_factory()),
+        "tester_verify_timeout_seconds": defaults["tester_verify_timeout_seconds"].default,
     }

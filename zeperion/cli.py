@@ -28,9 +28,11 @@ from zeperion.utils.process import (
 from zeperion.utils.threading import default_thread_id
 from zeperion.utils.timeline import (
     derive_in_flight,
+    describe_event,
     read_events,
     summarise,
 )
+from zeperion.utils.verify import run_verify_commands
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,20 @@ console = Console()
 from zeperion.utils import configure_logging, ensure_gitignore_entries  # noqa: E402
 
 configure_logging(level=logging.INFO)
+
+
+def _load_config_for_command(config_file: str) -> tuple[WorkflowConfig, Path]:
+    """Load config for small CLI commands with consistent errors."""
+    config_path = Path(config_file)
+    if not config_path.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+        console.print("Run 'zeperion init' first")
+        raise typer.Exit(1)
+    try:
+        return load_config_from_yaml(config_path), config_path
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Failed to load config: {exc}")
+        raise typer.Exit(1)
 
 
 def _spawn_detached_run(
@@ -94,6 +110,7 @@ def _spawn_detached_run(
     existing = read_pidfile(state_dir, resolved_thread)
     if existing is not None:
         from zeperion.utils.process import is_alive  # local import — cheap
+
         if is_alive(existing):
             console.print(
                 f"[red]Error:[/red] A detached run is already active for "
@@ -203,9 +220,7 @@ def validate_configured_cli_backends(config: WorkflowConfig, out: Console) -> bo
             required_tools.setdefault(config.claude_cli_tool, set()).add(role)
 
     missing = {
-        tool: sorted(roles)
-        for tool, roles in required_tools.items()
-        if shutil.which(tool) is None
+        tool: sorted(roles) for tool, roles in required_tools.items() if shutil.which(tool) is None
     }
     if not missing:
         return True
@@ -223,9 +238,7 @@ def validate_configured_cli_backends(config: WorkflowConfig, out: Console) -> bo
     return False
 
 
-def _load_workflow_state_from_checkpoint(
-    state_dir: Path, thread_id: str
-) -> dict:
+def _load_workflow_state_from_checkpoint(state_dir: Path, thread_id: str) -> dict:
     """Pull the latest LangGraph snapshot for ``thread_id`` as a plain dict.
 
     Returns an empty dict if no checkpoint DB exists, no snapshot exists
@@ -253,9 +266,7 @@ def _load_workflow_state_from_checkpoint(
         return asyncio.run(_read())
     except Exception as exc:  # noqa: BLE001 — surfacing this to a status panel
         logger = logging.getLogger(__name__)
-        logger.warning(
-            "Could not read checkpoint for thread %s: %s", thread_id, exc
-        )
+        logger.warning("Could not read checkpoint for thread %s: %s", thread_id, exc)
         return {}
 
 
@@ -313,13 +324,22 @@ def init(
         default_config["developer_agent_type"] = backend
         default_config["reviewer_agent_type"] = backend
         default_config["tester_agent_type"] = backend
+        from zeperion.utils.verify import detect_verify_commands
+
+        detected_verify_commands = detect_verify_commands(project_path)
+        default_config["tester_verify_commands"] = detected_verify_commands
         config = WorkflowConfig(**default_config)
         save_config_to_yaml(config, config_file)
         console.print(f"✓ Created config: {config_file.relative_to(project_path)}")
-        console.print(
-            "  Backend: Planner=anthropic, "
-            f"Developer/Reviewer/Tester={backend}"
-        )
+        console.print("  Backend: Planner=anthropic, " f"Developer/Reviewer/Tester={backend}")
+        if detected_verify_commands:
+            joined = "; ".join(detected_verify_commands)
+            console.print(f"  Tester will run: [cyan]{joined}[/cyan]")
+        else:
+            console.print(
+                "  Tester verify commands: [dim]none detected; add "
+                "tester_verify_commands in .zeperion/config.yaml when ready[/dim]"
+            )
 
     # Create requirement file template
     requirement_file = project_path / "requirement.txt"
@@ -361,6 +381,155 @@ def init(
     console.print("1. Edit requirement.txt with your project requirements")
     console.print("2. Run: zeperion run")
     console.print("3. Check status: zeperion status")
+
+
+@app.command()
+def doctor(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+):
+    """Check whether the local project is ready for a workflow run."""
+    import os
+
+    config, config_path = _load_config_for_command(config_file)
+    checks: list[tuple[str, bool, str]] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append((name, ok, detail))
+
+    project_dir = Path(config.project_dir)
+    requirement_file = Path(config.requirement_file)
+    state_dir = Path(config.state_dir)
+
+    add("Config", True, str(config_path))
+    add("Project directory", project_dir.is_dir(), str(project_dir))
+    add("Requirement file", requirement_file.exists(), str(requirement_file))
+    add("State directory", state_dir.exists(), str(state_dir))
+
+    role_agent_types = {
+        "planner": config.planner_agent_type,
+        "developer": config.developer_agent_type,
+        "reviewer": config.reviewer_agent_type,
+        "tester": config.tester_agent_type,
+    }
+    for role, agent_type in role_agent_types.items():
+        if agent_type == "pi":
+            add(f"{role} backend", shutil.which(config.pi_cli_tool) is not None, config.pi_cli_tool)
+        elif agent_type == "claude_code":
+            add(
+                f"{role} backend",
+                shutil.which(config.claude_cli_tool) is not None,
+                config.claude_cli_tool,
+            )
+        elif agent_type == "anthropic":
+            has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+            detail = "ANTHROPIC_API_KEY set" if has_key else "ANTHROPIC_API_KEY missing"
+            add(f"{role} backend", has_key, detail)
+        else:
+            add(f"{role} backend", False, f"unknown backend: {agent_type}")
+
+    if config.tester_verify_commands:
+        add("Tester verification", True, "; ".join(config.tester_verify_commands))
+    else:
+        add("Tester verification", False, "No tester_verify_commands configured")
+
+    table = Table(title="ZEPERION Doctor", show_header=True, header_style="bold cyan")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Detail")
+    for name, ok, detail in checks:
+        status = "[green]OK[/green]" if ok else "[red]Needs attention[/red]"
+        table.add_row(name, status, detail)
+    console.print(table)
+
+    failures = [c for c in checks if not c[1]]
+    if failures:
+        console.print("\n[bold yellow]Next steps:[/bold yellow]")
+        for name, _ok, detail in failures:
+            if name == "Tester verification":
+                console.print("  Add tester_verify_commands in .zeperion/config.yaml.")
+            elif "backend" in name:
+                console.print(f"  Fix {name}: {detail}")
+            elif name == "Requirement file":
+                console.print("  Create or restore requirement.txt before running the workflow.")
+            elif name == "State directory":
+                console.print("  Run zeperion init to recreate .zeperion/state.")
+        raise typer.Exit(1)
+
+    console.print("\n[bold green]Ready.[/bold green] Run [cyan]zeperion verify[/cyan] next.")
+
+
+@app.command()
+def verify(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    command: Optional[list[str]] = typer.Option(
+        None,
+        "--command",
+        help="Override configured tester_verify_commands. Can be passed multiple times.",
+    ),
+    timeout: Optional[int] = typer.Option(
+        None,
+        "--timeout",
+        help="Per-command timeout in seconds. Defaults to config value.",
+    ),
+):
+    """Run the configured Tester verification commands without invoking agents."""
+    config, _ = _load_config_for_command(config_file)
+    commands = command or config.tester_verify_commands
+    if not commands:
+        console.print("[yellow]No verification commands configured.[/yellow]")
+        console.print(
+            "Add tester_verify_commands in .zeperion/config.yaml, then run zeperion verify again."
+        )
+        raise typer.Exit(1)
+
+    timeout_seconds = timeout or config.tester_verify_timeout_seconds
+    console.print(f"[bold]Running {len(commands)} verification command(s)[/bold]")
+    results = asyncio.run(
+        run_verify_commands(
+            commands,
+            cwd=Path(config.project_dir),
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+    table = Table(title="Verification", show_header=True, header_style="bold cyan")
+    table.add_column("Command", style="cyan")
+    table.add_column("Result", no_wrap=True)
+    table.add_column("Exit", justify="right")
+    table.add_column("Time", justify="right")
+    for result in results:
+        if result.timed_out:
+            status = "[yellow]TIMEOUT[/yellow]"
+        elif result.passed:
+            status = "[green]PASS[/green]"
+        else:
+            status = "[red]FAIL[/red]"
+        table.add_row(result.command, status, str(result.exit_code), f"{result.duration_ms}ms")
+    console.print(table)
+
+    failed = [r for r in results if not r.passed]
+    if failed:
+        console.print("\n[bold red]Verification failed.[/bold red]")
+        last = failed[-1]
+        if last.stdout:
+            console.print("\n[bold]stdout:[/bold]")
+            console.print(last.stdout)
+        if last.stderr:
+            console.print("\n[bold]stderr:[/bold]")
+            console.print(last.stderr)
+        raise typer.Exit(1)
+
+    console.print("\n[bold green]All verification commands passed.[/bold green]")
 
 
 # Graph nodes that only mutate counters/terminal state; printing a
@@ -430,7 +599,7 @@ def run(
         None,
         "--log-format",
         help="Log format: 'text' (default) or 'json'. "
-             "Overrides the ZEPERION_LOG_FORMAT env var.",
+        "Overrides the ZEPERION_LOG_FORMAT env var.",
     ),
     detach: bool = typer.Option(
         False,
@@ -571,9 +740,7 @@ def run(
             sibling = from_thread or derive_sibling_multi_agent_thread(thread_id)
             handoff = {"pr_title": None, "task_id": None}
             if sibling:
-                handoff = load_planner_handoff_from_sibling_thread(
-                    Path(config.state_dir), sibling
-                )
+                handoff = load_planner_handoff_from_sibling_thread(Path(config.state_dir), sibling)
                 if handoff["pr_title"] or handoff["task_id"]:
                     console.print(
                         f"[dim]Recovered PR handoff from sibling thread "
@@ -635,9 +802,7 @@ def run(
             test_str = _enum_str(final_test) if final_test is not None else None
 
             try:
-                StateStorage(
-                    Path(config.state_dir), thread_id=thread_id
-                ).append_event(
+                StateStorage(Path(config.state_dir), thread_id=thread_id).append_event(
                     thread_id,
                     {
                         "event": "workflow_finished",
@@ -659,16 +824,14 @@ def run(
                     "agent's output / last_error)[/dim]"
                 )
             else:
-                tail = f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
-                console.print(
-                    f"[bold green]\u2713 Workflow completed![/bold green]{tail}"
+                tail = (
+                    f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
                 )
+                console.print(f"[bold green]\u2713 Workflow completed![/bold green]{tail}")
 
         except KeyboardInterrupt:
             console.print("\n[yellow]\u26a0 Workflow interrupted[/yellow]")
-            console.print(
-                f"Resume with: zeperion run --resume --thread-id {thread_id}"
-            )
+            console.print(f"Resume with: zeperion run --resume --thread-id {thread_id}")
         except Exception as e:
             console.print(f"\n[red]\u2717 Workflow failed:[/red] {e}")
             raise typer.Exit(1)
@@ -748,10 +911,7 @@ def status(
         None,
         "--thread-id",
         "-t",
-        help=(
-            "Thread ID to check (default: current git branch, "
-            "falls back to 'main')"
-        ),
+        help=("Thread ID to check (default: current git branch, " "falls back to 'main')"),
     ),
     watch: bool = typer.Option(
         False,
@@ -826,9 +986,7 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
     # in the first place — and has been removed along with the unused
     # ``StateStorage.save_workflow_state``/``load_workflow_state``
     # helpers.
-    workflow_state = _load_workflow_state_from_checkpoint(
-        Path(config.state_dir), thread_id
-    )
+    workflow_state = _load_workflow_state_from_checkpoint(Path(config.state_dir), thread_id)
 
     # When even the checkpoint is empty, ``events.jsonl`` often still
     # has enough breadcrumbs to show the user "yes, work happened here".
@@ -873,11 +1031,7 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
         status_lines.append("[bold yellow]In-flight:[/bold yellow]")
         for agent in in_flight:
             round_part = f"round {agent.round}" if agent.round is not None else ""
-            fix_part = (
-                f" / fix {agent.fix_attempt}"
-                if agent.fix_attempt
-                else ""
-            )
+            fix_part = f" / fix {agent.fix_attempt}" if agent.fix_attempt else ""
             status_lines.append(
                 f"  [yellow]{agent.role}[/yellow] "
                 f"running for [yellow]{agent.elapsed_human}[/yellow] "
@@ -907,9 +1061,10 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
             f"total [cyan]{total_t:,}[/cyan] {coverage}"
         )
 
-    if _fmt(workflow_state.get("global_status")) == "BLOCKED" or _fmt(
-        workflow_state.get("phase")
-    ) == "blocked":
+    if (
+        _fmt(workflow_state.get("global_status")) == "BLOCKED"
+        or _fmt(workflow_state.get("phase")) == "blocked"
+    ):
         status_lines.append("")
         status_lines.append("[bold red]Human intervention required.[/bold red]")
         last_error = workflow_state.get("last_error")
@@ -921,9 +1076,7 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
         status_lines.append("")
         status_lines.append("[bold]PR Pipeline:[/bold]")
         if pipeline_state.get("thread_id"):
-            status_lines.append(
-                f"  Thread ID: [cyan]{pipeline_state['thread_id']}[/cyan]"
-            )
+            status_lines.append(f"  Thread ID: [cyan]{pipeline_state['thread_id']}[/cyan]")
         pr_phase = pipeline_state.get("pr_phase")
         if pr_phase:
             status_lines.append(f"  PR Phase: [cyan]{pr_phase}[/cyan]")
@@ -944,11 +1097,13 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
 
     status_lines.append(f"Updated: [dim]{workflow_state.get('updated_at', 'unknown')}[/dim]")
 
-    console.print(Panel.fit(
-        "\n".join(status_lines),
-        title="ZEPERION",
-        border_style="blue",
-    ))
+    console.print(
+        Panel.fit(
+            "\n".join(status_lines),
+            title="ZEPERION",
+            border_style="blue",
+        )
+    )
 
     # Recent events timeline: cheap chronological context. Limited
     # to the last 10 entries to keep the terminal tidy; users can
@@ -1118,9 +1273,7 @@ def list_runs(
     # of thread_id + status fields while still fitting most
     # 4K-monitor xterms; if the user pipes to ``less -S`` they'll see
     # everything; piping to a file preserves the full text.
-    render_console = (
-        Console(width=240, soft_wrap=False) if wide else console
-    )
+    render_console = Console(width=240, soft_wrap=False) if wide else console
 
     for thread_id, state in threads:
         updated_at = state.get("updated_at", "")
@@ -1162,10 +1315,7 @@ def logs(
         None,
         "--thread-id",
         "-t",
-        help=(
-            "Thread ID to tail (default: current git branch, "
-            "falls back to 'main')"
-        ),
+        help=("Thread ID to tail (default: current git branch, " "falls back to 'main')"),
     ),
     follow: bool = typer.Option(
         False,
@@ -1211,46 +1361,25 @@ def logs(
         raise typer.Exit(1)
 
     thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
-    events_path = (
-        Path(config.state_dir) / "runs" / thread_id / "events.jsonl"
-    )
+    events_path = Path(config.state_dir) / "runs" / thread_id / "events.jsonl"
 
     if not events_path.exists() and not follow:
-        console.print(
-            f"[yellow]No events file at {events_path}[/yellow]"
-        )
+        console.print(f"[yellow]No events file at {events_path}[/yellow]")
         console.print(f"Thread ID: [dim]{thread_id}[/dim]")
         raise typer.Exit(0)
 
     def _render(ev) -> str:
         ts = ev.timestamp.split("T")[-1][:8] if "T" in ev.timestamp else ev.timestamp
-        parts = [f"[dim]{ts}[/dim]", ev.event]
-        if ev.role:
-            parts.append(f"[cyan]{ev.role}[/cyan]")
-        if ev.round is not None:
-            parts.append(f"[dim]r{ev.round}[/dim]")
-        if ev.fix_attempt:
-            parts.append(f"[dim]fix{ev.fix_attempt}[/dim]")
-        if ev.duration_ms is not None:
-            parts.append(f"[dim]({ev.duration_ms}ms)[/dim]")
-        if ev.test_status:
-            parts.append(f"[magenta]{ev.test_status}[/magenta]")
-        if ev.global_status:
-            parts.append(f"[green]{ev.global_status}[/green]")
-        return " ".join(parts)
+        return f"[dim]{ts}[/dim] {describe_event(ev)}"
 
     def _print_terminal(ev) -> None:
         """Print a clear end-of-run banner for the terminal event."""
         gs = (ev.global_status or "").upper()
         if gs == "BLOCKED" or (ev.raw.get("phase") or "").lower() == "blocked":
-            console.print(
-                "\n[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow]"
-            )
+            console.print("\n[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow]")
         else:
             tail = f" [dim]({ev.global_status})[/dim]" if ev.global_status else ""
-            console.print(
-                f"\n[bold green]\u2713 Workflow finished[/bold green]{tail}"
-            )
+            console.print(f"\n[bold green]\u2713 Workflow finished[/bold green]{tail}")
 
     # Print the existing tail first.
     seen = 0
@@ -1278,10 +1407,7 @@ def logs(
                 )
         return
 
-    console.print(
-        f"\n[dim]-- following {events_path} "
-        f"(Ctrl-C to stop) --[/dim]"
-    )
+    console.print(f"\n[dim]-- following {events_path} " f"(Ctrl-C to stop) --[/dim]")
     try:
         while True:
             time.sleep(poll_interval)
@@ -1319,10 +1445,7 @@ def stop(
         None,
         "--thread-id",
         "-t",
-        help=(
-            "Thread to stop (default: current git branch, "
-            "falls back to 'main')"
-        ),
+        help=("Thread to stop (default: current git branch, " "falls back to 'main')"),
     ),
     force: bool = typer.Option(
         False,
@@ -1369,8 +1492,7 @@ def stop(
 
     if status == "no_pidfile":
         console.print(
-            f"[yellow]No detached run found for thread "
-            f"[cyan]{resolved_thread}[/cyan][/yellow]"
+            f"[yellow]No detached run found for thread " f"[cyan]{resolved_thread}[/cyan][/yellow]"
         )
         console.print(f"  Pidfile path: [dim]{pidfile_path(state_dir, resolved_thread)}[/dim]")
         raise typer.Exit(1)
@@ -1461,9 +1583,7 @@ def serve(
     from zeperion.web.app import create_app_from_config_file
 
     try:
-        web_app = create_app_from_config_file(
-            config_file, poll_interval=poll_interval
-        )
+        web_app = create_app_from_config_file(config_file, poll_interval=poll_interval)
     except Exception as exc:
         console.print(f"[red]Error:[/red] Failed to build web app: {exc}")
         raise typer.Exit(1)
@@ -1551,10 +1671,7 @@ def update(
         console.print("[red]Reinstall failed.[/red] See pip output above.")
         raise typer.Exit(1)
 
-    console.print(
-        "[bold green]✓ Updated.[/bold green] "
-        "Run 'zeperion version' to confirm."
-    )
+    console.print("[bold green]✓ Updated.[/bold green] " "Run 'zeperion version' to confirm.")
 
 
 @app.command()

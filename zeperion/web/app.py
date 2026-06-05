@@ -34,9 +34,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -46,7 +47,13 @@ from zeperion.config import load_config_from_yaml
 from zeperion.models import WorkflowConfig
 from zeperion.utils.checkpoint import open_zeperion_checkpointer
 from zeperion.utils.process import is_alive, read_pidfile
-from zeperion.utils.timeline import derive_in_flight, read_events, summarise
+from zeperion.utils.timeline import (
+    derive_in_flight,
+    describe_event,
+    explain_blocker,
+    read_events,
+    summarise,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +124,7 @@ _BASE_HTML = """\
   .timeline { display: flex; flex-direction: column; gap: 4px; }
   .timeline-row {
     display: grid;
-    grid-template-columns: 80px 100px 70px 1fr 90px;
+    grid-template-columns: 80px minmax(0, 1fr) 90px;
     gap: 12px; align-items: center;
     padding: 4px 8px; border-left: 2px solid var(--border);
   }
@@ -125,6 +132,7 @@ _BASE_HTML = """\
   .timeline-row.completed { border-left-color: var(--good); }
   .timeline-row .ts { color: var(--muted); font-size: 12px; }
   .timeline-row .role { color: var(--accent); }
+  .timeline-row .description { min-width: 0; overflow-wrap: anywhere; }
   .timeline-row .bar {
     background: var(--accent); height: 4px; border-radius: 2px;
     display: inline-block; vertical-align: middle;
@@ -225,6 +233,17 @@ _THREAD_HTML = """\
         (round {{ in_flight.round }})
       </p>
     {% endif %}
+    {% if blocker_hints %}
+      <div style="border-left: 2px solid var(--bad); padding-left: 10px; color: var(--warn)">
+        <strong>Needs attention</strong>
+        {% if state.last_error %}<p>{{ state.last_error }}</p>{% endif %}
+        <ul>
+        {% for hint in blocker_hints %}
+          <li>{{ hint }}</li>
+        {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
   </div>
   <div class="panel">
     <h2>Aggregates ({{ summary.total_events }} events)</h2>
@@ -264,11 +283,11 @@ _THREAD_HTML = """\
     const row = document.createElement('div');
     row.className = 'timeline-row ' + (ev.event === 'agent_started' ? 'started' : 'completed');
     const barPx = ev.duration_ms ? Math.max(2, (ev.duration_ms / maxDuration) * maxBarPx) : 0;
+    const description = ev.description || ev.event;
     row.innerHTML =
       '<span class="ts">' + fmtTs(ev.timestamp) + '</span>' +
-      '<span class="role">' + (ev.role || ev.event) + '</span>' +
-      '<span>r' + (ev.round || '-') + (ev.fix_attempt ? '/f' + ev.fix_attempt : '') + '</span>' +
-      '<span>' + (barPx ? '<span class="bar" style="width:' + barPx + 'px"></span>' : '') +
+      '<span class="description">' + description +
+        (barPx ? ' <span class="bar" style="width:' + barPx + 'px"></span>' : '') +
         (ev.test_status ? ' <span class="pill ' + pillClass(ev.test_status) + '">' + ev.test_status + '</span>' : '') +
       '</span>' +
       '<span class="duration">' + (ev.duration_ms ? ev.duration_ms + 'ms' : ev.event) + '</span>';
@@ -292,11 +311,13 @@ _THREAD_HTML = """\
 
 
 _ENV = Environment(
-    loader=DictLoader({
-        "base": _BASE_HTML,
-        "index": _INDEX_HTML,
-        "thread": _THREAD_HTML,
-    }),
+    loader=DictLoader(
+        {
+            "base": _BASE_HTML,
+            "index": _INDEX_HTML,
+            "thread": _THREAD_HTML,
+        }
+    ),
     autoescape=select_autoescape(["html"]),
 )
 
@@ -325,7 +346,25 @@ def _format_state(raw: dict) -> dict:
         "pr_phase": _enum_value(raw.get("pr_phase")),
         "task_id": _enum_value(raw.get("task_id"), "none"),
         "updated_at": raw.get("updated_at", ""),
+        "last_error": raw.get("last_error"),
     }
+
+
+def _event_payload(ev) -> dict:
+    """Return an event dict enriched with the same description the CLI shows."""
+    return {**ev.raw, "description": describe_event(ev)}
+
+
+def _is_blocked_view(state: dict, events: list) -> bool:
+    if state["global_status"] == "BLOCKED" or state["phase"] == "blocked":
+        return True
+    if not events:
+        return False
+    last = events[-1]
+    return last.event == "workflow_finished" and (
+        str(last.raw.get("global_status", "")).upper() == "BLOCKED"
+        or str(last.raw.get("phase", "")).lower() == "blocked"
+    )
 
 
 async def _collect_threads(state_dir: Path) -> list[tuple[str, dict]]:
@@ -345,7 +384,7 @@ async def _collect_threads(state_dir: Path) -> list[tuple[str, dict]]:
     return list(results.items())
 
 
-async def _read_thread_snapshot(state_dir: Path, thread_id: str) -> Optional[dict]:
+async def _read_thread_snapshot(state_dir: Path, thread_id: str) -> dict | None:
     checkpoint_path = state_dir / "checkpoints.db"
     if not checkpoint_path.exists():
         return None
@@ -356,7 +395,7 @@ async def _read_thread_snapshot(state_dir: Path, thread_id: str) -> Optional[dic
         return dict(snap.checkpoint.get("channel_values", {}) or {})
 
 
-def _pid_alive(state_dir: Path, thread_id: str) -> tuple[Optional[int], bool]:
+def _pid_alive(state_dir: Path, thread_id: str) -> tuple[int | None, bool]:
     pid = read_pidfile(state_dir, thread_id)
     if pid is None:
         return None, False
@@ -443,21 +482,24 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             if in_flight_objs
             else None
         )
-        max_duration = max(
-            (ev.duration_ms or 0 for ev in events), default=0
-        )
+        max_duration = max((ev.duration_ms or 0 for ev in events), default=0)
         pid, alive = _pid_alive(state_dir, thread_id)
+        formatted_state = _format_state(raw)
+        blocker_hints = []
+        if _is_blocked_view(formatted_state, events):
+            blocker_hints = explain_blocker(formatted_state.get("last_error"), events)
 
         # JSON-safe payload for the frontend seeding step. Use the
         # raw dict (not the dataclass) so the JS side gets all fields.
-        seed_events = [ev.raw for ev in events[-200:]]
+        seed_events = [_event_payload(ev) for ev in events[-200:]]
 
         return _render(
             "thread",
             title=thread_id,
             thread_id=thread_id,
-            state=_format_state(raw),
+            state=formatted_state,
             in_flight=in_flight,
+            blocker_hints=blocker_hints,
             summary=summarise(events),
             events_json=json.dumps(seed_events),
             max_duration_ms=max_duration,
@@ -470,12 +512,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
     @app.get("/api/threads")
     async def api_threads() -> JSONResponse:
         rows = await _collect_threads(state_dir)
-        return JSONResponse(
-            [
-                {"thread_id": tid, **_format_state(raw)}
-                for tid, raw in rows
-            ]
-        )
+        return JSONResponse([{"thread_id": tid, **_format_state(raw)} for tid, raw in rows])
 
     @app.get("/api/threads/{thread_id}")
     async def api_thread(thread_id: str) -> JSONResponse:
@@ -483,6 +520,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
         if raw is None and not (state_dir / "runs" / thread_id).exists():
             raise HTTPException(status_code=404, detail="thread not found")
         events = read_events(state_dir, thread_id)
+        formatted_state = _format_state(raw or {})
         in_flight = [
             {
                 "role": a.role,
@@ -493,18 +531,23 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             }
             for a in derive_in_flight(events)
         ]
-        return JSONResponse({
-            "thread_id": thread_id,
-            "state": _format_state(raw or {}),
-            "summary": summarise(events),
-            "in_flight": in_flight,
-            "events": [ev.raw for ev in events],
-        })
+        return JSONResponse(
+            {
+                "thread_id": thread_id,
+                "state": formatted_state,
+                "summary": summarise(events),
+                "blocker_hints": (
+                    explain_blocker(formatted_state.get("last_error"), events)
+                    if _is_blocked_view(formatted_state, events)
+                    else []
+                ),
+                "in_flight": in_flight,
+                "events": [_event_payload(ev) for ev in events],
+            }
+        )
 
     @app.get("/api/threads/{thread_id}/events/stream")
-    async def api_thread_stream(
-        thread_id: str, request: Request
-    ) -> StreamingResponse:
+    async def api_thread_stream(thread_id: str, request: Request) -> StreamingResponse:
         """Server-Sent Events: yield every NEW event as it appears.
 
         Initial connection emits nothing; the HTML page already
@@ -537,7 +580,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
                 current = read_events(state_dir, thread_id)
                 if len(current) > last_count:
                     for ev in current[last_count:]:
-                        yield f"data: {json.dumps(ev.raw)}\n\n".encode("utf-8")
+                        yield f"data: {json.dumps(_event_payload(ev))}\n\n".encode()
                     last_count = len(current)
                 elif len(current) < last_count:
                     # File shrank → rotated/reset. Rebase cursor.
@@ -563,9 +606,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
     return app
 
 
-def create_app_from_config_file(
-    config_file: str, *, poll_interval: float = 2.0
-) -> FastAPI:
+def create_app_from_config_file(config_file: str, *, poll_interval: float = 2.0) -> FastAPI:
     """Convenience: load a YAML config and build the app in one call.
 
     Used by the CLI ``zeperion serve`` subcommand and by tests.

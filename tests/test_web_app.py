@@ -97,9 +97,7 @@ class TestRootRedirect:
 
 class TestThreadsIndex:
     @pytest.mark.asyncio
-    async def test_empty_state_does_not_crash(
-        self, client: httpx.AsyncClient
-    ) -> None:
+    async def test_empty_state_does_not_crash(self, client: httpx.AsyncClient) -> None:
         # A fresh install has no checkpoint DB and no events. The
         # index page must still render cleanly with a friendly empty
         # state, not 500.
@@ -123,9 +121,7 @@ class TestThreadsIndex:
 
         app = create_app(config_with_state)
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             # Without a checkpoint DB the index is empty (we don't
             # synthesise threads from events.jsonl alone — by design).
             r = await c.get("/api/threads")
@@ -139,6 +135,7 @@ class TestThreadsIndex:
             body = r.json()
             assert body["thread_id"] == "alpha"
             assert len(body["events"]) == 2
+            assert body["events"][0]["description"]
 
 
 class TestThreadDetail:
@@ -193,6 +190,31 @@ class TestThreadDetail:
             assert body["in_flight"][0]["role"] == "planner"
             assert body["in_flight"][0]["round"] == 3
 
+    @pytest.mark.asyncio
+    async def test_blocker_hints_surface_in_json(
+        self,
+        config_with_state: WorkflowConfig,
+    ) -> None:
+        state_dir = Path(config_with_state.state_dir)
+        _write_event(
+            state_dir,
+            "blocked",
+            {
+                "timestamp": "2026-05-14T14:05:00+00:00",
+                "event": "workflow_finished",
+                "phase": "blocked",
+                "global_status": "BLOCKED",
+            },
+        )
+        app = create_app(config_with_state)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as c:
+            r = await c.get("/api/threads/blocked")
+            body = r.json()
+            assert body["blocker_hints"]
+
 
 class TestSSEStream:
     """We drive the SSE generator *directly* rather than via
@@ -245,9 +267,7 @@ class TestSSEStream:
             # First pull: should be a heartbeat because no new rows
             # have been written since the cursor seed.
             first = await anext(body_iter)
-            assert b": ping" in first, (
-                f"expected heartbeat as first frame, got {first!r}"
-            )
+            assert b": ping" in first, f"expected heartbeat as first frame, got {first!r}"
 
             # Now append a fresh event mid-stream.
             _write_event(
@@ -270,9 +290,7 @@ class TestSSEStream:
                 if b"agent_completed" in frame and b"tester" in frame:
                     got_event = True
                     break
-            assert got_event, (
-                "SSE never delivered the newly-appended event within 1s"
-            )
+            assert got_event, "SSE never delivered the newly-appended event within 1s"
         finally:
             # Closing the iterator stops the generator's while-True
             # loop and prevents an asyncio warning about pending tasks.

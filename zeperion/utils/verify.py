@@ -41,11 +41,12 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,49 @@ logger = logging.getLogger(__name__)
 # verification commands together still leave room in even a 32 K
 # context window for the rest of the Tester prompt.
 MAX_OUTPUT_BYTES: int = 16 * 1024
+
+
+def detect_verify_commands(project_dir: Path) -> list[str]:
+    """Infer a small, safe default verification command list for a project.
+
+    The detector intentionally prefers commands that are conventional,
+    read-only, and likely to be available in an already-working checkout.
+    It returns an empty list when the project shape is ambiguous so
+    ``zeperion init`` can stay conservative instead of inventing a test
+    command that immediately fails on first run.
+    """
+    project_dir = Path(project_dir)
+    commands: list[str] = []
+
+    if (project_dir / "pyproject.toml").exists() or (project_dir / "pytest.ini").exists():
+        commands.append("pytest -q")
+    elif (project_dir / "setup.cfg").exists() or (project_dir / "tox.ini").exists():
+        commands.append("pytest -q")
+
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            payload = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        scripts = payload.get("scripts") if isinstance(payload, dict) else None
+        if isinstance(scripts, dict) and scripts.get("test"):
+            if (project_dir / "pnpm-lock.yaml").exists():
+                commands.append("pnpm test")
+            elif (project_dir / "yarn.lock").exists():
+                commands.append("yarn test")
+            else:
+                commands.append("npm test")
+
+    if (project_dir / "go.mod").exists():
+        commands.append("go test ./...")
+
+    if (project_dir / "Cargo.toml").exists():
+        commands.append("cargo test")
+
+    # Preserve order while avoiding duplicates in polyglot repos where
+    # two detectors might suggest the same shell command.
+    return list(dict.fromkeys(commands))
 
 
 @dataclass(frozen=True)

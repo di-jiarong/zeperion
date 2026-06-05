@@ -127,6 +127,8 @@ zeperion --help
 | 命令 | 作用 | 常用参数 |
 |------|------|----------|
 | `zeperion init [dir]` | 初始化项目（生成 `.zeperion/config.yaml`、`requirement.txt`） | `-b/--backend pi\|claude_code\|anthropic`、`-f/--force` |
+| `zeperion doctor` | 检查本地环境是否可运行 | `-c/--config` |
+| `zeperion verify` | 单独运行 Tester 验收命令 | `-c/--config`、`--command`、`--timeout` |
 | `zeperion run` | 运行工作流 | `-m/--mode`、`-t/--thread-id`、`-r/--resume`、`-d/--detach`、`--log-format`、`--no-pr-pipeline` |
 | `zeperion ship` | 一条龙：multi_agent → PR pipeline | `-t/--thread-id` |
 | `zeperion status` | 查看单个 thread 状态 | `-t/--thread-id`、`--watch`、`--interval` |
@@ -338,6 +340,11 @@ max_rounds: 10                      # 默认 10，防止解析失败时烧 token
 max_fix_attempts: 3
 enable_reviewer: true
 max_total_tokens: 0                 # >0 时作为累计 token 预算护栏，到顶即 BLOCKED
+
+# Tester 真实验收命令（init 会按项目类型自动探测常见命令）
+tester_verify_commands:
+  - pytest -q
+tester_verify_timeout_seconds: 300  # 每条验收命令的超时（秒）
 
 # Pi RPC 调谐（仅 *_agent_type=pi 时生效）
 pi_cli_tool: pi
