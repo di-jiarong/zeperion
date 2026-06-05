@@ -214,6 +214,9 @@ class TestThreadDetail:
             r = await c.get("/api/threads/blocked")
             body = r.json()
             assert body["blocker_hints"]
+            # A blocked thread must offer a concrete resume command.
+            assert body["next_commands"]
+            assert any("--resume" in c for c in body["next_commands"])
 
 
 class TestSSEStream:

@@ -96,6 +96,32 @@ class TestStatusCommandDoesNotCrash:
         assert result.exit_code == 0, f"status crashed:\n{result.output}"
         assert "No workflow state found" in result.output
 
+    def test_status_headline_shows_next_step(self, project_dir: Path) -> None:
+        # An in-flight agent (started, never completed) must render the
+        # headline panel with a "Next step" block suggesting logs/watch.
+        events_path = project_dir / ".zeperion" / "state" / "runs" / "live" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-14T10:00:00+00:00",
+                    "event": "agent_started",
+                    "role": "developer",
+                    "round": 1,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["status", "-c", str(project_dir / ".zeperion" / "config.yaml"), "-t", "live"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Next step" in result.output
+        assert "zeperion logs" in result.output
+
 
 class TestInitCommandSucceedsOnEmptyDir:
     def test_init_in_empty_dir(self, tmp_path: Path) -> None:
@@ -280,6 +306,51 @@ class TestDoctorCommand:
         assert "Tester verification" in result.output
         assert "tester_verify_commands" in result.output
 
+    def test_doctor_help_lists_probe_flag(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--probe" in result.output
+        assert "--no-probe" in result.output
+
+    def test_doctor_probe_flags_broken_pi_backend(self, tmp_path: Path, monkeypatch) -> None:
+        # A pi backend whose CLI isn't installed must surface as a failed
+        # backend check under --probe (the default).
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        (tmp_path / ".zeperion").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".zeperion" / "state").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "requirement.txt").write_text("test", encoding="utf-8")
+        config_path = tmp_path / ".zeperion" / "config.yaml"
+        config_path.write_text(
+            f"requirement_file: {tmp_path / 'requirement.txt'}\n"
+            f"state_dir: {tmp_path / '.zeperion' / 'state'}\n"
+            f"project_dir: {tmp_path}\n"
+            "planner_agent_type: anthropic\n"
+            "developer_agent_type: pi\n"
+            "reviewer_agent_type: anthropic\n"
+            "tester_agent_type: anthropic\n"
+            "pi_cli_tool: definitely-not-a-real-binary-zzz\n"
+            "tester_verify_commands:\n  - echo ok\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor", "-c", str(config_path)])
+        assert result.exit_code == 1, result.output
+        assert "developer backend" in result.output
+        assert "definitely-not-a-real-binary-zzz" in result.output
+
+    def test_doctor_no_probe_is_static(self, project_dir: Path, monkeypatch) -> None:
+        # --no-probe must not shell out; anthropic-only config still
+        # fails on missing tester verification, not on any probe.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["doctor", "-c", str(project_dir / ".zeperion" / "config.yaml"), "--no-probe"],
+        )
+        assert result.exit_code == 1
+        assert "Tester verification" in result.output
+
 
 class TestVerifyCommand:
     def test_verify_runs_override_command(self, project_dir: Path) -> None:
@@ -305,6 +376,108 @@ class TestVerifyCommand:
         )
         assert result.exit_code == 1
         assert "No verification commands configured" in result.output
+
+    def test_verify_detect_does_not_run(self, project_dir: Path) -> None:
+        (project_dir / "pyproject.toml").write_text("[project]\nname='t'\n", encoding="utf-8")
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["verify", "-c", str(project_dir / ".zeperion" / "config.yaml"), "--detect"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "pytest -q" in result.output
+        # --detect must not execute the commands nor mutate the config.
+        config_text = (project_dir / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
+        assert "pytest -q" not in config_text
+
+    def test_verify_write_config_persists_detected(self, project_dir: Path) -> None:
+        (project_dir / "pyproject.toml").write_text("[project]\nname='t'\n", encoding="utf-8")
+        runner = CliRunner()
+        config_path = project_dir / ".zeperion" / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["verify", "-c", str(config_path), "--write-config"],
+        )
+        assert result.exit_code == 0, result.output
+        config_text = config_path.read_text(encoding="utf-8")
+        assert "tester_verify_commands:" in config_text
+        assert "- pytest -q" in config_text
+        # Surgical update must preserve unrelated field values.
+        assert "planner_agent_type: anthropic" in config_text
+
+    def test_verify_write_config_with_explicit_command(self, project_dir: Path) -> None:
+        runner = CliRunner()
+        config_path = project_dir / ".zeperion" / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["verify", "-c", str(config_path), "--write-config", "--command", "make test"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "- make test" in config_path.read_text(encoding="utf-8")
+
+    def test_verify_failure_shows_compact_summary(self, project_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "verify",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "--command",
+                "echo boom_marker 1>&2; exit 3",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Verification failed:" in result.output
+        assert "1/1" in result.output
+        assert "exit 3" in result.output
+        assert "boom_marker" in result.output
+
+
+class TestPrerunGate:
+    def _make_dirty_repo(self, project_dir: Path) -> None:
+        import os
+        import subprocess
+
+        env = {
+            "GIT_AUTHOR_NAME": "z",
+            "GIT_AUTHOR_EMAIL": "z@e.x",
+            "GIT_COMMITTER_NAME": "z",
+            "GIT_COMMITTER_EMAIL": "z@e.x",
+            "PATH": os.environ.get("PATH", ""),
+        }
+
+        def g(args: list[str]) -> None:
+            subprocess.run(
+                ["git", *args], cwd=str(project_dir), check=True, env=env, capture_output=True
+            )
+
+        g(["init", "-b", "main"])
+        (project_dir / "tracked.txt").write_text("v1", encoding="utf-8")
+        g(["add", "."])
+        g(["commit", "-m", "init"])
+        # Leave an uncommitted modification so the tree is dirty.
+        (project_dir / "tracked.txt").write_text("v2", encoding="utf-8")
+
+    def test_run_blocks_on_dirty_tree(self, project_dir: Path) -> None:
+        self._make_dirty_repo(project_dir)
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                "--mode",
+                "multi_agent",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "-t",
+                "gate-test",
+            ],
+        )
+        assert result.exit_code == 1, result.output
+        assert "dirty git tree" in result.output
+        # Pre-run summary should have rendered before the block.
+        assert "Pre-run check" in result.output
 
 
 class TestLogsCommand:

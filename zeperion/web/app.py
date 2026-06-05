@@ -48,10 +48,11 @@ from zeperion.models import WorkflowConfig
 from zeperion.utils.checkpoint import open_zeperion_checkpointer
 from zeperion.utils.process import is_alive, read_pidfile
 from zeperion.utils.timeline import (
+    classify_blocker,
     derive_in_flight,
     describe_event,
-    explain_blocker,
     read_events,
+    suggest_next_commands,
     summarise,
 )
 
@@ -235,13 +236,21 @@ _THREAD_HTML = """\
     {% endif %}
     {% if blocker_hints %}
       <div style="border-left: 2px solid var(--bad); padding-left: 10px; color: var(--warn)">
-        <strong>Needs attention</strong>
+        <strong>Needs attention{% if blocker_label %}: {{ blocker_label }}{% endif %}</strong>
         {% if state.last_error %}<p>{{ state.last_error }}</p>{% endif %}
         <ul>
         {% for hint in blocker_hints %}
           <li>{{ hint }}</li>
         {% endfor %}
         </ul>
+      </div>
+    {% endif %}
+    {% if next_commands %}
+      <div style="margin-top: 10px">
+        <strong>Next step</strong>
+        {% for cmd in next_commands %}
+          <pre style="margin: 4px 0; padding: 6px 8px; background: var(--code-bg, #1e1e1e); border-radius: 4px; overflow-x: auto"><code>{{ cmd }}</code></pre>
+        {% endfor %}
       </div>
     {% endif %}
   </div>
@@ -485,9 +494,25 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
         max_duration = max((ev.duration_ms or 0 for ev in events), default=0)
         pid, alive = _pid_alive(state_dir, thread_id)
         formatted_state = _format_state(raw)
-        blocker_hints = []
-        if _is_blocked_view(formatted_state, events):
-            blocker_hints = explain_blocker(formatted_state.get("last_error"), events)
+        blocker_hints: list[str] = []
+        blocker_category = ""
+        blocker_label = ""
+        blocked = _is_blocked_view(formatted_state, events)
+        if blocked:
+            blocker = classify_blocker(formatted_state.get("last_error"), events)
+            blocker_hints = blocker.hints
+            blocker_category = blocker.category
+            blocker_label = blocker.label
+        next_commands = suggest_next_commands(
+            thread_id,
+            blocked=blocked,
+            category=blocker_category or None,
+            in_flight=bool(in_flight_objs),
+            done=(
+                formatted_state["global_status"] == "DONE"
+                or formatted_state["phase"] == "completed"
+            ),
+        )
 
         # JSON-safe payload for the frontend seeding step. Use the
         # raw dict (not the dataclass) so the JS side gets all fields.
@@ -500,6 +525,9 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             state=formatted_state,
             in_flight=in_flight,
             blocker_hints=blocker_hints,
+            blocker_category=blocker_category,
+            blocker_label=blocker_label,
+            next_commands=next_commands,
             summary=summarise(events),
             events_json=json.dumps(seed_events),
             max_duration_ms=max_duration,
@@ -531,16 +559,29 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             }
             for a in derive_in_flight(events)
         ]
+        blocked = _is_blocked_view(formatted_state, events)
+        blocker = (
+            classify_blocker(formatted_state.get("last_error"), events) if blocked else None
+        )
+        next_commands = suggest_next_commands(
+            thread_id,
+            blocked=blocked,
+            category=blocker.category if blocker else None,
+            in_flight=bool(in_flight),
+            done=(
+                formatted_state["global_status"] == "DONE"
+                or formatted_state["phase"] == "completed"
+            ),
+        )
         return JSONResponse(
             {
                 "thread_id": thread_id,
                 "state": formatted_state,
                 "summary": summarise(events),
-                "blocker_hints": (
-                    explain_blocker(formatted_state.get("last_error"), events)
-                    if _is_blocked_view(formatted_state, events)
-                    else []
-                ),
+                "blocker_hints": blocker.hints if blocker else [],
+                "blocker_category": blocker.category if blocker else "",
+                "blocker_label": blocker.label if blocker else "",
+                "next_commands": next_commands,
                 "in_flight": in_flight,
                 "events": [_event_payload(ev) for ev in events],
             }

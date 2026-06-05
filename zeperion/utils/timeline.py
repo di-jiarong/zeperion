@@ -213,32 +213,125 @@ def describe_event(ev: TimelineEvent) -> str:
     return ev.event.replace("_", " ")
 
 
-def explain_blocker(last_error: str | None, events: Iterable[TimelineEvent]) -> list[str]:
-    """Suggest next operator actions for a blocked or failed workflow."""
-    if not last_error:
-        return [
-            "Open the latest agent output above, then resume after addressing the missing context."
-        ]
+class BlockerCategory:
+    """Stable, machine-readable buckets for *why* a workflow blocked.
 
-    error = last_error.lower()
-    hints: list[str] = []
+    These strings are part of the contract consumed by the CLI status
+    panel, the web UI, and anything parsing the JSON API. Keep the
+    values stable; add new buckets rather than renaming existing ones.
+    """
 
+    ENVIRONMENT = "environment"  # missing CLI / bad credentials
+    AGENT_PARSE = "agent_parse"  # model emitted unparseable structured output
+    VERIFY_FAILED = "verify_failed"  # tests / verify commands failed
+    BUDGET = "budget"  # ran out of rounds / token budget
+    NO_CHANGES = "no_changes"  # workflow produced no file edits
+    UNKNOWN = "unknown"  # couldn't classify — fall back to raw error
+
+
+_CATEGORY_LABELS: dict[str, str] = {
+    BlockerCategory.ENVIRONMENT: "Environment / tooling",
+    BlockerCategory.AGENT_PARSE: "Agent output parse error",
+    BlockerCategory.VERIFY_FAILED: "Verification failed",
+    BlockerCategory.BUDGET: "Budget exhausted",
+    BlockerCategory.NO_CHANGES: "No changes produced",
+    BlockerCategory.UNKNOWN: "Needs investigation",
+}
+
+
+@dataclass(frozen=True)
+class BlockerInfo:
+    """Structured classification of a blocked/failed workflow.
+
+    Attributes:
+        category: One of the :class:`BlockerCategory` string constants.
+        label: Human-readable label for ``category`` (for headings).
+        hints: Ordered, actionable next-step suggestions for the operator.
+    """
+
+    category: str
+    label: str
+    hints: list[str]
+
+
+def _classify_category(error: str) -> str:
+    """Map a lowercased ``last_error`` string to a :class:`BlockerCategory`.
+
+    Pure keyword heuristics, but funnelled through one place so the CLI,
+    web UI, and logs all agree on the bucket. ``error`` must already be
+    lowercased by the caller.
+    """
+    if not error:
+        return BlockerCategory.UNKNOWN
     if "pi cli not found" in error or ("claude" in error and "not found" in error):
-        hints.append(
-            "Install the configured coding CLI, or switch the role backend in .zeperion/config.yaml."
-        )
-    elif "anthropic" in error and ("api" in error or "key" in error):
-        hints.append("Check the Anthropic credentials used by the Planner backend.")
-    elif "parse" in error or "output parse" in error:
-        hints.append(
-            "Inspect the latest agent output; the model likely missed the required structured fields."
-        )
-    elif "token budget" in error:
-        hints.append("Raise max_total_tokens or narrow the requirement before resuming.")
-    elif "test_status: fail" in error or "fix_request" in error or "bugs:" in error:
-        hints.append(
-            "Read the Tester report, fix the smallest failing case, then run zeperion run --resume."
-        )
+        return BlockerCategory.ENVIRONMENT
+    if "anthropic" in error and ("api" in error or "key" in error):
+        return BlockerCategory.ENVIRONMENT
+    if "parse" in error or "output parse" in error:
+        return BlockerCategory.AGENT_PARSE
+    if (
+        "token budget" in error
+        or "max_total_tokens" in error
+        or "max_rounds" in error
+        or "max rounds" in error
+        or "round budget" in error
+        or "budget exceeded" in error
+    ):
+        return BlockerCategory.BUDGET
+    if "no changes" in error or "no_changes" in error or "nothing to commit" in error:
+        return BlockerCategory.NO_CHANGES
+    if "test_status: fail" in error or "fix_request" in error or "bugs:" in error:
+        return BlockerCategory.VERIFY_FAILED
+    return BlockerCategory.UNKNOWN
+
+
+_CATEGORY_HINTS: dict[str, str] = {
+    BlockerCategory.ENVIRONMENT: (
+        "Install the configured coding CLI / fix the Anthropic credentials, "
+        "or switch the role backend in .zeperion/config.yaml. "
+        "Run `zeperion doctor` to pinpoint it."
+    ),
+    BlockerCategory.AGENT_PARSE: (
+        "Inspect the latest agent output; the model likely missed the required "
+        "structured fields."
+    ),
+    BlockerCategory.VERIFY_FAILED: (
+        "Read the Tester report, fix the smallest failing case, then run "
+        "zeperion run --resume."
+    ),
+    BlockerCategory.BUDGET: (
+        "Raise max_total_tokens / max_rounds or narrow the requirement before resuming."
+    ),
+    BlockerCategory.NO_CHANGES: (
+        "No file changes were produced. Confirm a file-writing backend "
+        "(pi/claude_code) is set for Developer — the anthropic backend never "
+        "edits files."
+    ),
+    BlockerCategory.UNKNOWN: (
+        "Run zeperion logs --follow for the full trace, then resume once the "
+        "issue is fixed."
+    ),
+}
+
+
+def classify_blocker(
+    last_error: str | None,
+    events: Iterable[TimelineEvent],
+) -> BlockerInfo:
+    """Classify a blocked workflow into a stable category + actionable hints.
+
+    The single source of truth for "why did this block, and what should
+    the operator do". ``explain_blocker`` is a thin compatibility wrapper
+    that returns only ``.hints``.
+
+    Failed verification events can *upgrade* an otherwise-unknown error to
+    ``VERIFY_FAILED`` (and always contribute a "last failing command"
+    hint), because a non-zero ``tester_verify_command`` is concrete
+    evidence even when ``last_error`` is vague or absent.
+    """
+    events = list(events)
+    error = (last_error or "").lower()
+    category = _classify_category(error)
 
     failed_verify = [
         e
@@ -246,15 +339,77 @@ def explain_blocker(last_error: str | None, events: Iterable[TimelineEvent]) -> 
         if e.event == "tester_verify_command"
         and (e.raw.get("passed") is False or e.raw.get("timed_out") is True)
     ]
+    # Concrete failing commands trump a vague/empty error string.
+    if failed_verify and category == BlockerCategory.UNKNOWN:
+        category = BlockerCategory.VERIFY_FAILED
+
+    hints: list[str] = []
+    if not last_error and not failed_verify:
+        # Genuinely no signal — preserve the historical default hint.
+        hints.append(
+            "Open the latest agent output above, then resume after addressing "
+            "the missing context."
+        )
+    else:
+        hints.append(_CATEGORY_HINTS[category])
+
     if failed_verify:
         command = _shorten(str(failed_verify[-1].raw.get("command", "")), 96)
         hints.append(f"Last verification problem came from: {command}")
 
-    if not hints:
-        hints.append(
-            "Run zeperion logs --follow for the full trace, then resume once the issue is fixed."
-        )
-    return hints
+    return BlockerInfo(
+        category=category,
+        label=_CATEGORY_LABELS[category],
+        hints=hints,
+    )
+
+
+def explain_blocker(last_error: str | None, events: Iterable[TimelineEvent]) -> list[str]:
+    """Suggest next operator actions for a blocked or failed workflow.
+
+    Backwards-compatible thin wrapper over :func:`classify_blocker`;
+    returns just the ordered hint strings.
+    """
+    return classify_blocker(last_error, events).hints
+
+
+def suggest_next_commands(
+    thread_id: str,
+    *,
+    blocked: bool = False,
+    category: str | None = None,
+    in_flight: bool = False,
+    done: bool = False,
+) -> list[str]:
+    """Return concrete copy-pasteable next commands for the operator.
+
+    Shared by the CLI ``status`` panel and the web UI so both surfaces
+    suggest the *same* commands for the same situation. The ordering is
+    "do this first" → "then maybe this":
+
+    * blocked → resume, plus a category-specific diagnostic
+      (``doctor`` for environment, ``verify`` for failed tests);
+    * still running → follow the logs / live-watch status;
+    * done → offer to ship a PR;
+    * otherwise (idle / partial) → resume.
+    """
+    cmds: list[str] = []
+    if blocked:
+        cmds.append(f"zeperion run --resume -t {thread_id}")
+        if category == BlockerCategory.ENVIRONMENT:
+            cmds.append("zeperion doctor")
+        elif category == BlockerCategory.VERIFY_FAILED:
+            cmds.append("zeperion verify")
+        elif category == BlockerCategory.NO_CHANGES:
+            cmds.append("zeperion doctor  # confirm a file-writing backend")
+    elif in_flight:
+        cmds.append(f"zeperion logs -t {thread_id} --follow")
+        cmds.append(f"zeperion status -t {thread_id} --watch")
+    elif done:
+        cmds.append(f"zeperion ship -t {thread_id}")
+    else:
+        cmds.append(f"zeperion run --resume -t {thread_id}")
+    return cmds
 
 
 def summarise(events: Iterable[TimelineEvent]) -> dict:

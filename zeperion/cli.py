@@ -27,9 +27,11 @@ from zeperion.utils.process import (
 )
 from zeperion.utils.threading import default_thread_id
 from zeperion.utils.timeline import (
+    classify_blocker,
     derive_in_flight,
     describe_event,
     read_events,
+    suggest_next_commands,
     summarise,
 )
 from zeperion.utils.verify import run_verify_commands
@@ -74,6 +76,8 @@ def _spawn_detached_run(
     log_format: Optional[str],
     from_thread: Optional[str] = None,
     no_pr_pipeline: bool = False,
+    yes: bool = False,
+    allow_dirty: bool = False,
 ) -> None:
     """Re-invoke ``zeperion run`` in a detached child process.
 
@@ -99,6 +103,14 @@ def _spawn_detached_run(
         raise typer.Exit(1)
     if not validate_configured_cli_backends(config, console):
         raise typer.Exit(1)
+
+    # The parent (this interactive process) owns the pre-run gate; the
+    # detached child runs in a non-TTY session where it could neither
+    # prompt nor usefully block. We gate here, then force ``--yes`` into
+    # the child argv so the child renders the summary into its log
+    # without re-blocking on a dirty tree we already cleared.
+    if mode == "multi_agent":
+        prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
 
     resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
     state_dir = Path(config.state_dir)
@@ -140,6 +152,11 @@ def _spawn_detached_run(
         argv.extend(["--from-thread", from_thread])
     if no_pr_pipeline:
         argv.append("--no-pr-pipeline")
+    # Parent already ran the pre-run gate; suppress the child's gate so
+    # it neither prompts (impossible in a detached session) nor blocks
+    # on the dirty tree we deliberately allowed.
+    if mode == "multi_agent":
+        argv.append("--yes")
 
     pid = spawn_detached(
         state_dir=state_dir,
@@ -236,6 +253,70 @@ def validate_configured_cli_backends(config: WorkflowConfig, out: Console) -> bo
         "[cyan]zeperion init --backend anthropic[/cyan]."
     )
     return False
+
+
+def _is_interactive() -> bool:
+    """True only when both stdin and stdout are real TTYs.
+
+    Detached runs, pipes, and CI all return False here so the pre-run
+    gate degrades to "print the summary, never block / prompt" instead
+    of hanging forever on an unanswerable ``confirm``.
+    """
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (ValueError, OSError):
+        return False
+
+
+def prerun_gate(
+    config: WorkflowConfig,
+    out: Console,
+    *,
+    yes: bool,
+    allow_dirty: bool,
+    interactive: Optional[bool] = None,
+) -> None:
+    """Render the pre-run safety summary and gate the run on it.
+
+    Behaviour (see the AskQuestion choices that drove this):
+
+    * Always prints the summary panel (git state / backends / Tester
+      commands).
+    * **Dirty git tree is a hard block** unless ``--yes`` or
+      ``--allow-dirty`` is passed — a ``multi_agent`` run can rewrite
+      tracked files and a dirty tree makes "what did the agents
+      change?" impossible to answer with ``git diff``.
+    * Otherwise, when running interactively and ``--yes`` was not
+      passed, prompt for confirmation. Declining exits cleanly (0).
+    * Non-interactive sessions (detach / pipe / CI) never block on a
+      clean tree and never prompt; they just print the summary.
+
+    Raises ``typer.Exit`` to abort (1 = blocked, 0 = user declined).
+    """
+    from zeperion.utils.prerun import build_prerun_summary, render_prerun_summary
+
+    if interactive is None:
+        interactive = _is_interactive()
+
+    summary = build_prerun_summary(config)
+    render_prerun_summary(summary, out)
+
+    if summary.git.is_repo and not summary.git.is_clean and not (yes or allow_dirty):
+        out.print(
+            "\n[bold red]Refusing to start on a dirty git tree.[/bold red] "
+            "A multi-agent run can modify tracked files, and an existing "
+            "diff makes it impossible to tell apart your changes from the "
+            "agents'.\n"
+            "  Commit / stash your changes first, or re-run with "
+            "[cyan]--allow-dirty[/cyan] (keep the gate prompt) or "
+            "[cyan]--yes[/cyan] (skip all confirmation)."
+        )
+        raise typer.Exit(1)
+
+    if interactive and not yes:
+        if not typer.confirm("\nStart the workflow with the settings above?", default=True):
+            out.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
 
 
 def _load_workflow_state_from_checkpoint(state_dir: Path, thread_id: str) -> dict:
@@ -391,9 +472,26 @@ def doctor(
         "-c",
         help="Path to config file",
     ),
+    probe: bool = typer.Option(
+        True,
+        "--probe/--no-probe",
+        help=(
+            "Run lightweight executable checks (pi --help, claude "
+            "--version, gh auth status) instead of just checking PATH. "
+            "Use --no-probe for a fast static-only check."
+        ),
+    ),
 ):
-    """Check whether the local project is ready for a workflow run."""
+    """Check whether the local project is ready for a workflow run.
+
+    Beyond the static checks (config / requirement file / PATH lookups),
+    ``--probe`` (default on) actually *launches* the configured coding
+    CLIs with a cheap subcommand so a broken-but-on-PATH binary or a
+    logged-out ``gh`` is caught here rather than mid-run.
+    """
     import os
+
+    from zeperion.utils.probe import probe_cli_runnable, probe_gh_auth
 
     config, config_path = _load_config_for_command(config_file)
     checks: list[tuple[str, bool, str]] = []
@@ -410,6 +508,15 @@ def doctor(
     add("Requirement file", requirement_file.exists(), str(requirement_file))
     add("State directory", state_dir.exists(), str(state_dir))
 
+    # Cache probes per tool so that two roles sharing one backend (e.g.
+    # developer+tester both on ``pi``) don't shell out twice.
+    _probe_cache: dict[str, object] = {}
+
+    def _probe_tool(tool: str, args: list[str]):
+        if tool not in _probe_cache:
+            _probe_cache[tool] = probe_cli_runnable(tool, args)
+        return _probe_cache[tool]
+
     role_agent_types = {
         "planner": config.planner_agent_type,
         "developer": config.developer_agent_type,
@@ -418,19 +525,35 @@ def doctor(
     }
     for role, agent_type in role_agent_types.items():
         if agent_type == "pi":
-            add(f"{role} backend", shutil.which(config.pi_cli_tool) is not None, config.pi_cli_tool)
+            tool = config.pi_cli_tool
+            if probe:
+                res = _probe_tool(tool, ["--help"])
+                add(f"{role} backend", res.ok, f"{tool}: {res.detail}")
+            else:
+                add(f"{role} backend", shutil.which(tool) is not None, tool)
         elif agent_type == "claude_code":
-            add(
-                f"{role} backend",
-                shutil.which(config.claude_cli_tool) is not None,
-                config.claude_cli_tool,
-            )
+            tool = config.claude_cli_tool
+            if probe:
+                res = _probe_tool(tool, ["--version"])
+                add(f"{role} backend", res.ok, f"{tool}: {res.detail}")
+            else:
+                add(f"{role} backend", shutil.which(tool) is not None, tool)
         elif agent_type == "anthropic":
             has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
             detail = "ANTHROPIC_API_KEY set" if has_key else "ANTHROPIC_API_KEY missing"
             add(f"{role} backend", has_key, detail)
         else:
             add(f"{role} backend", False, f"unknown backend: {agent_type}")
+
+    # GitHub auth only matters when the PR pipeline could run (repo or
+    # token configured). Probing it unconditionally would falsely fail
+    # multi_agent-only users who never touch GitHub.
+    if config.github_repo or config.github_token:
+        if probe:
+            gh = probe_gh_auth()
+            add("GitHub auth", gh.ok, gh.detail)
+        else:
+            add("GitHub auth", shutil.which("gh") is not None, "gh on PATH")
 
     if config.tester_verify_commands:
         add("Tester verification", True, "; ".join(config.tester_verify_commands))
@@ -451,7 +574,12 @@ def doctor(
         console.print("\n[bold yellow]Next steps:[/bold yellow]")
         for name, _ok, detail in failures:
             if name == "Tester verification":
-                console.print("  Add tester_verify_commands in .zeperion/config.yaml.")
+                console.print(
+                    "  Detect or add tester_verify_commands: "
+                    "[cyan]zeperion verify --detect --write-config[/cyan]."
+                )
+            elif name == "GitHub auth":
+                console.print("  Authenticate the GitHub CLI: [cyan]gh auth login[/cyan].")
             elif "backend" in name:
                 console.print(f"  Fix {name}: {detail}")
             elif name == "Requirement file":
@@ -461,6 +589,61 @@ def doctor(
         raise typer.Exit(1)
 
     console.print("\n[bold green]Ready.[/bold green] Run [cyan]zeperion verify[/cyan] next.")
+
+
+def _tail_lines(text: str, *, max_lines: int = 20) -> tuple[str, int]:
+    """Return the last ``max_lines`` lines of ``text`` and how many were dropped.
+
+    Used to keep the verify failure summary short — the actionable
+    signal in a test log is almost always the tail (assertion, summary
+    line), not the head.
+    """
+    lines = (text or "").splitlines()
+    if len(lines) <= max_lines:
+        return "\n".join(lines), 0
+    return "\n".join(lines[-max_lines:]), len(lines) - max_lines
+
+
+def _render_detect(config: WorkflowConfig, candidate: list[str]) -> None:
+    """Print configured vs detected/candidate verify commands as a table."""
+    from zeperion.utils.verify import detect_verify_commands
+
+    configured = list(config.tester_verify_commands)
+    detected = detect_verify_commands(Path(config.project_dir))
+
+    table = Table(title="Verify commands", show_header=True, header_style="bold cyan")
+    table.add_column("Command", style="cyan")
+    table.add_column("Configured", justify="center")
+    table.add_column("Detected", justify="center")
+    seen: list[str] = []
+    for cmd in configured + detected + candidate:
+        if cmd not in seen:
+            seen.append(cmd)
+    if not seen:
+        console.print(
+            "[yellow]No verify commands configured and none could be detected "
+            "for this project.[/yellow]"
+        )
+        return
+    for cmd in seen:
+        in_cfg = "[green]\u2713[/green]" if cmd in configured else "[dim]\u2014[/dim]"
+        in_det = "[green]\u2713[/green]" if cmd in detected else "[dim]\u2014[/dim]"
+        table.add_row(cmd, in_cfg, in_det)
+    console.print(table)
+
+    only_detected = [c for c in detected if c not in configured]
+    only_configured = [c for c in configured if c not in detected]
+    if only_detected:
+        console.print(
+            "[bold]Suggested additions[/bold] (detected, not in config): "
+            + ", ".join(f"[cyan]{c}[/cyan]" for c in only_detected)
+        )
+    if only_configured:
+        console.print(
+            "[dim]Configured but not detected (kept): "
+            + ", ".join(only_configured)
+            + "[/dim]"
+        )
 
 
 @app.command()
@@ -481,14 +664,73 @@ def verify(
         "--timeout",
         help="Per-command timeout in seconds. Defaults to config value.",
     ),
+    detect: bool = typer.Option(
+        False,
+        "--detect",
+        help=(
+            "Re-detect verification commands for this project and print "
+            "how they compare to the configured ones. Does not run them."
+        ),
+    ),
+    write_config: bool = typer.Option(
+        False,
+        "--write-config",
+        help=(
+            "Persist the resolved commands into tester_verify_commands in "
+            "the config file. Uses --command overrides if given, else the "
+            "auto-detected set. Implies --detect (does not run commands)."
+        ),
+    ),
+    tail: int = typer.Option(
+        20,
+        "--tail",
+        help="On failure, how many trailing output lines to show per command.",
+    ),
 ):
-    """Run the configured Tester verification commands without invoking agents."""
-    config, _ = _load_config_for_command(config_file)
+    """Run, detect, or persist the Tester verification commands (no agents).
+
+    Modes:
+
+    * ``--detect`` / ``--write-config``: inspect or save the command
+      list, never execute it.
+    * default: run the configured (or ``--command``-overridden)
+      commands and report a compact pass/fail summary.
+    """
+    config, config_path = _load_config_for_command(config_file)
+
+    # Detect / write-config short-circuit: these never execute anything.
+    if detect or write_config:
+        from zeperion.utils.verify import detect_verify_commands
+
+        candidate = list(command) if command else detect_verify_commands(Path(config.project_dir))
+        _render_detect(config, candidate)
+        if write_config:
+            from zeperion.config import update_config_yaml
+
+            update_config_yaml(config_path, {"tester_verify_commands": candidate})
+            if candidate:
+                console.print(
+                    f"\n[bold green]\u2713 Wrote {len(candidate)} command(s)[/bold green] "
+                    f"to tester_verify_commands in [dim]{config_path}[/dim]."
+                )
+            else:
+                console.print(
+                    f"\n[yellow]Cleared tester_verify_commands[/yellow] in "
+                    f"[dim]{config_path}[/dim] (no commands to write)."
+                )
+        else:
+            console.print(
+                "\n[dim]Re-run with --write-config to save the detected commands.[/dim]"
+            )
+        return
+
     commands = command or config.tester_verify_commands
     if not commands:
         console.print("[yellow]No verification commands configured.[/yellow]")
         console.print(
-            "Add tester_verify_commands in .zeperion/config.yaml, then run zeperion verify again."
+            "Detect some with [cyan]zeperion verify --detect[/cyan], or add "
+            "tester_verify_commands in .zeperion/config.yaml, then run "
+            "zeperion verify again."
         )
         raise typer.Exit(1)
 
@@ -519,14 +761,33 @@ def verify(
 
     failed = [r for r in results if not r.passed]
     if failed:
-        console.print("\n[bold red]Verification failed.[/bold red]")
+        passed_n = len(results) - len(failed)
+        console.print(
+            f"\n[bold red]Verification failed:[/bold red] "
+            f"{len(failed)}/{len(results)} command(s) failed "
+            f"[dim]({passed_n} passed)[/dim]."
+        )
+        for r in failed:
+            label = "TIMEOUT" if r.timed_out else f"exit {r.exit_code}"
+            console.print(f"  [red]\u2717[/red] {r.command} [dim]({label})[/dim]")
+
+        # Show only the *tail* of the last failure's output rather than
+        # dumping the entire stdout+stderr — the old behaviour buried
+        # the actionable summary line under megabytes of log.
         last = failed[-1]
-        if last.stdout:
-            console.print("\n[bold]stdout:[/bold]")
-            console.print(last.stdout)
-        if last.stderr:
-            console.print("\n[bold]stderr:[/bold]")
-            console.print(last.stderr)
+        source = last.stderr.strip() or last.stdout.strip()
+        if source:
+            shown, dropped = _tail_lines(source, max_lines=max(1, tail))
+            stream = "stderr" if last.stderr.strip() else "stdout"
+            if dropped:
+                header = (
+                    f"\n[bold]{last.command}[/bold] "
+                    f"[dim]({stream}, last {tail} lines, {dropped} earlier hidden)[/dim]:"
+                )
+            else:
+                header = f"\n[bold]{last.command}[/bold] [dim]({stream})[/dim]:"
+            console.print(header)
+            console.print(shown)
         raise typer.Exit(1)
 
     console.print("\n[bold green]All verification commands passed.[/bold green]")
@@ -633,6 +894,25 @@ def run(
             "github_repo are configured."
         ),
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help=(
+            "Skip the interactive pre-run confirmation (and the "
+            "dirty-git-tree block). Implied for non-interactive "
+            "sessions, which only print the summary."
+        ),
+    ),
+    allow_dirty: bool = typer.Option(
+        False,
+        "--allow-dirty",
+        help=(
+            "Allow starting a multi_agent run even when the git working "
+            "tree has uncommitted changes. The pre-run confirmation "
+            "prompt still shows (unlike --yes)."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -655,6 +935,8 @@ def run(
             log_format=log_format,
             from_thread=from_thread,
             no_pr_pipeline=no_pr_pipeline,
+            yes=yes,
+            allow_dirty=allow_dirty,
         )
         return
     if log_format:
@@ -691,10 +973,13 @@ def run(
         from zeperion.graphs import create_multi_agent_graph
         from zeperion.models import create_initial_state
 
-        # Surface the "AnthropicAgent doesn't write files" footgun at
-        # runtime — the README warning alone wasn't enough; users
-        # routinely missed it.
-        warn_if_anthropic_developer_lacks_file_writes(config, console)
+        # Pre-run safety gate: prints the git/backends/Tester summary,
+        # blocks on a dirty tree (unless --yes/--allow-dirty), and asks
+        # for confirmation in interactive sessions. It also folds in the
+        # old "AnthropicAgent doesn't write files" footgun warning, so we
+        # no longer call warn_if_anthropic_developer_lacks_file_writes
+        # separately here.
+        prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
 
         if resume:
             console.print(f"[bold]Resuming from checkpoint:[/bold] {thread_id}")
@@ -864,6 +1149,17 @@ def ship(
         "--log-format",
         help="Log format: 'text' (default) or 'json'.",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive pre-run confirmation and dirty-tree block.",
+    ),
+    allow_dirty: bool = typer.Option(
+        False,
+        "--allow-dirty",
+        help="Allow shipping from a dirty git tree (prompt still shows unless --yes).",
+    ),
 ):
     """One-shot: run multi_agent, then PR pipeline.
 
@@ -889,7 +1185,7 @@ def ship(
     config, config_path = load_ship_config(config_file=config_file, console=console)
     if not validate_configured_cli_backends(config, console):
         raise typer.Exit(1)
-    warn_if_anthropic_developer_lacks_file_writes(config, console)
+    prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
     run_ship_command(
         config=config,
         config_path=config_path,
@@ -1013,35 +1309,87 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
             return str(value.value)
         return str(value)
 
-    status_lines = [
-        f"Thread ID: [cyan]{thread_id}[/cyan]",
-        f"Phase: [cyan]{_fmt(workflow_state.get('phase'), 'unknown')}[/cyan]",
-        f"Round: [cyan]{workflow_state.get('round', 0)}[/cyan]",
-        f"Fix Attempt: [cyan]{workflow_state.get('fix_attempt', 0)}[/cyan]",
-        f"Test Status: [cyan]{_fmt(workflow_state.get('test_status'), 'PENDING')}[/cyan]",
-        f"Global Status: [cyan]{_fmt(workflow_state.get('global_status'), 'CONTINUE')}[/cyan]",
-        f"Task ID: [cyan]{_fmt(workflow_state.get('task_id'), 'none')}[/cyan]",
-    ]
-
-    # In-flight agent: the most important UX piece — answers
-    # "is anything actually running, and for how long?"
+    # ---- First screen: the four things the operator actually needs ----
+    # 1) current status  2) current agent  3) last failure  4) next step.
+    # Everything else (tokens, PR pipeline, full timeline, raw outputs)
+    # is secondary and rendered *below* this headline panel.
+    phase_str = _fmt(workflow_state.get("phase"), "unknown")
+    global_str = _fmt(workflow_state.get("global_status"), "CONTINUE")
+    blocked = global_str == "BLOCKED" or phase_str == "blocked"
+    done = global_str == "DONE" or phase_str == "completed"
     in_flight = derive_in_flight(events)
+
+    headline: list[str] = []
+    if blocked:
+        state_tag = "[bold red]BLOCKED[/bold red]"
+    elif done:
+        state_tag = "[bold green]DONE[/bold green]"
+    elif in_flight:
+        state_tag = "[bold yellow]RUNNING[/bold yellow]"
+    else:
+        state_tag = f"[cyan]{global_str}[/cyan]"
+    headline.append(f"Status: {state_tag}   [dim]phase[/dim] {phase_str}")
+    headline.append(
+        f"[dim]round[/dim] {workflow_state.get('round', 0)}  "
+        f"[dim]fix[/dim] {workflow_state.get('fix_attempt', 0)}  "
+        f"[dim]test[/dim] {_fmt(workflow_state.get('test_status'), 'PENDING')}  "
+        f"[dim]task[/dim] {_fmt(workflow_state.get('task_id'), 'none')}"
+    )
+
+    # 2) Current agent.
+    headline.append("")
     if in_flight:
-        status_lines.append("")
-        status_lines.append("[bold yellow]In-flight:[/bold yellow]")
         for agent in in_flight:
             round_part = f"round {agent.round}" if agent.round is not None else ""
             fix_part = f" / fix {agent.fix_attempt}" if agent.fix_attempt else ""
-            status_lines.append(
-                f"  [yellow]{agent.role}[/yellow] "
+            headline.append(
+                f"Current agent: [yellow]{agent.role}[/yellow] "
                 f"running for [yellow]{agent.elapsed_human}[/yellow] "
                 f"[dim]({round_part}{fix_part})[/dim]"
             )
+    else:
+        headline.append("Current agent: [dim]none running[/dim]")
 
-    # Cost summary: tokens consumed across all agent_completed events
-    # that carried usage data. Only render when at least one
-    # invocation reported usage (otherwise we'd lie to the operator
-    # by showing "0 tokens" when we actually mean "unknown").
+    # 3) Last failure.
+    blocker = None
+    if blocked:
+        last_error = workflow_state.get("last_error")
+        blocker = classify_blocker(last_error, events)
+        headline.append("")
+        headline.append(
+            f"Last failure: [red]{blocker.label}[/red] [dim]({blocker.category})[/dim]"
+        )
+        if last_error:
+            headline.append(f"  [red]{last_error}[/red]")
+
+    # 4) Next step — concrete commands, shared with the web UI.
+    commands = suggest_next_commands(
+        thread_id,
+        blocked=blocked,
+        category=blocker.category if blocker else None,
+        in_flight=bool(in_flight),
+        done=done,
+    )
+    headline.append("")
+    headline.append("[bold]Next step:[/bold]")
+    for cmd in commands:
+        headline.append(f"  [green]$[/green] [cyan]{cmd}[/cyan]")
+    if blocker and blocker.hints:
+        for hint in blocker.hints:
+            headline.append(f"  [dim]\u2192 {hint}[/dim]")
+
+    headline.append("")
+    headline.append(f"[dim]Updated {workflow_state.get('updated_at', 'unknown')}[/dim]")
+
+    console.print(
+        Panel.fit(
+            "\n".join(headline),
+            title=f"ZEPERION  [cyan]{thread_id}[/cyan]",
+            border_style="red" if blocked else ("green" if done else "blue"),
+        )
+    )
+
+    # ---- Secondary: tokens + PR pipeline (below the fold) ----
     summary = summarise(events)
     if summary["tokens_total"] is not None:
         in_t = summary["tokens_input"]
@@ -1054,56 +1402,35 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
             if n_known < n_total
             else ""
         )
-        status_lines.append("")
-        status_lines.append(
+        console.print(
             f"[bold]Tokens:[/bold] in [cyan]{in_t:,}[/cyan]  "
             f"out [cyan]{out_t:,}[/cyan]  "
             f"total [cyan]{total_t:,}[/cyan] {coverage}"
         )
 
-    if (
-        _fmt(workflow_state.get("global_status")) == "BLOCKED"
-        or _fmt(workflow_state.get("phase")) == "blocked"
-    ):
-        status_lines.append("")
-        status_lines.append("[bold red]Human intervention required.[/bold red]")
-        last_error = workflow_state.get("last_error")
-        if last_error:
-            status_lines.append(f"Reason: [red]{last_error}[/red]")
-
     pipeline_state = storage.load_pipeline_state()
     if pipeline_state:
-        status_lines.append("")
-        status_lines.append("[bold]PR Pipeline:[/bold]")
+        pr_lines = ["[bold]PR Pipeline:[/bold]"]
         if pipeline_state.get("thread_id"):
-            status_lines.append(f"  Thread ID: [cyan]{pipeline_state['thread_id']}[/cyan]")
+            pr_lines.append(f"  Thread ID: [cyan]{pipeline_state['thread_id']}[/cyan]")
         pr_phase = pipeline_state.get("pr_phase")
         if pr_phase:
-            status_lines.append(f"  PR Phase: [cyan]{pr_phase}[/cyan]")
+            pr_lines.append(f"  PR Phase: [cyan]{pr_phase}[/cyan]")
         pr_num = pipeline_state.get("pr_number")
         if pr_num:
-            status_lines.append(f"  PR Number: [cyan]#{pr_num}[/cyan]")
+            pr_lines.append(f"  PR Number: [cyan]#{pr_num}[/cyan]")
         pr_url = pipeline_state.get("pr_url")
         if pr_url:
-            status_lines.append(f"  PR URL: [link={pr_url}]{pr_url}[/link]")
+            pr_lines.append(f"  PR URL: [link={pr_url}]{pr_url}[/link]")
         codex = pipeline_state.get("codex_status")
         if codex:
-            status_lines.append(f"  Codex Status: [cyan]{codex}[/cyan]")
+            pr_lines.append(f"  Codex Status: [cyan]{codex}[/cyan]")
         if pipeline_state.get("merge_enabled"):
-            status_lines.append("  Auto-merge: [green]Enabled[/green]")
+            pr_lines.append("  Auto-merge: [green]Enabled[/green]")
         pr_error = pipeline_state.get("pr_error")
         if pr_error:
-            status_lines.append(f"  Error: [red]{pr_error}[/red]")
-
-    status_lines.append(f"Updated: [dim]{workflow_state.get('updated_at', 'unknown')}[/dim]")
-
-    console.print(
-        Panel.fit(
-            "\n".join(status_lines),
-            title="ZEPERION",
-            border_style="blue",
-        )
-    )
+            pr_lines.append(f"  Error: [red]{pr_error}[/red]")
+        console.print("\n".join(pr_lines))
 
     # Recent events timeline: cheap chronological context. Limited
     # to the last 10 entries to keep the terminal tidy; users can

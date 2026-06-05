@@ -127,10 +127,10 @@ zeperion --help
 | 命令 | 作用 | 常用参数 |
 |------|------|----------|
 | `zeperion init [dir]` | 初始化项目（生成 `.zeperion/config.yaml`、`requirement.txt`） | `-b/--backend pi\|claude_code\|anthropic`、`-f/--force` |
-| `zeperion doctor` | 检查本地环境是否可运行 | `-c/--config` |
-| `zeperion verify` | 单独运行 Tester 验收命令 | `-c/--config`、`--command`、`--timeout` |
-| `zeperion run` | 运行工作流 | `-m/--mode`、`-t/--thread-id`、`-r/--resume`、`-d/--detach`、`--log-format`、`--no-pr-pipeline` |
-| `zeperion ship` | 一条龙：multi_agent → PR pipeline | `-t/--thread-id` |
+| `zeperion doctor` | 检查本地环境是否可运行 | `-c/--config`、`--probe/--no-probe` |
+| `zeperion verify` | 单独运行 / 探测 Tester 验收命令 | `-c/--config`、`--command`、`--timeout`、`--detect`、`--write-config`、`--tail` |
+| `zeperion run` | 运行工作流 | `-m/--mode`、`-t/--thread-id`、`-r/--resume`、`-d/--detach`、`--log-format`、`--no-pr-pipeline`、`--yes`、`--allow-dirty` |
+| `zeperion ship` | 一条龙：multi_agent → PR pipeline | `-t/--thread-id`、`--yes`、`--allow-dirty` |
 | `zeperion status` | 查看单个 thread 状态 | `-t/--thread-id`、`--watch`、`--interval` |
 | `zeperion list` | 列出所有 thread | `--wide` |
 | `zeperion logs` | 查看 / 跟随事件流 | `-t`、`-f/--follow`、`-n/--tail`、`--poll-interval` |

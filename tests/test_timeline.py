@@ -19,10 +19,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from zeperion.utils.timeline import (
+    BlockerCategory,
+    classify_blocker,
     derive_in_flight,
     describe_event,
     explain_blocker,
     read_events,
+    suggest_next_commands,
     summarise,
 )
 
@@ -247,3 +250,91 @@ class TestExplainBlocker:
         )
         hints = explain_blocker("TEST_STATUS: FAIL", read_events(tmp_path, "t1"))
         assert any("pytest -q" in h for h in hints)
+
+
+class TestClassifyBlocker:
+    def test_environment_missing_cli(self) -> None:
+        info = classify_blocker("Pi CLI not found on PATH", [])
+        assert info.category == BlockerCategory.ENVIRONMENT
+        assert info.label
+
+    def test_environment_anthropic_key(self) -> None:
+        info = classify_blocker("Anthropic API key missing", [])
+        assert info.category == BlockerCategory.ENVIRONMENT
+
+    def test_agent_parse(self) -> None:
+        info = classify_blocker("tester output parse failure: missing TEST_STATUS", [])
+        assert info.category == BlockerCategory.AGENT_PARSE
+        assert any("structured fields" in h for h in info.hints)
+
+    def test_budget(self) -> None:
+        info = classify_blocker("token budget exceeded after 12 rounds", [])
+        assert info.category == BlockerCategory.BUDGET
+
+    def test_no_changes(self) -> None:
+        info = classify_blocker("Developer produced no changes to the tree", [])
+        assert info.category == BlockerCategory.NO_CHANGES
+
+    def test_verify_failed_from_error(self) -> None:
+        info = classify_blocker("TEST_STATUS: FAIL", [])
+        assert info.category == BlockerCategory.VERIFY_FAILED
+
+    def test_unknown_falls_back(self) -> None:
+        info = classify_blocker("something totally unexpected happened", [])
+        assert info.category == BlockerCategory.UNKNOWN
+        assert info.hints  # always offers at least one next step
+
+    def test_no_error_no_events_is_unknown(self) -> None:
+        info = classify_blocker(None, [])
+        assert info.category == BlockerCategory.UNKNOWN
+        assert info.hints
+
+    def test_failed_verify_upgrades_unknown_to_verify_failed(self, tmp_path: Path) -> None:
+        # A concrete failing command should classify as VERIFY_FAILED even
+        # when last_error is vague/empty.
+        _write_events(
+            tmp_path,
+            "t1",
+            [
+                _event(
+                    "tester_verify_command",
+                    role="tester",
+                    command="pytest -q",
+                    exit_code=1,
+                    passed=False,
+                )
+            ],
+        )
+        info = classify_blocker(None, read_events(tmp_path, "t1"))
+        assert info.category == BlockerCategory.VERIFY_FAILED
+        assert any("pytest -q" in h for h in info.hints)
+
+
+class TestSuggestNextCommands:
+    def test_blocked_suggests_resume(self) -> None:
+        cmds = suggest_next_commands("feat", blocked=True)
+        assert any("--resume" in c and "feat" in c for c in cmds)
+
+    def test_blocked_environment_suggests_doctor(self) -> None:
+        cmds = suggest_next_commands(
+            "feat", blocked=True, category=BlockerCategory.ENVIRONMENT
+        )
+        assert any("zeperion doctor" in c for c in cmds)
+
+    def test_blocked_verify_failed_suggests_verify(self) -> None:
+        cmds = suggest_next_commands(
+            "feat", blocked=True, category=BlockerCategory.VERIFY_FAILED
+        )
+        assert any(c.strip() == "zeperion verify" for c in cmds)
+
+    def test_in_flight_suggests_logs(self) -> None:
+        cmds = suggest_next_commands("feat", in_flight=True)
+        assert any("logs" in c and "--follow" in c for c in cmds)
+
+    def test_done_suggests_ship(self) -> None:
+        cmds = suggest_next_commands("feat", done=True)
+        assert any("zeperion ship" in c for c in cmds)
+
+    def test_idle_suggests_resume(self) -> None:
+        cmds = suggest_next_commands("feat")
+        assert any("--resume" in c for c in cmds)

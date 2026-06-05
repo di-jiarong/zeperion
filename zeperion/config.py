@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -36,7 +36,7 @@ _PATH_FIELDS_RELATIVE_TO_CONFIG: tuple[str, ...] = (
 )
 
 
-def _resolve_relative_paths(config_dict: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
+def _resolve_relative_paths(config_dict: dict[str, Any], config_dir: Path) -> dict[str, Any]:
     """Return a copy of ``config_dict`` with relative path fields anchored
     to ``config_dir``.
 
@@ -84,7 +84,7 @@ def load_config_from_yaml(config_path: Path) -> WorkflowConfig:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
 
         if not config_dict:
@@ -152,7 +152,34 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
     logger.info(f"Saved config to {config_path}")
 
 
-def get_default_config() -> Dict[str, Any]:
+def update_config_yaml(config_path: Path, updates: dict[str, Any]) -> None:
+    """Surgically update individual keys in an existing config YAML.
+
+    Unlike :func:`save_config_to_yaml`, this re-reads the on-disk YAML
+    and only overwrites the keys in ``updates``, leaving unrelated
+    field values untouched. That matters because
+    ``load_config_from_yaml`` resolves relative path fields
+    (``project_dir``, ``state_dir``, ...) to *absolute* paths; round-
+    tripping a loaded ``WorkflowConfig`` back through
+    ``save_config_to_yaml`` would silently rewrite those nice relative
+    paths as absolute ones. Persisting a single field (e.g.
+    ``tester_verify_commands`` from ``zeperion verify --write-config``)
+    must not have that side effect. This helper does not preserve YAML
+    comments or exact formatting; it only avoids rewriting unrelated
+    configuration values.
+    """
+    config_path = Path(config_path)
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file is not a mapping: {config_path}")
+    data.update(updates)
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+    logger.info("Updated config %s keys=%s", config_path, sorted(updates))
+
+
+def get_default_config() -> dict[str, Any]:
     """
     Get default configuration values.
 
