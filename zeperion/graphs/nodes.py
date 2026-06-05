@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent
 from zeperion.models import (
@@ -137,6 +138,10 @@ class MultiAgentNodes:
                 "total_tokens": usage.total_tokens,
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                 "cache_read_input_tokens": usage.cache_read_input_tokens,
+                # Disclose whether these counts were reported by the model
+                # API or estimated from text, so the status panel / cost
+                # rollups never present a heuristic as a billed figure.
+                "estimated": usage.estimated,
             }
 
         self.storage.append_event(
@@ -164,8 +169,10 @@ class MultiAgentNodes:
         status_str = " ".join(status_bits)
         token_tail = ""
         if usage_event:
+            est_mark = "~" if usage_event.get("estimated") else ""
             token_tail = (
-                f" ({usage_event['input_tokens']}+{usage_event['output_tokens']} tok)"
+                f" ({usage_event['input_tokens']}+{usage_event['output_tokens']} "
+                f"tok{est_mark})"
             )
         logger.info(
             "%s done in %s \u2192 %s%s",
@@ -199,8 +206,8 @@ class MultiAgentNodes:
         model: str,
         prompt: str,
         state: WorkflowState,
-        span_attrs: Optional[SpanAttrSetter] = None,
-    ) -> tuple[Optional[AgentOutput], Optional[dict]]:
+        span_attrs: SpanAttrSetter | None = None,
+    ) -> tuple[AgentOutput | None, dict | None]:
         """Shared scaffold around a single agent invocation.
 
         Handles the boilerplate every role repeats verbatim: the start
@@ -275,7 +282,17 @@ class MultiAgentNodes:
         ``last_error`` (e.g. a parse failure) is preserved.
         """
         previous = state.get("total_tokens", 0) or 0
-        spent = output.usage.total_tokens if output.usage else 0
+        usage = output.usage
+        # Exact-reported usage always counts. Estimated usage counts only
+        # when ``count_estimated_tokens`` is on (default) — that's what
+        # turns the cap into a real ceiling for pi/claude_code instead of
+        # the old "contributes 0" no-op.
+        if usage is None:
+            spent = 0
+        elif usage.estimated and not self.config.count_estimated_tokens:
+            spent = 0
+        else:
+            spent = usage.total_tokens
         new_total = previous + spent
         patch["total_tokens"] = new_total
 

@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Any, Optional, Type
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class MissingRequiredFieldError(ValueError):
     a human-readable ``last_error``.
     """
 
-    def __init__(self, field_name: str, value: Optional[str] = None):
+    def __init__(self, field_name: str, value: str | None = None):
         self.field_name = field_name
         self.value = value
         if value is None:
@@ -71,7 +71,7 @@ class SectionParser:
         self.text = text
         self.max_section_lines = max_section_lines
 
-    def extract_field(self, field_name: str) -> Optional[str]:
+    def extract_field(self, field_name: str) -> str | None:
         """
         Extract a single-line field value.
 
@@ -115,7 +115,7 @@ class SectionParser:
     def extract_enum(
         self,
         field_name: str,
-        enum_class: Type[Any],
+        enum_class: type[Any],
         default: Any,
     ) -> Any:
         """Extract an enum field, tolerating common LLM-introduced noise.
@@ -146,7 +146,7 @@ class SectionParser:
     def extract_required_enum(
         self,
         field_name: str,
-        enum_class: Type[Any],
+        enum_class: type[Any],
     ) -> Any:
         """Like :meth:`extract_enum`, but raises when the field is absent
         or the value cannot be resolved to a member of ``enum_class``.
@@ -175,7 +175,7 @@ class SectionParser:
     def extract_section(
         self,
         section_name: str,
-        stop_markers: Optional[list[str]] = None,
+        stop_markers: list[str] | None = None,
     ) -> str:
         """
         Extract multi-line section content.
@@ -330,7 +330,7 @@ _DECORATION_PATTERNS: tuple[re.Pattern, ...] = (
 _LEADING_MARKER_RUN = re.compile(r"^[\s*_`#>-]+")
 
 
-def _resolve_enum(value: str, enum_class: Type[Any]) -> Optional[Any]:
+def _resolve_enum(value: str, enum_class: type[Any]) -> Any | None:
     """Best-effort resolve ``value`` to a member of ``enum_class``.
 
     Tries, in order: the raw value, the decoration-stripped value, and the
@@ -390,7 +390,7 @@ def _strip_decorations(value: str) -> str:
 
 def parse_agent_output(
     text: str,
-    expected_fields: Optional[dict[str, Any]] = None,
+    expected_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Parse agent output with validation.

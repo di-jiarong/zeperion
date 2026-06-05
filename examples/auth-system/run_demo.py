@@ -35,8 +35,8 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from zeperion.graphs import create_multi_agent_graph
 from zeperion.models import (

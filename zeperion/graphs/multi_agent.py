@@ -2,7 +2,6 @@
 
 import logging
 from pathlib import Path
-from typing import Optional, Type
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
@@ -43,11 +42,11 @@ _create_agent = _create_agent_factory
 def create_multi_agent_graph(
     config: WorkflowConfig,
     *,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-    agent_class: Optional[Type[BaseAgent]] = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    agent_class: type[BaseAgent] | None = None,
     thread_id: str = "main",
-    enable_checkpoint: Optional[bool] = None,
-    checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
+    enable_checkpoint: bool | None = None,
+    checkpoint_path: str | None = None,  # accepted for backward compatibility
     disable_pr_pipeline: bool = False,
 ) -> StateGraph:
     """Create multi-agent workflow graph.

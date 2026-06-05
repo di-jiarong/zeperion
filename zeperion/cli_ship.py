@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -49,8 +48,8 @@ def run_ship_command(
     *,
     config: WorkflowConfig,
     config_path: Path,
-    thread_id: Optional[str],
-    log_format: Optional[str],
+    thread_id: str | None,
+    log_format: str | None,
     console: Console,
 ) -> None:
     """Run multi_agent first, then the PR pipeline as a separate thread."""

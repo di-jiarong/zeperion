@@ -6,8 +6,8 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,8 @@ class GitHubClient:
 
     def __init__(
         self,
-        token: Optional[str] = None,
-        codex_logins: Optional[Iterable[str]] = None,
+        token: str | None = None,
+        codex_logins: Iterable[str] | None = None,
     ):
         """
         Initialize GitHub client.
@@ -46,7 +46,7 @@ class GitHubClient:
             login.lower() for login in (codex_logins or DEFAULT_CODEX_LOGINS)
         }
 
-    def is_codex_user(self, login: Optional[str]) -> bool:
+    def is_codex_user(self, login: str | None) -> bool:
         """Return True when the GitHub login matches a Codex bot."""
         if not login:
             return False
@@ -183,7 +183,7 @@ class GitHubClient:
 
     async def find_existing_pr(
         self, repo: str, head: str, base: str
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """
         Find existing PR for the given head and base branches.
 
@@ -246,7 +246,7 @@ class GitHubClient:
         return pr_url
 
     async def update_pr(
-        self, repo: str, pr_number: int, title: Optional[str] = None, body: Optional[str] = None
+        self, repo: str, pr_number: int, title: str | None = None, body: str | None = None
     ) -> None:
         """Update PR title and/or body."""
         args = ["pr", "edit", str(pr_number), "--repo", repo]
@@ -528,12 +528,12 @@ def _with_page(endpoint: str, page: int, per_page: int = 100) -> str:
     return f"{endpoint}{separator}per_page={per_page}&page={page}"
 
 
-class _temporary_body_file:
+class _temporary_body_file:  # noqa: N801 - lowercase on purpose: used as a `with` context manager, contextlib-style
     """Context manager yielding a temp file populated with ``body``."""
 
     def __init__(self, body: str):
         self.body = body
-        self._path: Optional[Path] = None
+        self._path: Path | None = None
 
     def __enter__(self) -> Path:
         fd, path = tempfile.mkstemp(prefix="zeperion_pr_body_", suffix=".md")

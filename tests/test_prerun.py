@@ -99,3 +99,89 @@ class TestBuildPrerunSummary:
         config = _config(tmp_path, developer_agent_type="anthropic")
         summary = build_prerun_summary(config)
         assert summary.anthropic_developer_no_writes is True
+
+
+class TestTokenBudgetMisleading:
+    def test_no_cap_is_never_misleading(self, tmp_path: Path) -> None:
+        # Default max_total_tokens=0 (unlimited): no warning regardless
+        # of backends.
+        config = _config(tmp_path, developer_agent_type="pi")
+        summary = build_prerun_summary(config)
+        assert summary.max_total_tokens == 0
+        assert summary.token_budget_misleading is False
+        assert summary.token_budget_estimated is False
+
+    def test_pi_estimated_counts_when_enabled(self, tmp_path: Path) -> None:
+        # Default count_estimated_tokens=True: pi spend is estimated and
+        # counted, so the cap is enforced (approximately), not misleading.
+        config = _config(
+            tmp_path,
+            developer_agent_type="pi",
+            max_total_tokens=100_000,
+        )
+        summary = build_prerun_summary(config)
+        assert summary.token_budget_misleading is False
+        assert summary.token_budget_estimated is True
+        assert "developer" in summary.estimated_roles
+        assert summary.usage_blind_roles == []
+
+    def test_pi_blind_when_estimation_disabled(self, tmp_path: Path) -> None:
+        # With count_estimated_tokens off, pi spend isn't counted → blind.
+        config = _config(
+            tmp_path,
+            developer_agent_type="pi",
+            max_total_tokens=100_000,
+            count_estimated_tokens=False,
+        )
+        summary = build_prerun_summary(config)
+        assert summary.token_budget_misleading is True
+        assert "developer" in summary.usage_blind_roles
+        assert summary.token_budget_estimated is False
+
+    def test_claude_code_is_real_usage_not_blind(self, tmp_path: Path) -> None:
+        # claude_code reports exact usage via --output-format json, so it
+        # is never blind — even with estimation disabled.
+        config = _config(
+            tmp_path,
+            developer_agent_type="claude_code",
+            tester_agent_type="claude_code",
+            max_total_tokens=100_000,
+            count_estimated_tokens=False,
+        )
+        summary = build_prerun_summary(config)
+        assert summary.usage_blind_roles == []
+        assert summary.estimated_roles == []
+        assert summary.token_budget_misleading is False
+
+    def test_cap_with_all_anthropic_is_accurate(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            planner_agent_type="anthropic",
+            developer_agent_type="anthropic",
+            reviewer_agent_type="anthropic",
+            tester_agent_type="anthropic",
+            max_total_tokens=100_000,
+        )
+        summary = build_prerun_summary(config)
+        assert summary.usage_blind_roles == []
+        assert summary.estimated_roles == []
+        assert summary.token_budget_misleading is False
+        assert summary.token_budget_estimated is False
+
+    def test_disabled_reviewer_not_counted(self, tmp_path: Path) -> None:
+        # A pi reviewer that is disabled never runs, so it shouldn't
+        # trigger any budget note on its own.
+        config = _config(
+            tmp_path,
+            planner_agent_type="anthropic",
+            developer_agent_type="anthropic",
+            reviewer_agent_type="pi",
+            tester_agent_type="anthropic",
+            enable_reviewer=False,
+            max_total_tokens=100_000,
+            count_estimated_tokens=False,
+        )
+        summary = build_prerun_summary(config)
+        assert "reviewer" not in summary.usage_blind_roles
+        assert "reviewer" not in summary.estimated_roles
+        assert summary.token_budget_misleading is False

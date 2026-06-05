@@ -7,12 +7,60 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent
-from zeperion.models import AgentOutput, AgentRole
+from zeperion.models import AgentOutput, AgentRole, TokenUsage
+from zeperion.utils.token_estimate import estimate_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_pi_usage(raw: Any) -> TokenUsage | None:
+    """Map a Pi usage-like dict to :class:`TokenUsage`, tolerating key styles.
+
+    Pi's RPC schema is not guaranteed to report token usage, and when it
+    does the key naming is uncertain across builds. We accept the common
+    variants (``input_tokens`` / ``inputTokens`` / ``prompt_tokens`` and
+    their output counterparts) and return ``None`` when nothing usable is
+    present, so the caller falls back to an estimate. Reported usage is
+    exact, so ``estimated`` stays ``False``.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def pick(*keys: str) -> int | None:
+        for key in keys:
+            value = raw.get(key)
+            if isinstance(value, int):
+                return value
+        return None
+
+    input_tokens = pick("input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
+    output_tokens = pick(
+        "output_tokens", "outputTokens", "completion_tokens", "completionTokens"
+    )
+    if input_tokens is None and output_tokens is None:
+        return None
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=pick(
+            "cache_creation_input_tokens", "cacheCreationInputTokens"
+        ),
+        cache_read_input_tokens=pick("cache_read_input_tokens", "cacheReadInputTokens"),
+    )
+
+
+def _usage_from_pi_event(event: dict[str, Any]) -> TokenUsage | None:
+    """Best-effort extraction of token usage from one Pi RPC event."""
+    usage = _coerce_pi_usage(event.get("usage"))
+    if usage is not None:
+        return usage
+    message = event.get("message")
+    if isinstance(message, dict):
+        return _coerce_pi_usage(message.get("usage"))
+    return None
 
 
 class PiAgent(BaseAgent):
@@ -32,7 +80,7 @@ class PiAgent(BaseAgent):
         cli_tool: str = "pi",
         timeout: int = 600,
         project_dir: str = ".",
-        extra_args: Optional[list[str]] = None,
+        extra_args: list[str] | None = None,
         no_session: bool = True,
         progress_interval_seconds: int = 30,
         auto_respond_ui_requests: bool = True,
@@ -59,7 +107,7 @@ class PiAgent(BaseAgent):
     async def invoke(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> AgentOutput:
         """Invoke Pi with ``prompt`` and parse the final assistant text."""
         if not self.project_dir.exists():
@@ -97,7 +145,7 @@ class PiAgent(BaseAgent):
 
         try:
             try:
-                raw_output = await asyncio.wait_for(
+                raw_output, reported_usage = await asyncio.wait_for(
                     self._drive_rpc(process, prompt, session_id=session_id),
                     timeout=self.timeout,
                 )
@@ -139,15 +187,22 @@ class PiAgent(BaseAgent):
         if not raw_output.strip():
             raise AgentInvocationError(f"{self.role.value}: Pi returned empty output")
 
-        return self.parse_output(raw_output)
+        output = self.parse_output(raw_output)
+        # Prefer real usage when Pi reports it; otherwise estimate from the
+        # full prompt actually sent + the response so the token budget sees
+        # a non-zero (if approximate) figure instead of silently 0.
+        usage = reported_usage or estimate_usage(
+            _with_role_contract(self.role, prompt), raw_output
+        )
+        return output.model_copy(update={"usage": usage})
 
     async def _drive_rpc(
         self,
         process: asyncio.subprocess.Process,
         prompt: str,
         *,
-        session_id: Optional[str] = None,
-    ) -> str:
+        session_id: str | None = None,
+    ) -> tuple[str, TokenUsage | None]:
         if process.stdin is None or process.stdout is None:
             raise AgentInvocationError("Pi RPC process missing stdin/stdout")
 
@@ -163,6 +218,7 @@ class PiAgent(BaseAgent):
         messages: list[dict[str, Any]] = []
         assistant_text_fragments: list[str] = []
         last_event: dict[str, Any] | None = None
+        reported_usage: TokenUsage | None = None
 
         while True:
             line = await process.stdout.readline()
@@ -177,6 +233,12 @@ class PiAgent(BaseAgent):
 
             last_event = event
             event_type = event.get("type")
+
+            # Capture usage from any event that carries it; later events
+            # (e.g. agent_end totals) overwrite earlier partials.
+            event_usage = _usage_from_pi_event(event)
+            if event_usage is not None:
+                reported_usage = event_usage
 
             if event_type == "response":
                 if event.get("success") is False:
@@ -227,7 +289,7 @@ class PiAgent(BaseAgent):
 
         if last_event is None:
             raise AgentInvocationError("Pi RPC produced no events")
-        return final_text
+        return final_text, reported_usage
 
     async def _maybe_auto_respond_to_ui_request(
         self,

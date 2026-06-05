@@ -306,6 +306,18 @@ class TestDoctorCommand:
         assert "Tester verification" in result.output
         assert "tester_verify_commands" in result.output
 
+    def test_doctor_warns_on_default_models(self, project_dir: Path, monkeypatch) -> None:
+        # The fixture config never overrides model names, so doctor should
+        # surface the "built-in default model name(s)" advisory.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["doctor", "-c", str(project_dir / ".zeperion" / "config.yaml")],
+        )
+        assert "built-in default model name" in result.output
+        assert "planner" in result.output
+
     def test_doctor_help_lists_probe_flag(self) -> None:
         runner = CliRunner()
         result = runner.invoke(app, ["doctor", "--help"])
@@ -339,6 +351,44 @@ class TestDoctorCommand:
         assert "developer backend" in result.output
         assert "definitely-not-a-real-binary-zzz" in result.output
 
+    def test_doctor_probe_checks_claude_output_format(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A claude_code backend gets an extra row confirming the CLI knows
+        # ``--output-format``; an old CLI that doesn't must surface as a
+        # failed check so usage tracking degradation is visible upfront.
+        from zeperion.utils import probe as probe_mod
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(
+            probe_mod,
+            "probe_cli_runnable",
+            lambda *_a, **_k: probe_mod.ProbeResult(True, "claude 1.0"),
+        )
+        monkeypatch.setattr(
+            probe_mod,
+            "probe_claude_output_format",
+            lambda *_a, **_k: probe_mod.ProbeResult(False, "CLI lacks --output-format"),
+        )
+        (tmp_path / ".zeperion" / "state").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "requirement.txt").write_text("test", encoding="utf-8")
+        config_path = tmp_path / ".zeperion" / "config.yaml"
+        config_path.write_text(
+            f"requirement_file: {tmp_path / 'requirement.txt'}\n"
+            f"state_dir: {tmp_path / '.zeperion' / 'state'}\n"
+            f"project_dir: {tmp_path}\n"
+            "planner_agent_type: anthropic\n"
+            "developer_agent_type: claude_code\n"
+            "reviewer_agent_type: anthropic\n"
+            "tester_agent_type: anthropic\n"
+            "tester_verify_commands:\n  - echo ok\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor", "-c", str(config_path)])
+        assert result.exit_code == 1, result.output
+        assert "output-format" in result.output
+
     def test_doctor_no_probe_is_static(self, project_dir: Path, monkeypatch) -> None:
         # --no-probe must not shell out; anthropic-only config still
         # fails on missing tester verification, not on any probe.
@@ -350,6 +400,62 @@ class TestDoctorCommand:
         )
         assert result.exit_code == 1
         assert "Tester verification" in result.output
+
+    def test_doctor_warns_partial_token_budget(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr("zeperion.cli.shutil.which", lambda _tool: "/bin/true")
+        (tmp_path / ".zeperion").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".zeperion" / "state").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "requirement.txt").write_text("test", encoding="utf-8")
+        config_path = tmp_path / ".zeperion" / "config.yaml"
+        config_path.write_text(
+            f"requirement_file: {tmp_path / 'requirement.txt'}\n"
+            f"state_dir: {tmp_path / '.zeperion' / 'state'}\n"
+            f"project_dir: {tmp_path}\n"
+            "planner_agent_type: anthropic\n"
+            "developer_agent_type: pi\n"
+            "reviewer_agent_type: anthropic\n"
+            "tester_agent_type: anthropic\n"
+            "max_total_tokens: 1000\n"
+            "count_estimated_tokens: false\n"
+            "tester_verify_commands:\n  - echo ok\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor", "-c", str(config_path), "--no-probe"])
+        assert result.exit_code == 0, result.output
+        assert "partial budget guard" in result.output
+        assert "developer" in result.output
+
+    def test_doctor_notes_estimated_budget_when_enabled(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Default count_estimated_tokens=True: a pi role's spend is counted
+        # via estimate, so doctor notes the cap is enforced-but-approximate
+        # rather than calling it a partial guard.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr("zeperion.cli.shutil.which", lambda _tool: "/bin/true")
+        (tmp_path / ".zeperion").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".zeperion" / "state").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "requirement.txt").write_text("test", encoding="utf-8")
+        config_path = tmp_path / ".zeperion" / "config.yaml"
+        config_path.write_text(
+            f"requirement_file: {tmp_path / 'requirement.txt'}\n"
+            f"state_dir: {tmp_path / '.zeperion' / 'state'}\n"
+            f"project_dir: {tmp_path}\n"
+            "planner_agent_type: anthropic\n"
+            "developer_agent_type: pi\n"
+            "reviewer_agent_type: anthropic\n"
+            "tester_agent_type: anthropic\n"
+            "max_total_tokens: 1000\n"
+            "tester_verify_commands:\n  - echo ok\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["doctor", "-c", str(config_path), "--no-probe"])
+        assert result.exit_code == 0, result.output
+        assert "counted via estimate" in result.output
+        assert "partial budget guard" not in result.output
 
 
 class TestVerifyCommand:
@@ -478,6 +584,74 @@ class TestPrerunGate:
         assert "dirty git tree" in result.output
         # Pre-run summary should have rendered before the block.
         assert "Pre-run check" in result.output
+
+
+class TestChangesAndDiscardCommands:
+    def _git(self, args: list[str], cwd: Path) -> None:
+        import os
+        import subprocess
+
+        env = {
+            "GIT_AUTHOR_NAME": "z",
+            "GIT_AUTHOR_EMAIL": "z@e.x",
+            "GIT_COMMITTER_NAME": "z",
+            "GIT_COMMITTER_EMAIL": "z@e.x",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        subprocess.run(["git", *args], cwd=str(cwd), check=True, env=env, capture_output=True)
+
+    def _dirty_repo(self, project_dir: Path) -> None:
+        self._git(["init", "-b", "main"], project_dir)
+        (project_dir / "tracked.txt").write_text("v1\n", encoding="utf-8")
+        self._git(["add", "."], project_dir)
+        self._git(["commit", "-m", "init"], project_dir)
+        (project_dir / "tracked.txt").write_text("v2\n", encoding="utf-8")
+        (project_dir / "new.txt").write_text("new\n", encoding="utf-8")
+
+    def test_changes_clean_tree(self, project_dir: Path) -> None:
+        self._git(["init", "-b", "main"], project_dir)
+        (project_dir / "x.txt").write_text("x", encoding="utf-8")
+        self._git(["add", "."], project_dir)
+        self._git(["commit", "-m", "init"], project_dir)
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["changes", "-c", str(project_dir / ".zeperion" / "config.yaml")]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Working tree is clean" in result.output
+
+    def test_changes_lists_modified_and_new(self, project_dir: Path) -> None:
+        self._dirty_repo(project_dir)
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["changes", "-c", str(project_dir / ".zeperion" / "config.yaml")]
+        )
+        assert result.exit_code == 0, result.output
+        assert "tracked.txt" in result.output
+        assert "new.txt" in result.output
+
+    def test_discard_refuses_without_yes(self, project_dir: Path) -> None:
+        self._dirty_repo(project_dir)
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["discard", "-c", str(project_dir / ".zeperion" / "config.yaml")]
+        )
+        assert result.exit_code == 1, result.output
+        assert "Refusing to discard without confirmation" in result.output
+        # Files must remain untouched when refused.
+        assert (project_dir / "new.txt").exists()
+        assert (project_dir / "tracked.txt").read_text(encoding="utf-8") == "v2\n"
+
+    def test_discard_with_yes_rolls_back(self, project_dir: Path) -> None:
+        self._dirty_repo(project_dir)
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["discard", "-c", str(project_dir / ".zeperion" / "config.yaml"), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Discarded" in result.output
+        assert not (project_dir / "new.txt").exists()
+        assert (project_dir / "tracked.txt").read_text(encoding="utf-8") == "v1\n"
 
 
 class TestLogsCommand:

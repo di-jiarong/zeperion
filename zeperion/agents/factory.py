@@ -7,7 +7,7 @@ module.
 
 from __future__ import annotations
 
-from typing import Sequence, Type
+from collections.abc import Sequence
 
 from zeperion.agents import AnthropicAgent, ClaudeCodeAgent, PiAgent
 from zeperion.agents.base import BaseAgent
@@ -15,7 +15,7 @@ from zeperion.agents.fallback import maybe_wrap_with_fallbacks
 from zeperion.models import AgentRole, WorkflowConfig
 
 
-def resolve_agent_class(agent_type: str) -> Type[BaseAgent]:
+def resolve_agent_class(agent_type: str) -> type[BaseAgent]:
     """Resolve a configured agent type string to its implementation class."""
     normalized = agent_type.strip().lower().replace("-", "_")
     if normalized == "anthropic":

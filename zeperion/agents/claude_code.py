@@ -1,16 +1,72 @@
 """Claude Code CLI agent implementation."""
 
 import asyncio
+import json
 import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent
-from zeperion.models import AgentOutput, AgentRole
+from zeperion.models import AgentOutput, AgentRole, TokenUsage
+from zeperion.utils.token_estimate import estimate_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _usage_from_claude_obj(usage_obj: Any) -> TokenUsage | None:
+    """Map a Claude JSON-envelope ``usage`` block to :class:`TokenUsage`.
+
+    The ``--output-format json`` envelope exposes a flat ``usage`` object
+    with snake_case keys (``input_tokens``, ``output_tokens``, plus
+    optional cache fields) — the same shape as the Anthropic SDK. Returns
+    ``None`` when the block is absent so callers can fall back to an
+    estimate. Reported usage is exact, so ``estimated`` stays ``False``.
+    """
+    if not isinstance(usage_obj, dict):
+        return None
+    return TokenUsage(
+        input_tokens=usage_obj.get("input_tokens"),
+        output_tokens=usage_obj.get("output_tokens"),
+        cache_creation_input_tokens=usage_obj.get("cache_creation_input_tokens"),
+        cache_read_input_tokens=usage_obj.get("cache_read_input_tokens"),
+    )
+
+
+def _parse_claude_json_envelope(stdout: str) -> tuple[str | None, TokenUsage | None]:
+    """Extract ``(result_text, usage)`` from a ``--output-format json`` reply.
+
+    ``claude --print --output-format json`` returns a single envelope
+    object ``{"type": "result", "result": "...", "usage": {...}, ...}``.
+    Some flag combinations instead emit a JSON *array* of events whose
+    final ``type == "result"`` element carries the answer, so we handle
+    both. Returns ``(None, None)`` when stdout is not JSON at all (e.g. an
+    older CLI still emitting plain text) so the caller can fall back to
+    treating stdout as the assistant text and estimating usage.
+    """
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, None
+
+    obj: Any = None
+    if isinstance(data, dict):
+        obj = data
+    elif isinstance(data, list):
+        for item in reversed(data):
+            if isinstance(item, dict) and item.get("type") == "result":
+                obj = item
+                break
+        if obj is None and data and isinstance(data[-1], dict):
+            obj = data[-1]
+    if not isinstance(obj, dict):
+        return None, None
+
+    text = obj.get("result")
+    if not isinstance(text, str):
+        text = None
+    return text, _usage_from_claude_obj(obj.get("usage"))
 
 
 class ClaudeCodeAgent(BaseAgent):
@@ -36,9 +92,9 @@ class ClaudeCodeAgent(BaseAgent):
         timeout: int = 600,
         project_dir: str = ".",
         permission_mode: str = "bypassPermissions",
-        extra_args: Optional[list[str]] = None,
+        extra_args: list[str] | None = None,
         use_worktree: bool = False,
-        worktree_parent: Optional[str] = None,
+        worktree_parent: str | None = None,
         keep_worktree: bool = True,
         progress_interval_seconds: int = 30,
     ):
@@ -79,20 +135,24 @@ class ClaudeCodeAgent(BaseAgent):
         self.use_worktree = use_worktree
         self.worktree_parent = Path(worktree_parent).resolve() if worktree_parent else None
         self.keep_worktree = keep_worktree
-        self.last_worktree_dir: Optional[Path] = None
+        self.last_worktree_dir: Path | None = None
         self.progress_interval_seconds = progress_interval_seconds
 
-    def build_command(self, project_dir: Optional[Path] = None) -> list[str]:
-        """Assemble the CLI argv list for one invocation."""
+    def build_command(
+        self, project_dir: Path | None = None, *, json_output: bool = True
+    ) -> list[str]:
+        """Assemble the CLI argv list for one invocation.
+
+        ``json_output`` adds ``--output-format json`` (the default), whose
+        envelope carries the assistant text *and* a per-call ``usage``
+        block for the token budget. Older Claude CLIs reject the flag; the
+        invoke path retries with ``json_output=False`` in that case.
+        """
         active_project_dir = (project_dir or self.project_dir).resolve()
-        cmd = [
-            self.cli_tool,
-            "--print",
-            "--model",
-            self.model,
-            "--add-dir",
-            str(active_project_dir),
-        ]
+        cmd = [self.cli_tool, "--print"]
+        if json_output:
+            cmd.extend(["--output-format", "json"])
+        cmd.extend(["--model", self.model, "--add-dir", str(active_project_dir)])
         if self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
         cmd.extend(self.extra_args)
@@ -101,7 +161,7 @@ class ClaudeCodeAgent(BaseAgent):
     async def invoke(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> AgentOutput:
         """Invoke ``claude --print`` with ``prompt`` on stdin.
 
@@ -125,14 +185,90 @@ class ClaudeCodeAgent(BaseAgent):
             )
 
         execution_dir = await self._prepare_execution_dir()
-        cmd = self.build_command(execution_dir)
-        # Session reuse is optional; only valid UUIDs are accepted by the CLI.
-        if session_id and _looks_like_uuid(session_id):
-            cmd.extend(["--session-id", session_id])
 
+        def _with_session(cmd: list[str]) -> list[str]:
+            # Session reuse is optional; only valid UUIDs are accepted.
+            if session_id and _looks_like_uuid(session_id):
+                return [*cmd, "--session-id", session_id]
+            return cmd
+
+        prompt_bytes = prompt.encode("utf-8")
         logger.info(f"Invoking {self.role.value} with model {self.model}")
-        logger.debug("Command: %s", " ".join(cmd))
 
+        try:
+            cmd = _with_session(self.build_command(execution_dir, json_output=True))
+            logger.debug("Command: %s", " ".join(cmd))
+            returncode, stdout, stderr = await self._spawn_and_communicate(
+                cmd, execution_dir, prompt_bytes
+            )
+            # Self-heal: an older Claude CLI that doesn't know
+            # ``--output-format json`` exits non-zero with an
+            # unknown-option message instead of producing plain text, so
+            # the plain-text JSON-parse fallback never gets a chance.
+            # Retry once without the flag; usage then falls back to an
+            # estimate downstream.
+            if returncode != 0 and _is_unknown_output_format_error(stderr, stdout):
+                logger.warning(
+                    "%s: Claude CLI rejected --output-format json; "
+                    "retrying in plain-text mode (token usage will be estimated)",
+                    self.role.value,
+                )
+                cmd = _with_session(
+                    self.build_command(execution_dir, json_output=False)
+                )
+                returncode, stdout, stderr = await self._spawn_and_communicate(
+                    cmd, execution_dir, prompt_bytes
+                )
+        finally:
+            if self.use_worktree and not self.keep_worktree:
+                await self._remove_worktree(execution_dir)
+
+        if returncode != 0:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            out_tail = stdout.decode("utf-8", errors="replace").strip()[-2000:]
+            raise AgentInvocationError(
+                f"{self.role.value} invocation failed (exit={returncode}): "
+                f"{err or 'no stderr'}\n--- last stdout ---\n{out_tail}"
+            )
+
+        raw_output = stdout.decode("utf-8", errors="replace")
+        logger.debug("Raw output length: %d chars", len(raw_output))
+
+        if not raw_output.strip():
+            raise AgentInvocationError(
+                f"{self.role.value}: Claude CLI returned empty output"
+            )
+
+        # Prefer the JSON envelope (real usage). Fall back to treating
+        # stdout as plain assistant text when it isn't JSON (older CLI),
+        # in which case we estimate usage from prompt + response so the
+        # token budget still sees a non-zero figure.
+        result_text, reported_usage = _parse_claude_json_envelope(raw_output)
+        text = result_text if result_text is not None else raw_output
+        if not text.strip():
+            raise AgentInvocationError(
+                f"{self.role.value}: Claude CLI returned empty output"
+            )
+
+        output = self.parse_output(text)
+        usage = reported_usage or estimate_usage(prompt, text)
+        return output.model_copy(update={"usage": usage})
+
+    async def _spawn_and_communicate(
+        self,
+        cmd: list[str],
+        execution_dir: Path,
+        prompt_bytes: bytes,
+    ) -> tuple[int, bytes, bytes]:
+        """Run one ``claude`` subprocess and return ``(rc, stdout, stderr)``.
+
+        Handles process spawn, the progress heartbeat, and the hard
+        timeout. Raises :class:`AgentInvocationError` only for launch
+        failure or timeout; a non-zero exit is returned to the caller so
+        it can decide whether to retry (e.g. drop ``--output-format``).
+        Worktree cleanup is intentionally left to the caller so a retry
+        reuses the same execution dir.
+        """
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -146,23 +282,15 @@ class ClaudeCodeAgent(BaseAgent):
                 f"Claude CLI not found: {self.cli_tool}"
             ) from exc
 
-        # Spawn a periodic heartbeat task so a multi-minute claude
-        # invocation isn't indistinguishable from a hang. live test #2
-        # had a 298-second Developer call with completely silent
-        # stdout — operators reasonably read that as "is it stuck?".
-        # The heartbeat runs concurrent with communicate(); whichever
-        # finishes first is fine. We cancel + await the heartbeat in
-        # the finally block to keep the event loop clean.
         heartbeat_task = (
             asyncio.create_task(self._heartbeat())
             if self.progress_interval_seconds > 0
             else None
         )
-
         try:
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt.encode("utf-8")),
+                    process.communicate(input=prompt_bytes),
                     timeout=self.timeout,
                 )
             except asyncio.TimeoutError as exc:
@@ -177,30 +305,15 @@ class ClaudeCodeAgent(BaseAgent):
                 try:
                     await heartbeat_task
                 except (asyncio.CancelledError, Exception):
-                    # Heartbeat is purely informational. Any exception
-                    # during cleanup must NOT mask the real
-                    # AgentInvocationError that may already be in flight.
+                    # Heartbeat is purely informational; never let its
+                    # teardown mask a real error already in flight.
                     pass
-            if self.use_worktree and not self.keep_worktree:
-                await self._remove_worktree(execution_dir)
 
-        if process.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace").strip()
-            out_tail = stdout.decode("utf-8", errors="replace").strip()[-2000:]
-            raise AgentInvocationError(
-                f"{self.role.value} invocation failed (exit={process.returncode}): "
-                f"{err or 'no stderr'}\n--- last stdout ---\n{out_tail}"
-            )
-
-        raw_output = stdout.decode("utf-8", errors="replace")
-        logger.debug("Raw output length: %d chars", len(raw_output))
-
-        if not raw_output.strip():
-            raise AgentInvocationError(
-                f"{self.role.value}: Claude CLI returned empty output"
-            )
-
-        return self.parse_output(raw_output)
+        return (
+            process.returncode if process.returncode is not None else -1,
+            stdout,
+            stderr,
+        )
 
     async def _heartbeat(self) -> None:
         """Emit a 'still running' log line every ``progress_interval_seconds``.
@@ -287,6 +400,36 @@ class ClaudeCodeAgent(BaseAgent):
         if process.returncode != 0:
             shutil.rmtree(worktree_dir, ignore_errors=True)
         self.last_worktree_dir = None
+
+
+def _is_unknown_output_format_error(stderr: bytes, stdout: bytes) -> bool:
+    """Heuristically detect a CLI rejecting ``--output-format``.
+
+    Older ``claude`` builds predate the flag and exit non-zero with an
+    "unknown/unrecognized option" message. We look for the flag name
+    alongside one of those rejection phrases so we only retry in the
+    genuine "this CLI is too old" case, not on unrelated failures (a bad
+    model name, an auth error, etc.).
+    """
+    blob = (
+        stderr.decode("utf-8", errors="replace")
+        + "\n"
+        + stdout.decode("utf-8", errors="replace")
+    ).lower()
+    if "output-format" not in blob and "output format" not in blob:
+        return False
+    rejection_markers = (
+        "unknown option",
+        "unknown argument",
+        "unrecognized option",
+        "unrecognized argument",
+        "unrecognised option",
+        "no such option",
+        "unexpected option",
+        "invalid option",
+        "unknown flag",
+    )
+    return any(marker in blob for marker in rejection_markers)
 
 
 def _looks_like_uuid(value: str) -> bool:

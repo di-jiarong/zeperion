@@ -471,6 +471,94 @@ GLOBAL_STATUS: CONTINUE
         with pytest.raises(AgentInvocationError, match="empty output"):
             await agent.invoke("hi")
 
+    def test_build_command_json_output_toggle(self, tmp_path):
+        """``--output-format json`` is on by default and droppable for old CLIs."""
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+        )
+
+        default_cmd = agent.build_command()
+        assert ["--output-format", "json"] == default_cmd[
+            default_cmd.index("--output-format") : default_cmd.index("--output-format") + 2
+        ]
+
+        plain_cmd = agent.build_command(json_output=False)
+        assert "--output-format" not in plain_cmd
+
+    @pytest.mark.asyncio
+    async def test_invoke_self_heals_when_cli_rejects_json_flag(
+        self, tmp_path, monkeypatch
+    ):
+        """An old CLI rejecting --output-format triggers a plain-text retry."""
+        calls: list[tuple] = []
+
+        class FakeRejectJson:
+            returncode = 2
+
+            async def communicate(self, input=None):
+                return b"", b"error: unknown option '--output-format'\n"
+
+        class FakePlainOk:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"GLOBAL_STATUS: CONTINUE\nLESSONS:\n- ok\n", b""
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            calls.append(cmd)
+            # First (json) attempt is rejected; the retry has no json flag.
+            return FakeRejectJson() if "--output-format" in cmd else FakePlainOk()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="claude-sonnet-4-6",
+            project_dir=str(tmp_path),
+        )
+        result = await agent.invoke("Do work")
+
+        assert len(calls) == 2
+        assert "--output-format" in calls[0]
+        assert "--output-format" not in calls[1]
+        assert result.global_status == GlobalStatus.CONTINUE
+        # Plain-text retry has no usage block, so spend is estimated.
+        assert result.usage is not None
+        assert result.usage.estimated is True
+
+    @pytest.mark.asyncio
+    async def test_invoke_does_not_retry_on_unrelated_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A genuine error (bad model) must not trigger the json-flag retry."""
+        calls: list[tuple] = []
+
+        class FakeProcess:
+            returncode = 7
+
+            async def communicate(self, input=None):
+                return b"partial\n", b"boom: invalid model\n"
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            calls.append(cmd)
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        agent = ClaudeCodeAgent(
+            role=AgentRole.DEVELOPER,
+            model="bogus-model",
+            project_dir=str(tmp_path),
+        )
+
+        from zeperion.agents.base import AgentInvocationError
+
+        with pytest.raises(AgentInvocationError, match="exit=7"):
+            await agent.invoke("hi")
+        assert len(calls) == 1
+
 
 class TestPiAgent:
     """Test PiAgent RPC functionality."""

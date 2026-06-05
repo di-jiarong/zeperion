@@ -2,7 +2,7 @@
 
 import os
 from enum import Enum
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
@@ -90,17 +90,17 @@ class WorkflowState(TypedDict):
     phase: PhaseType
     round: int
     fix_attempt: int
-    task_id: Optional[str]
-    pr_title: Optional[str]
+    task_id: str | None
+    pr_title: str | None
     test_status: TestStatus
     review_status: ReviewStatus
     global_status: GlobalStatus
-    last_error: Optional[str]
+    last_error: str | None
     lessons_learned: Annotated[list[str], lambda x, y: x + y]  # Append reducer
-    planner_session_id: Optional[str]
-    developer_session_id: Optional[str]
-    reviewer_session_id: Optional[str]
-    tester_session_id: Optional[str]
+    planner_session_id: str | None
+    developer_session_id: str | None
+    reviewer_session_id: str | None
+    tester_session_id: str | None
     # Cumulative token spend across every agent invocation in this run.
     # Lives in state (not just in-memory on the nodes object) so the
     # ``max_total_tokens`` guardrail survives checkpoint resume. Reads use
@@ -120,7 +120,7 @@ class PRPipelineState(TypedDict):
     phase: PhaseType
     round: int
     fix_attempt: int
-    task_id: Optional[str]
+    task_id: str | None
     # Note: ``pr_title`` here is *carried over* from the multi-agent workflow
     # state. It still lives in the dedicated PR Pipeline section below for
     # historical reasons; we keep a single shared key so handovers preserve
@@ -128,21 +128,21 @@ class PRPipelineState(TypedDict):
     test_status: TestStatus
     review_status: ReviewStatus
     global_status: GlobalStatus
-    last_error: Optional[str]
+    last_error: str | None
     lessons_learned: Annotated[list[str], lambda x, y: x + y]
-    planner_session_id: Optional[str]
-    developer_session_id: Optional[str]
-    reviewer_session_id: Optional[str]
-    tester_session_id: Optional[str]
+    planner_session_id: str | None
+    developer_session_id: str | None
+    reviewer_session_id: str | None
+    tester_session_id: str | None
     updated_at: str
 
     # PR Pipeline specific fields
     pr_phase: PRPhase
     pr_branch: str
     pr_target_branch: str
-    pr_number: Optional[int]
-    pr_url: Optional[str]
-    pr_title: Optional[str]
+    pr_number: int | None
+    pr_url: str | None
+    pr_title: str | None
 
     # GitHub configuration
     github_repo: str
@@ -152,15 +152,15 @@ class PRPipelineState(TypedDict):
     codex_status: CodexStatus
     codex_thumbs_count: int
     codex_comments_count: int
-    codex_reviewed_commit: Optional[str]
+    codex_reviewed_commit: str | None
     # SHA of the commit for which we last asked Codex to re-review. Used
     # purely as a debounce — we MUST NOT @codex review the same commit
     # twice (causes duplicate review rounds, history lesson from the old
     # bash harness).
-    last_codex_review_request_commit: Optional[str]
+    last_codex_review_request_commit: str | None
 
     # Flow control
-    commit_sha: Optional[str]
+    commit_sha: str | None
     merge_enabled: bool
     # How many times pr_fixer has produced a fix commit on this PR.
     # Hard-capped via WorkflowConfig.max_pr_fixer_rounds to stop an
@@ -233,20 +233,35 @@ class WorkflowConfig(BaseModel):
     # multi-agent run. ``0`` (the default) means *unlimited* — the
     # round/fix-attempt caps remain the only stop conditions. When set
     # to a positive value, the workflow is forced to BLOCKED as soon as
-    # the running token total (summed from every agent's reported
-    # ``usage``) meets or exceeds the cap. This complements ``max_rounds``
-    # (which only bounds iteration count) with a hard spend ceiling, so a
-    # pathological run on a real ``pi``/``claude_code`` backend cannot burn
-    # an unbounded amount of money before a human looks at it. Backends
-    # that do not report token usage contribute 0 and therefore never
-    # trip the cap.
+    # the running token total meets or exceeds the cap. This complements
+    # ``max_rounds`` (which only bounds iteration count) with a hard spend
+    # ceiling, so a pathological run on a real ``pi``/``claude_code``
+    # backend cannot burn an unbounded amount of money before a human
+    # looks at it. Exact usage (anthropic, claude_code JSON) always
+    # counts; ``pi`` invocations without a usage block are *estimated*
+    # from prompt/response length and counted too unless
+    # ``count_estimated_tokens`` is disabled.
     max_total_tokens: int = Field(
         default=0,
         ge=0,
         description=(
             "Cumulative token budget for one multi-agent run (0 = "
-            "unlimited). Forces BLOCKED once the summed agent token usage "
-            "reaches the cap."
+            "unlimited). Forces BLOCKED once total agent token usage "
+            "reaches the cap. Exact-reported usage (anthropic, claude_code) "
+            "always counts; pi estimates count unless "
+            "count_estimated_tokens is off."
+        ),
+    )
+    count_estimated_tokens: bool = Field(
+        default=True,
+        description=(
+            "Count *estimated* token usage toward ``max_total_tokens``. "
+            "Backends that report exact usage (anthropic, claude_code) are "
+            "always counted; ``pi`` invocations that report no usage are "
+            "estimated from prompt/response length. Keeping this True makes "
+            "the cap a real ceiling for every backend (at the cost of some "
+            "imprecision); set False to enforce the cap only on exactly-"
+            "reported spend and treat estimates as display-only."
         ),
     )
     enable_reviewer: bool = Field(
@@ -259,7 +274,7 @@ class WorkflowConfig(BaseModel):
 
     project_dir: str = Field(default=".")
     state_dir: str = Field(default=".zeperion/state")
-    prompts_dir: Optional[str] = Field(
+    prompts_dir: str | None = Field(
         default=None,
         description=(
             "Override directory for prompt templates. When unset, the "
@@ -276,7 +291,7 @@ class WorkflowConfig(BaseModel):
             "current working tree is not modified directly."
         ),
     )
-    claude_cli_worktree_parent: Optional[str] = Field(
+    claude_cli_worktree_parent: str | None = Field(
         default=None,
         description=(
             "Optional parent directory for ClaudeCodeAgent temporary worktrees. "
@@ -372,8 +387,8 @@ class WorkflowConfig(BaseModel):
     )
 
     # GitHub PR Pipeline configuration
-    github_repo: Optional[str] = Field(default=None, description="GitHub repo (owner/repo)")
-    github_token: Optional[str] = Field(
+    github_repo: str | None = Field(default=None, description="GitHub repo (owner/repo)")
+    github_token: str | None = Field(
         default_factory=lambda: os.environ.get("GITHUB_TOKEN"),
         description="GitHub token"
     )
@@ -397,19 +412,30 @@ class WorkflowConfig(BaseModel):
 class TokenUsage(BaseModel):
     """Per-invocation token accounting from the underlying model API.
 
-    Populated by ``AnthropicAgent.invoke`` from the SDK's
-    ``response.usage`` object. ``ClaudeCodeAgent`` does not currently
-    surface usage (the ``claude --print`` CLI doesn't emit it on
-    stdout), so its invocations leave this as ``None`` on AgentOutput.
+    Populated with *exact* counts by ``AnthropicAgent.invoke`` (SDK
+    ``response.usage``) and ``ClaudeCodeAgent.invoke`` (the
+    ``--output-format json`` envelope's ``usage`` block). ``PiAgent``
+    uses reported usage when the RPC stream carries it, otherwise it
+    falls back to an *estimate* (``estimated=True``) derived from
+    prompt/response length so the token budget still sees a non-zero
+    figure. The same estimate path is used by ``ClaudeCodeAgent`` when an
+    older CLI returns plain text instead of JSON.
 
     The fields mirror Anthropic's Messages API usage block, with all
     fields optional so future model APIs that don't report cache stats
     don't break parsing.
     """
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    cache_creation_input_tokens: Optional[int] = None
-    cache_read_input_tokens: Optional[int] = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    # True when these counts were *estimated* from prompt/response text
+    # (e.g. a ``pi`` invocation that reported no usage) rather than
+    # reported by the model API. The token-budget guardrail still counts
+    # estimated usage by default (so ``max_total_tokens`` is a real cap),
+    # but the UI / events flag it as approximate so operators never
+    # mistake a heuristic for a billed figure.
+    estimated: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -421,11 +447,11 @@ class TokenUsage(BaseModel):
 
 class AgentOutput(BaseModel):
     """Parsed output from an agent."""
-    task_id: Optional[str] = None
-    test_status: Optional[TestStatus] = None
-    review_status: Optional[ReviewStatus] = None
-    global_status: Optional[GlobalStatus] = None
-    pr_title: Optional[str] = Field(
+    task_id: str | None = None
+    test_status: TestStatus | None = None
+    review_status: ReviewStatus | None = None
+    global_status: GlobalStatus | None = None
+    pr_title: str | None = Field(
         default=None,
         description=(
             "Human-readable PR title proposed by the Planner (or PR Fixer). "
@@ -440,12 +466,14 @@ class AgentOutput(BaseModel):
     # The graph node should propagate this to ``state["last_error"]`` so
     # the operator can see *why* the workflow tripped to BLOCKED instead
     # of seeing a silent infinite loop.
-    parse_error: Optional[str] = Field(default=None)
-    # Per-invocation token usage from the model API. ``None`` for
-    # backends that don't report it (currently ClaudeCodeAgent).
-    # Aggregated by the graph into events.jsonl + the status panel
-    # so operators can see what a workflow actually cost.
-    usage: Optional[TokenUsage] = Field(default=None)
+    parse_error: str | None = Field(default=None)
+    # Per-invocation token usage from the model API. Populated with exact
+    # counts (anthropic SDK, claude_code JSON) or an ``estimated=True``
+    # approximation (pi / plain-text fallback); ``None`` only when no
+    # usage and no estimate is available. Aggregated by the graph into
+    # events.jsonl + the status panel so operators can see what a
+    # workflow actually cost.
+    usage: TokenUsage | None = Field(default=None)
 
     model_config = ConfigDict(frozen=True)
 
@@ -474,7 +502,7 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
 
 def create_initial_pr_state(
     config: WorkflowConfig,
-    base_state: Optional[WorkflowState] = None
+    base_state: WorkflowState | None = None
 ) -> PRPipelineState:
     """Create initial PR Pipeline state."""
     if base_state:

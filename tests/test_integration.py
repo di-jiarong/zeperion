@@ -396,6 +396,79 @@ class TestWorkflowGraph:
         assert len(FakeAgent.outputs) == 3
 
     @pytest.mark.asyncio
+    async def test_estimated_tokens_count_toward_budget_by_default(
+        self, test_config, mock_agent_outputs
+    ):
+        """Estimated usage (estimated=True) trips the cap when counting is on."""
+        from zeperion.models import TokenUsage
+
+        planner_est = mock_agent_outputs["planner"].model_copy(
+            update={
+                "usage": TokenUsage(
+                    input_tokens=400, output_tokens=200, estimated=True
+                )
+            }
+        )
+        FakeAgent.outputs = [
+            planner_est,
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
+            mock_agent_outputs["tester_pass"],
+        ]
+        budget_config = test_config.model_copy(update={"max_total_tokens": 500})
+        graph = create_multi_agent_graph(
+            budget_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(budget_config)
+        merged_state = dict(initial_state)
+        async for event in graph.astream(
+            initial_state, {"configurable": {"thread_id": "budget-est"}}
+        ):
+            for node_state in event.values():
+                merged_state.update(node_state)
+
+        assert merged_state["global_status"] == GlobalStatus.BLOCKED
+        assert merged_state["total_tokens"] == 600
+
+    @pytest.mark.asyncio
+    async def test_estimated_tokens_ignored_when_disabled(
+        self, test_config, mock_agent_outputs
+    ):
+        """With count_estimated_tokens off, estimated spend doesn't trip the cap."""
+        from zeperion.models import TokenUsage
+
+        planner_est = mock_agent_outputs["planner"].model_copy(
+            update={
+                "usage": TokenUsage(
+                    input_tokens=400, output_tokens=200, estimated=True
+                )
+            }
+        )
+        FakeAgent.outputs = [
+            planner_est,
+            mock_agent_outputs["developer"],
+            mock_agent_outputs["reviewer_pass"],
+            mock_agent_outputs["tester_pass"],
+        ]
+        budget_config = test_config.model_copy(
+            update={"max_total_tokens": 500, "count_estimated_tokens": False}
+        )
+        graph = create_multi_agent_graph(
+            budget_config, agent_class=FakeAgent, enable_checkpoint=False
+        )
+        initial_state = create_initial_state(budget_config)
+        merged_state = dict(initial_state)
+        async for event in graph.astream(
+            initial_state, {"configurable": {"thread_id": "budget-est-off"}}
+        ):
+            for node_state in event.values():
+                merged_state.update(node_state)
+
+        # Estimated spend ignored → not blocked on budget, total stays 0.
+        assert merged_state["global_status"] != GlobalStatus.BLOCKED
+        assert merged_state["total_tokens"] == 0
+
+    @pytest.mark.asyncio
     async def test_retry_on_test_failure(self, test_config, mock_agent_outputs):
         """Test retry logic when tests fail."""
         FakeAgent.outputs = [

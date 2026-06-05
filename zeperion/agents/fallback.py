@@ -31,7 +31,7 @@ wrapper needing to know about those distinctions.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from zeperion.agents.base import (
     AgentInvocationError,
@@ -78,9 +78,9 @@ class FallbackAgent(BaseAgent):
     async def invoke(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> AgentOutput:
-        last_exc: Optional[AgentInvocationError] = None
+        last_exc: AgentInvocationError | None = None
         for idx, agent in enumerate(self.chain):
             attempt = "primary" if idx == 0 else f"fallback#{idx}"
             try:

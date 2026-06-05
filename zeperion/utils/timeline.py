@@ -433,6 +433,7 @@ def summarise(events: Iterable[TimelineEvent]) -> dict:
     in_tokens = 0
     out_tokens = 0
     counted = 0
+    estimated_calls = 0
     for e in completed:
         in_t = e.raw.get("input_tokens")
         out_t = e.raw.get("output_tokens")
@@ -440,6 +441,8 @@ def summarise(events: Iterable[TimelineEvent]) -> dict:
             counted += 1
             in_tokens += in_t or 0
             out_tokens += out_t or 0
+            if e.raw.get("estimated"):
+                estimated_calls += 1
 
     return {
         "total_events": len(events),
@@ -451,4 +454,8 @@ def summarise(events: Iterable[TimelineEvent]) -> dict:
         "tokens_output": out_tokens if counted else None,
         "tokens_total": (in_tokens + out_tokens) if counted else None,
         "agent_calls_with_usage": counted,
+        # How many of the counted calls were *estimated* (pi without a
+        # usage block) rather than exactly reported, so the panel can mark
+        # the total as approximate.
+        "agent_calls_estimated": estimated_calls,
     }

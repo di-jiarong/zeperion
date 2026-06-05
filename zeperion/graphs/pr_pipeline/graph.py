@@ -1,7 +1,6 @@
 """StateGraph assembly for the PR pipeline."""
 
 import logging
-from typing import Optional
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
@@ -25,9 +24,9 @@ logger = logging.getLogger(__name__)
 def create_pr_pipeline_graph(
     config: WorkflowConfig,
     *,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-    enable_checkpoint: Optional[bool] = None,
-    checkpoint_path: Optional[str] = None,  # accepted for backward compatibility
+    checkpointer: BaseCheckpointSaver | None = None,
+    enable_checkpoint: bool | None = None,
+    checkpoint_path: str | None = None,  # accepted for backward compatibility
 ) -> StateGraph:
     """Create PR Pipeline workflow graph.
 

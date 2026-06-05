@@ -129,6 +129,8 @@ zeperion --help
 | `zeperion init [dir]` | 初始化项目（生成 `.zeperion/config.yaml`、`requirement.txt`） | `-b/--backend pi\|claude_code\|anthropic`、`-f/--force` |
 | `zeperion doctor` | 检查本地环境是否可运行 | `-c/--config`、`--probe/--no-probe` |
 | `zeperion verify` | 单独运行 / 探测 Tester 验收命令 | `-c/--config`、`--command`、`--timeout`、`--detect`、`--write-config`、`--tail` |
+| `zeperion changes` | 查看当前工作区改动（干净树开跑时即 agent 改动） | `-c/--config`、`--stat` |
+| `zeperion discard` | 丢弃当前未提交的工作区改动 | `-c/--config`、`--yes` |
 | `zeperion run` | 运行工作流 | `-m/--mode`、`-t/--thread-id`、`-r/--resume`、`-d/--detach`、`--log-format`、`--no-pr-pipeline`、`--yes`、`--allow-dirty` |
 | `zeperion ship` | 一条龙：multi_agent → PR pipeline | `-t/--thread-id`、`--yes`、`--allow-dirty` |
 | `zeperion status` | 查看单个 thread 状态 | `-t/--thread-id`、`--watch`、`--interval` |
@@ -339,7 +341,8 @@ tester_model: claude-opus-4-7
 max_rounds: 10                      # 默认 10，防止解析失败时烧 token
 max_fix_attempts: 3
 enable_reviewer: true
-max_total_tokens: 0                 # >0 时作为累计 token 预算护栏，到顶即 BLOCKED
+max_total_tokens: 0                 # >0 时为硬性 token 上限；anthropic/claude_code 用真实 usage，pi 无 usage 时按估算计入
+count_estimated_tokens: true        # 估算值是否计入上限（true=护栏对所有后端生效；false=只按真实上报值计入）
 
 # Tester 真实验收命令（init 会按项目类型自动探测常见命令）
 tester_verify_commands:

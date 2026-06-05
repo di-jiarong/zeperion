@@ -2,7 +2,8 @@
 
 import logging
 import os
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 from anthropic import AsyncAnthropic
 
@@ -12,7 +13,7 @@ from zeperion.models import AgentOutput, AgentRole, TokenUsage
 logger = logging.getLogger(__name__)
 
 
-def _extract_usage(usage_obj: Any) -> Optional[TokenUsage]:
+def _extract_usage(usage_obj: Any) -> TokenUsage | None:
     """Coerce the SDK's ``response.usage`` into a :class:`TokenUsage`.
 
     The Anthropic Messages API exposes per-response token counts on a
@@ -79,7 +80,7 @@ class AnthropicAgent(BaseAgent):
         self,
         role: AgentRole,
         model: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.0,
         timeout: int = 600,
@@ -111,7 +112,7 @@ class AnthropicAgent(BaseAgent):
     async def invoke(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> AgentOutput:
         """
         Invoke the agent with a prompt.

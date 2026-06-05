@@ -120,6 +120,7 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "max_rounds": config.max_rounds,
         "max_fix_attempts": config.max_fix_attempts,
         "max_total_tokens": config.max_total_tokens,
+        "count_estimated_tokens": config.count_estimated_tokens,
         "enable_reviewer": config.enable_reviewer,
         "project_dir": config.project_dir,
         "state_dir": config.state_dir,
@@ -179,6 +180,38 @@ def update_config_yaml(config_path: Path, updates: dict[str, Any]) -> None:
     logger.info("Updated config %s keys=%s", config_path, sorted(updates))
 
 
+# Role -> the WorkflowConfig field holding that role's model name. Kept
+# next to the config helpers so the doctor "stale default model" check
+# and any future model tooling share one source of truth.
+_ROLE_MODEL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("planner", "planner_model"),
+    ("developer", "developer_model"),
+    ("reviewer", "reviewer_model"),
+    ("tester", "tester_model"),
+)
+
+
+def default_model_roles(config: WorkflowConfig) -> list[tuple[str, str]]:
+    """Return ``(role, model)`` for roles still pinned to the built-in default.
+
+    Model names like ``claude-opus-4-7`` are baked into
+    :class:`WorkflowConfig` as field defaults and inevitably go stale as
+    vendors ship new model versions. A config that never overrode them is
+    the most likely place an outdated (and therefore failing-at-runtime)
+    model name hides. ``zeperion doctor`` surfaces these as a soft
+    reminder — it cannot know whether a given name is *currently* valid
+    without calling the API, so it flags "you're on our shipped default,
+    confirm it still exists" rather than hard-failing.
+    """
+    fields = WorkflowConfig.model_fields
+    out: list[tuple[str, str]] = []
+    for role, field_name in _ROLE_MODEL_FIELDS:
+        configured = getattr(config, field_name)
+        if configured == fields[field_name].default:
+            out.append((role, configured))
+    return out
+
+
 def get_default_config() -> dict[str, Any]:
     """
     Get default configuration values.
@@ -220,6 +253,7 @@ def get_default_config() -> dict[str, Any]:
         "max_rounds": defaults["max_rounds"].default,
         "max_fix_attempts": defaults["max_fix_attempts"].default,
         "max_total_tokens": defaults["max_total_tokens"].default,
+        "count_estimated_tokens": defaults["count_estimated_tokens"].default,
         "enable_reviewer": defaults["enable_reviewer"].default,
         "project_dir": "..",
         "state_dir": "state",

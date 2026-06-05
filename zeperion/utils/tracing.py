@@ -53,7 +53,8 @@ will inherit that context automatically thanks to OTEL's context propagation.
 from __future__ import annotations
 
 import contextlib
-from typing import Any, AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
+from typing import Any
 
 # ``opentelemetry-api`` is a runtime dependency; this import never fails.
 # When no SDK is installed it transparently returns a NoOpTracer.

@@ -24,8 +24,8 @@ Design rules:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 
 def _entry_is_covered(entry: str, existing_lines: list[str]) -> bool:

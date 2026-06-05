@@ -1,7 +1,6 @@
 """Base agent interface."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from zeperion.models import (
     AgentOutput,
@@ -23,7 +22,7 @@ from zeperion.parsers.section_parser import (
 _PR_TITLE_MAX_LEN = 72
 
 
-def _clean_pr_title(value: Optional[str]) -> Optional[str]:
+def _clean_pr_title(value: str | None) -> str | None:
     """Normalise a Planner-proposed PR title.
 
     - Strips Markdown decorations and surrounding quotes (LLMs frequently
@@ -109,7 +108,7 @@ class BaseAgent(ABC):
     async def invoke(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> AgentOutput:
         """
         Invoke the agent with a prompt.
@@ -170,7 +169,7 @@ class BaseAgent(ABC):
         pr_title = _clean_pr_title(parser.extract_field("PR_TITLE"))
         lessons = parser.extract_list("LESSONS", strip_bullets=True)
 
-        parse_error: Optional[str] = None
+        parse_error: str | None = None
 
         if self.role in self._TEST_STATUS_REQUIRED_ROLES:
             try:

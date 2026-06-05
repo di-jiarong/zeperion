@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from zeperion.utils.time import iso_now, utc_strftime
 
@@ -21,7 +21,7 @@ class StateStorage:
     shared at the root because they already key off ``thread_id`` internally.
     """
 
-    def __init__(self, state_dir: Path, thread_id: Optional[str] = None):
+    def __init__(self, state_dir: Path, thread_id: str | None = None):
         """
         Initialize state storage.
 
@@ -68,7 +68,7 @@ class StateStorage:
         )
         logger.debug(f"Saved pipeline state to {self.pipeline_state_file}")
 
-    def load_pipeline_state(self) -> Optional[dict]:
+    def load_pipeline_state(self) -> dict | None:
         """Load PR pipeline state from disk; returns None if absent."""
         if not self.pipeline_state_file.exists():
             return None
@@ -93,9 +93,9 @@ class StateStorage:
         self,
         agent_name: str,
         output: str,
-        thread_id: Optional[str] = None,
-        round_num: Optional[int] = None,
-        fix_attempt: Optional[int] = None,
+        thread_id: str | None = None,
+        round_num: int | None = None,
+        fix_attempt: int | None = None,
     ) -> None:
         """
         Save agent output to file.
@@ -140,7 +140,7 @@ class StateStorage:
 
         logger.debug(f"Appended event to {event_file}")
 
-    def load_agent_output(self, agent_name: str) -> Optional[str]:
+    def load_agent_output(self, agent_name: str) -> str | None:
         """
         Load agent output from file.
 
@@ -209,7 +209,7 @@ class StateStorage:
                 file.unlink()
                 logger.debug(f"Deleted {file}")
 
-    def backup_state(self, backup_dir: Optional[Path] = None) -> Path:
+    def backup_state(self, backup_dir: Path | None = None) -> Path:
         """
         Backup current state to a timestamped directory.
 

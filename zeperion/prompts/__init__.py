@@ -1,14 +1,13 @@
 """Prompt template management."""
 
 from pathlib import Path
-from typing import Optional
 
 from jinja2 import Environment, FileSystemLoader
 
 PACKAGED_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
-def resolve_templates_dir(templates_dir: Optional[Path | str] = None) -> Path:
+def resolve_templates_dir(templates_dir: Path | str | None = None) -> Path:
     """Resolve the prompt templates directory.
 
     - If ``templates_dir`` is provided, it is returned as-is (even if it does
@@ -26,7 +25,7 @@ def resolve_templates_dir(templates_dir: Optional[Path | str] = None) -> Path:
 class PromptTemplate:
     """Manages prompt templates for agents."""
 
-    def __init__(self, templates_dir: Optional[Path | str] = None):
+    def __init__(self, templates_dir: Path | str | None = None):
         """Initialize prompt template manager.
 
         Args:
@@ -57,9 +56,9 @@ class PromptTemplate:
     def render_planner(
         self,
         requirement: str,
-        current_plan: Optional[str] = None,
-        test_report: Optional[str] = None,
-        lessons: Optional[list[str]] = None,
+        current_plan: str | None = None,
+        test_report: str | None = None,
+        lessons: list[str] | None = None,
         round_num: int = 1,
     ) -> str:
         """Render planner prompt.
@@ -87,8 +86,8 @@ class PromptTemplate:
         self,
         requirement: str,
         plan: str,
-        test_report: Optional[str] = None,
-        lessons: Optional[list[str]] = None,
+        test_report: str | None = None,
+        lessons: list[str] | None = None,
         fix_attempt: int = 0,
         uses_claude_code: bool = False,
     ) -> str:
@@ -122,7 +121,7 @@ class PromptTemplate:
         pr_branch: str,
         pr_target_branch: str,
         comments: list[dict],
-        lessons: Optional[list[str]] = None,
+        lessons: list[str] | None = None,
         uses_claude_code: bool = False,
     ) -> str:
         """Render PR fixer prompt.
@@ -151,7 +150,7 @@ class PromptTemplate:
         requirement: str,
         plan: str,
         dev_output: str,
-        lessons: Optional[list[str]] = None,
+        lessons: list[str] | None = None,
     ) -> str:
         """Render reviewer prompt.
 
@@ -174,8 +173,8 @@ class PromptTemplate:
         requirement: str,
         plan: str,
         dev_output: str,
-        lessons: Optional[list[str]] = None,
-        verify_results: Optional[list] = None,
+        lessons: list[str] | None = None,
+        verify_results: list | None = None,
     ) -> str:
         """Render tester prompt.
 
@@ -213,10 +212,10 @@ class PromptTemplate:
 # ``tester_verify_commands`` tests: ``test_prompts.py`` set the
 # singleton to a tmp_path that pytest then deleted, and the next
 # default-dir call in another test file got a TemplateNotFound.
-_default_template_manager: Optional[PromptTemplate] = None
+_default_template_manager: PromptTemplate | None = None
 
 
-def get_template_manager(templates_dir: Optional[Path] = None) -> PromptTemplate:
+def get_template_manager(templates_dir: Path | None = None) -> PromptTemplate:
     """Get the template manager for the given dir.
 
     Behaviour:

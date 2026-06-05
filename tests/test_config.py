@@ -26,7 +26,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from zeperion.config import load_config_from_yaml
+from zeperion.config import default_model_roles, load_config_from_yaml
+from zeperion.models import WorkflowConfig
 
 
 @pytest.fixture
@@ -151,3 +152,33 @@ class TestCwdIsolation:
         # we anchored to CWD instead of config dir.
         assert "unrelated" not in config.state_dir
         assert config.state_dir == str((config_dir / "state").resolve())
+
+
+class TestDefaultModelRoles:
+    """``default_model_roles`` powers the doctor stale-default reminder."""
+
+    def test_all_defaults_flagged(self) -> None:
+        config = WorkflowConfig(requirement_file="r.txt")
+        flagged = dict(default_model_roles(config))
+        # A bare config never overrides models, so all four roles surface.
+        assert set(flagged) == {"planner", "developer", "reviewer", "tester"}
+
+    def test_overridden_model_not_flagged(self) -> None:
+        config = WorkflowConfig(
+            requirement_file="r.txt",
+            planner_model="my-custom-future-model",
+        )
+        flagged = dict(default_model_roles(config))
+        assert "planner" not in flagged
+        # The roles left on defaults are still reported.
+        assert "developer" in flagged
+
+    def test_all_overridden_returns_empty(self) -> None:
+        config = WorkflowConfig(
+            requirement_file="r.txt",
+            planner_model="a",
+            developer_model="b",
+            reviewer_model="c",
+            tester_model="d",
+        )
+        assert default_model_roles(config) == []

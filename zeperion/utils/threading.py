@@ -28,7 +28,6 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ def sanitize_thread_id(value: str) -> str:
     return safe.strip("._") or "default"
 
 
-def detect_git_branch(project_dir: str | Path = ".") -> Optional[str]:
+def detect_git_branch(project_dir: str | Path = ".") -> str | None:
     """Return the current git branch name, or ``None`` if undetectable.
 
     Returns ``None`` for:
@@ -83,7 +82,7 @@ def detect_git_branch(project_dir: str | Path = ".") -> Optional[str]:
 
 
 def default_thread_id(
-    explicit: Optional[str] = None,
+    explicit: str | None = None,
     *,
     project_dir: str | Path = ".",
     fallback: str = "main",

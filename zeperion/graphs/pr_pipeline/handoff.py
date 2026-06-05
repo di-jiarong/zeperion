@@ -1,14 +1,13 @@
 """Planner -> PR pipeline handoff helpers."""
 
 from pathlib import Path
-from typing import Optional
 
 from zeperion.agents.base import _clean_pr_title
 from zeperion.parsers import SectionParser
 from zeperion.storage import StateStorage
 
 
-def derive_sibling_multi_agent_thread(thread_id: str) -> Optional[str]:
+def derive_sibling_multi_agent_thread(thread_id: str) -> str | None:
     """Heuristic: ``"foo-pr"`` -> ``"foo"``. Otherwise ``None``.
 
     The README's recommended pattern is to run multi_agent on
@@ -24,7 +23,7 @@ def derive_sibling_multi_agent_thread(thread_id: str) -> Optional[str]:
 
 def load_planner_handoff_from_sibling_thread(
     state_dir: Path, sibling_thread_id: str
-) -> dict[str, Optional[str]]:
+) -> dict[str, str | None]:
     """Read ``state_dir/threads/<sibling>/planner_output.txt`` and
     extract the PR_TITLE / TASK_ID the Planner emitted.
 

@@ -83,6 +83,42 @@ def probe_cli_runnable(tool: str, args: list[str], *, timeout: int = 10) -> Prob
     return ProbeResult(False, detail)
 
 
+def probe_claude_output_format(tool: str = "claude", *, timeout: int = 10) -> ProbeResult:
+    """Confirm the Claude CLI advertises ``--output-format`` in its help.
+
+    ``ClaudeCodeAgent`` runs ``claude --print --output-format json`` to
+    read real token usage. Older CLI builds reject the flag with a
+    non-zero exit, which would fail invocations (the agent self-heals by
+    retrying in plain-text mode, but then usage is only estimated). A
+    plain ``which`` / ``--version`` probe can't tell a flag-supporting
+    build from one that predates it, so we grep ``--help`` for the flag
+    name — cheap and reliable since CLIs list their flags there.
+    """
+    if shutil.which(tool) is None:
+        return ProbeResult(False, f"{tool} not found on PATH")
+    try:
+        proc = subprocess.run(
+            [tool, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        return ProbeResult(False, f"failed to launch: {exc}")
+    except subprocess.TimeoutExpired:
+        return ProbeResult(False, f"timed out after {timeout}s")
+
+    haystack = f"{proc.stdout}\n{proc.stderr}"
+    if "--output-format" in haystack:
+        return ProbeResult(True, "--output-format supported")
+    return ProbeResult(
+        False,
+        "CLI lacks --output-format; upgrade claude for exact token usage "
+        "(falls back to estimates otherwise)",
+    )
+
+
 def probe_gh_auth(*, timeout: int = 10) -> ProbeResult:
     """Check ``gh auth status`` — the PR pipeline can't push/PR without it.
 

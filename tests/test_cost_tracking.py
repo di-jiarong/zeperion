@@ -149,6 +149,26 @@ class TestSummariseTokens:
         assert s["agent_calls_with_usage"] == 2
         assert s["completed_agent_calls"] == 3
 
+    def test_estimated_calls_are_tracked(self):
+        # A mix of reported + estimated usage: both count toward the
+        # totals, but the estimated coverage is surfaced separately so
+        # the panel can mark the figure approximate.
+        events = [
+            _completed_event("planner", input_tokens=100, output_tokens=50),
+            _completed_event(
+                "developer", input_tokens=200, output_tokens=80, estimated=True
+            ),
+        ]
+        s = summarise(events)
+        assert s["tokens_total"] == 430
+        assert s["agent_calls_with_usage"] == 2
+        assert s["agent_calls_estimated"] == 1
+
+    def test_no_estimated_calls_defaults_zero(self):
+        events = [_completed_event("planner", input_tokens=1, output_tokens=2)]
+        s = summarise(events)
+        assert s["agent_calls_estimated"] == 0
+
     def test_zero_tokens_distinct_from_unknown(self):
         # A backend reporting 0/0 (degenerate but possible — eg. a
         # cached response) must still be COUNTED. summary tokens are 0

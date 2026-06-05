@@ -5,7 +5,6 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -72,9 +71,9 @@ def _spawn_detached_run(
     config_file: str,
     mode: str,
     resume: bool,
-    thread_id: Optional[str],
-    log_format: Optional[str],
-    from_thread: Optional[str] = None,
+    thread_id: str | None,
+    log_format: str | None,
+    from_thread: str | None = None,
     no_pr_pipeline: bool = False,
     yes: bool = False,
     allow_dirty: bool = False,
@@ -274,7 +273,7 @@ def prerun_gate(
     *,
     yes: bool,
     allow_dirty: bool,
-    interactive: Optional[bool] = None,
+    interactive: bool | None = None,
 ) -> None:
     """Render the pre-run safety summary and gate the run on it.
 
@@ -491,7 +490,11 @@ def doctor(
     """
     import os
 
-    from zeperion.utils.probe import probe_cli_runnable, probe_gh_auth
+    from zeperion.utils.probe import (
+        probe_claude_output_format,
+        probe_cli_runnable,
+        probe_gh_auth,
+    )
 
     config, config_path = _load_config_for_command(config_file)
     checks: list[tuple[str, bool, str]] = []
@@ -523,6 +526,7 @@ def doctor(
         "reviewer": config.reviewer_agent_type,
         "tester": config.tester_agent_type,
     }
+    uses_claude_code = False
     for role, agent_type in role_agent_types.items():
         if agent_type == "pi":
             tool = config.pi_cli_tool
@@ -536,6 +540,7 @@ def doctor(
             if probe:
                 res = _probe_tool(tool, ["--version"])
                 add(f"{role} backend", res.ok, f"{tool}: {res.detail}")
+                uses_claude_code = True
             else:
                 add(f"{role} backend", shutil.which(tool) is not None, tool)
         elif agent_type == "anthropic":
@@ -544,6 +549,15 @@ def doctor(
             add(f"{role} backend", has_key, detail)
         else:
             add(f"{role} backend", False, f"unknown backend: {agent_type}")
+
+    # The claude_code backend now invokes ``claude --output-format json``
+    # to read exact token usage. A bare ``--version`` probe can't tell
+    # whether this CLI build actually supports that flag, so confirm it
+    # once (the agent self-heals to plain-text estimates if it doesn't,
+    # hence this is a soft heads-up, not a run-blocker).
+    if uses_claude_code and probe:
+        fmt = probe_claude_output_format(config.claude_cli_tool)
+        add("claude --output-format", fmt.ok, f"{config.claude_cli_tool}: {fmt.detail}")
 
     # GitHub auth only matters when the PR pipeline could run (repo or
     # token configured). Probing it unconditionally would falsely fail
@@ -568,6 +582,46 @@ def doctor(
         status = "[green]OK[/green]" if ok else "[red]Needs attention[/red]"
         table.add_row(name, status, detail)
     console.print(table)
+
+    # Soft reminder: roles still on the shipped default model name. These
+    # baked-in names (e.g. claude-opus-4-7) go stale over time; doctor
+    # can't verify a name is current without an API call, so this is
+    # advisory only and never flips the exit code.
+    from zeperion.config import default_model_roles
+
+    stale_defaults = default_model_roles(config)
+    if stale_defaults:
+        console.print(
+            "\n[yellow]\u26a0  Using built-in default model name(s) "
+            "(verify they're still current):[/yellow]"
+        )
+        for role, model in stale_defaults:
+            console.print(f"  [dim]{role}[/dim]: [cyan]{model}[/cyan]")
+        console.print(
+            "  [dim]Override per role in .zeperion/config.yaml "
+            "(planner_model / developer_model / ...).[/dim]"
+        )
+
+    from zeperion.utils.prerun import build_prerun_summary
+
+    prerun_summary = build_prerun_summary(config)
+    if prerun_summary.token_budget_misleading:
+        blind = ", ".join(prerun_summary.usage_blind_roles)
+        console.print(
+            f"\n[yellow]\u26a0  max_total_tokens={prerun_summary.max_total_tokens:,} "
+            f"is only a partial budget guard.[/yellow]"
+        )
+        console.print(
+            "[dim]count_estimated_tokens is off, so these estimate-only "
+            f"role(s) don't count toward the cap: {blind}. Enable "
+            "count_estimated_tokens to enforce it.[/dim]"
+        )
+    elif prerun_summary.token_budget_estimated:
+        est = ", ".join(prerun_summary.estimated_roles)
+        console.print(
+            f"\n[dim]max_total_tokens={prerun_summary.max_total_tokens:,} is "
+            f"enforced; role(s) counted via estimate (approximate): {est}.[/dim]"
+        )
 
     failures = [c for c in checks if not c[1]]
     if failures:
@@ -654,12 +708,12 @@ def verify(
         "-c",
         help="Path to config file",
     ),
-    command: Optional[list[str]] = typer.Option(
+    command: list[str] | None = typer.Option(
         None,
         "--command",
         help="Override configured tester_verify_commands. Can be passed multiple times.",
     ),
-    timeout: Optional[int] = typer.Option(
+    timeout: int | None = typer.Option(
         None,
         "--timeout",
         help="Per-command timeout in seconds. Defaults to config value.",
@@ -793,6 +847,142 @@ def verify(
     console.print("\n[bold green]All verification commands passed.[/bold green]")
 
 
+@app.command()
+def changes(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    stat: bool = typer.Option(
+        False,
+        "--stat",
+        help="Only list changed files; skip the full unified diff.",
+    ),
+):
+    """Show the project's current working-tree changes (read-only).
+
+    A ``multi_agent`` run on a file-writing backend edits files in place.
+    When the pre-run gate started from a clean tree, this snapshot is a
+    convenient review of what the agents left behind. If the run used
+    ``--allow-dirty`` or you edited files during the run, those edits are
+    included too. This is a thin, safe wrapper over ``git status`` +
+    ``git diff HEAD`` that never modifies anything — use
+    [cyan]zeperion discard[/cyan] to roll changes back.
+    """
+    from zeperion.utils.changes import collect_changes
+
+    config, _ = _load_config_for_command(config_file)
+    snapshot = collect_changes(config.project_dir)
+
+    if not snapshot.is_repo:
+        console.print(
+            f"[yellow]Not a git repository:[/yellow] {config.project_dir}\n"
+            "  'zeperion changes' needs git to tell apart the agents' edits."
+        )
+        raise typer.Exit(1)
+
+    if snapshot.is_clean:
+        console.print("[green]Working tree is clean[/green] — no agent changes to show.")
+        return
+
+    table = Table(title="Agent changes", show_header=True, header_style="bold cyan")
+    table.add_column("Kind", style="yellow", no_wrap=True)
+    table.add_column("Path", style="cyan")
+    for path in snapshot.modified:
+        table.add_row("modified", path)
+    for path in snapshot.untracked:
+        table.add_row("new", path)
+    console.print(table)
+    console.print(
+        f"[dim]{len(snapshot.modified)} modified, "
+        f"{len(snapshot.untracked)} new file(s).[/dim]"
+    )
+
+    if not stat and snapshot.diff.strip():
+        console.print("\n[bold]Diff (tracked files):[/bold]")
+        from rich.syntax import Syntax
+
+        console.print(Syntax(snapshot.diff, "diff", theme="ansi_dark", word_wrap=False))
+    if snapshot.untracked:
+        console.print(
+            "\n[dim]New (untracked) files are listed above but not shown in the "
+            "diff. Open them directly to review.[/dim]"
+        )
+    console.print(
+        "\n[bold]Next:[/bold] keep them (commit / "
+        "[cyan]zeperion ship[/cyan]) or drop them "
+        "([cyan]zeperion discard --yes[/cyan])."
+    )
+
+
+@app.command()
+def discard(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Required. Confirm the destructive reset; without it the command refuses.",
+    ),
+):
+    """Roll back every uncommitted change in the project tree. Destructive.
+
+    Runs ``git reset --hard HEAD`` (drops tracked edits) then
+    ``git clean -fd`` (deletes untracked files the agents created). This
+    is irreversible — there is no undo — so the command refuses to do
+    anything unless you pass [cyan]--yes[/cyan]. Review first with
+    [cyan]zeperion changes[/cyan].
+    """
+    from zeperion.utils.changes import collect_changes, discard_changes
+
+    config, _ = _load_config_for_command(config_file)
+    snapshot = collect_changes(config.project_dir)
+
+    if not snapshot.is_repo:
+        console.print(
+            f"[yellow]Not a git repository:[/yellow] {config.project_dir}\n"
+            "  Nothing to discard."
+        )
+        raise typer.Exit(1)
+
+    if snapshot.is_clean:
+        console.print("[green]Working tree is already clean[/green] — nothing to discard.")
+        return
+
+    console.print(
+        f"[bold red]About to permanently discard {snapshot.total_count} change(s):[/bold red]"
+    )
+    for path in snapshot.modified:
+        console.print(f"  [yellow]reset[/yellow]  {path}")
+    for path in snapshot.untracked:
+        console.print(f"  [red]delete[/red] {path}")
+
+    if not yes:
+        console.print(
+            "\n[bold red]Refusing to discard without confirmation.[/bold red]\n"
+            "  This runs 'git reset --hard' + 'git clean -fd' and cannot be undone.\n"
+            "  Review with [cyan]zeperion changes[/cyan], then re-run with "
+            "[cyan]zeperion discard --yes[/cyan]."
+        )
+        raise typer.Exit(1)
+
+    result = discard_changes(config.project_dir)
+    if not result.ok:
+        console.print(f"[red]Discard failed:[/red] {result.error}")
+        raise typer.Exit(1)
+    console.print(
+        f"[bold green]\u2713 Discarded.[/bold green] "
+        f"Reset {result.reverted} tracked file(s), removed {result.removed} new file(s)."
+    )
+
+
 # Graph nodes that only mutate counters/terminal state; printing a
 # ``→ increment_round`` style line for them is pure noise in the run log.
 _QUIET_NODES = {"increment_round", "increment_fix"}
@@ -845,7 +1035,7 @@ def run(
         "-r",
         help="Resume from last checkpoint",
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None,
         "--thread-id",
         "-t",
@@ -856,7 +1046,7 @@ def run(
             "Falls back to 'main' outside a git repo."
         ),
     ),
-    log_format: Optional[str] = typer.Option(
+    log_format: str | None = typer.Option(
         None,
         "--log-format",
         help="Log format: 'text' (default) or 'json'. "
@@ -873,7 +1063,7 @@ def run(
             "``zeperion stop -t <thread_id>``."
         ),
     ),
-    from_thread: Optional[str] = typer.Option(
+    from_thread: str | None = typer.Option(
         None,
         "--from-thread",
         help=(
@@ -1132,7 +1322,7 @@ def ship(
         "-c",
         help="Path to config file",
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None,
         "--thread-id",
         "-t",
@@ -1144,7 +1334,7 @@ def ship(
             "first via the standard sibling-thread heuristic."
         ),
     ),
-    log_format: Optional[str] = typer.Option(
+    log_format: str | None = typer.Option(
         None,
         "--log-format",
         help="Log format: 'text' (default) or 'json'.",
@@ -1203,7 +1393,7 @@ def status(
         "-c",
         help="Path to config file",
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None,
         "--thread-id",
         "-t",
@@ -1265,7 +1455,7 @@ def status(
     _render_status_panel(config, thread_id)
 
 
-def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> None:
+def _render_status_panel(config: WorkflowConfig, thread_id: str | None) -> None:
     """Read state for ``thread_id`` and print the status panel once.
 
     Extracted from the ``status`` command body so ``--watch`` mode can
@@ -1397,15 +1587,19 @@ def _render_status_panel(config: WorkflowConfig, thread_id: Optional[str]) -> No
         total_t = summary["tokens_total"]
         n_known = summary["agent_calls_with_usage"]
         n_total = summary["completed_agent_calls"]
+        n_est = summary.get("agent_calls_estimated", 0)
         coverage = (
             f"[dim]({n_known}/{n_total} agent calls reported usage)[/dim]"
             if n_known < n_total
             else ""
         )
+        est_note = (
+            f" [yellow](~{n_est} estimated)[/yellow]" if n_est else ""
+        )
         console.print(
             f"[bold]Tokens:[/bold] in [cyan]{in_t:,}[/cyan]  "
             f"out [cyan]{out_t:,}[/cyan]  "
-            f"total [cyan]{total_t:,}[/cyan] {coverage}"
+            f"total [cyan]{total_t:,}[/cyan] {coverage}{est_note}"
         )
 
     pipeline_state = storage.load_pipeline_state()
@@ -1638,7 +1832,7 @@ def logs(
         "-c",
         help="Path to config file",
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None,
         "--thread-id",
         "-t",
@@ -1768,7 +1962,7 @@ def stop(
         "-c",
         help="Path to config file",
     ),
-    thread_id: Optional[str] = typer.Option(
+    thread_id: str | None = typer.Option(
         None,
         "--thread-id",
         "-t",

@@ -38,8 +38,8 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 _SPAWNED_ARGV_BY_PID: dict[int, str] = {}
@@ -68,7 +68,7 @@ def write_pidfile(state_dir: Path, thread_id: str, pid: int) -> Path:
     return path
 
 
-def read_pidfile(state_dir: Path, thread_id: str) -> Optional[int]:
+def read_pidfile(state_dir: Path, thread_id: str) -> int | None:
     path = pidfile_path(state_dir, thread_id)
     if not path.exists():
         return None
@@ -242,7 +242,7 @@ def spawn_detached(
     state_dir: Path,
     thread_id: str,
     argv: Iterable[str],
-    env: Optional[dict] = None,
+    env: dict | None = None,
 ) -> int:
     """Start ``argv`` in a new session, redirected to the thread log.
 
@@ -292,7 +292,7 @@ def stop_detached(
     thread_id: str,
     timeout: float = 10.0,
     force: bool = False,
-) -> tuple[str, Optional[int]]:
+) -> tuple[str, int | None]:
     """Stop a previously detached run.
 
     Returns ``(status, pid)`` where ``status`` is one of:

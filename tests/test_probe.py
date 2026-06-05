@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 
-from zeperion.utils.probe import probe_cli_runnable, probe_gh_auth
+from zeperion.utils.probe import (
+    probe_claude_output_format,
+    probe_cli_runnable,
+    probe_gh_auth,
+)
 
 
 class TestProbeCliRunnable:
@@ -34,3 +39,33 @@ class TestProbeGhAuth:
         res = probe_gh_auth()
         assert res.ok is False
         assert "not found" in res.detail
+
+
+class TestProbeClaudeOutputFormat:
+    def _fake_help(self, monkeypatch, help_text: str) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _tool: "/usr/bin/claude")
+
+        def fake_run(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                args=["claude", "--help"], returncode=0, stdout=help_text, stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def test_missing_binary_is_failure(self, monkeypatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda _tool: None)
+        res = probe_claude_output_format("claude")
+        assert res.ok is False
+        assert "not found on PATH" in res.detail
+
+    def test_flag_present_in_help_succeeds(self, monkeypatch) -> None:
+        self._fake_help(monkeypatch, "Usage: claude --print --output-format <fmt>")
+        res = probe_claude_output_format("claude")
+        assert res.ok is True
+        assert "supported" in res.detail
+
+    def test_flag_absent_from_help_fails(self, monkeypatch) -> None:
+        self._fake_help(monkeypatch, "Usage: claude --print --model <m>")
+        res = probe_claude_output_format("claude")
+        assert res.ok is False
+        assert "--output-format" in res.detail

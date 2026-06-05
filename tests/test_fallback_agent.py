@@ -117,7 +117,7 @@ class TestFallbackAgent:
         with pytest.raises(AgentInvocationError, match="third-fail"):
             await agent.invoke("p")
 
-    async def test_non_invocation_errors_are_NOT_fallback_triggers(self) -> None:
+    async def test_non_invocation_errors_are_NOT_fallback_triggers(self) -> None:  # noqa: N802 - NOT capitalised for emphasis: this is the negative case
         # A programmer bug must propagate immediately — falling back
         # would only burn tokens without changing the outcome.
         class _Boom(_ScriptedAgent):

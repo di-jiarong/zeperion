@@ -37,6 +37,17 @@ from zeperion.models import WorkflowConfig
 # ``messages.create`` call with no tools / no file IO (see CLAUDE.md).
 _FILE_WRITING_BACKENDS: frozenset[str] = frozenset({"pi", "claude_code"})
 
+# Backends that report *exact* per-invocation token usage to the graph:
+# ``AnthropicAgent`` via the SDK, ``ClaudeCodeAgent`` via
+# ``--output-format json``. Their spend always counts toward the cap.
+_REAL_USAGE_BACKENDS: frozenset[str] = frozenset({"anthropic", "claude_code"})
+
+# Backends whose token usage is *estimated* from prompt/response length
+# because they may not report it (``pi``). Estimated spend counts toward
+# the cap only when ``count_estimated_tokens`` is enabled (the default),
+# so the cap is a real ceiling for every backend.
+_ESTIMATED_USAGE_BACKENDS: frozenset[str] = frozenset({"pi"})
+
 
 @dataclass(frozen=True)
 class GitStatus:
@@ -64,11 +75,48 @@ class PrerunSummary:
     tester_commands: list[str]
     tester_timeout_seconds: int
     anthropic_developer_no_writes: bool
+    # The configured ``max_total_tokens`` cap (0 = unlimited).
+    max_total_tokens: int
+    # Whether estimated usage counts toward the cap (config mirror).
+    count_estimated_tokens: bool
+    # Active roles whose spend is counted via *estimate* (pi). Approximate
+    # but still enforced when ``count_estimated_tokens`` is on.
+    estimated_roles: list[str]
+    # Active roles whose spend won't count toward the cap *at all* — i.e.
+    # estimate-only roles when ``count_estimated_tokens`` is off. These are
+    # genuinely invisible to the guardrail.
+    usage_blind_roles: list[str]
 
     @property
     def tester_text_only(self) -> bool:
         """True when the Tester has no executable verification to ground on."""
         return not self.tester_commands
+
+    @property
+    def token_budget_misleading(self) -> bool:
+        """True when a token cap is set but some active role won't count.
+
+        With ``count_estimated_tokens`` off, estimate-only backends
+        (``pi``) contribute nothing, so the running total under-counts the
+        real spend and the cap may never trip. Surfacing this stops
+        operators from trusting a guardrail that is silently a no-op for
+        their backend mix.
+        """
+        return self.max_total_tokens > 0 and bool(self.usage_blind_roles)
+
+    @property
+    def token_budget_estimated(self) -> bool:
+        """True when the cap is enforced but partly via approximate counts.
+
+        i.e. a cap is set, estimated usage is being counted, and at least
+        one active role is estimate-backed (``pi``). The cap is real, but
+        the operator should know part of the total is a heuristic.
+        """
+        return (
+            self.max_total_tokens > 0
+            and self.count_estimated_tokens
+            and bool(self.estimated_roles)
+        )
 
 
 def git_working_tree_status(project_dir: str | Path, *, max_sample: int = 5) -> GitStatus:
@@ -125,6 +173,20 @@ def build_prerun_summary(config: WorkflowConfig) -> PrerunSummary:
         config.developer_agent_type == "anthropic"
         and not config.acknowledge_anthropic_developer_no_file_writes
     )
+    # A disabled Reviewer never runs, so it spends nothing and shouldn't
+    # count toward any budget warning even on a pi/claude_code backend —
+    # mirror the file_writing_roles exclusion above.
+    def _active(role: str) -> bool:
+        return not (role == "reviewer" and not config.enable_reviewer)
+
+    estimated_roles = [
+        role
+        for role, backend in role_backends.items()
+        if backend in _ESTIMATED_USAGE_BACKENDS and _active(role)
+    ]
+    # Estimate-only roles are invisible to the cap only when estimated
+    # spend isn't counted. Real-usage backends always count.
+    usage_blind_roles = [] if config.count_estimated_tokens else list(estimated_roles)
     return PrerunSummary(
         git=git_working_tree_status(config.project_dir),
         role_backends=role_backends,
@@ -132,6 +194,10 @@ def build_prerun_summary(config: WorkflowConfig) -> PrerunSummary:
         tester_commands=list(config.tester_verify_commands),
         tester_timeout_seconds=config.tester_verify_timeout_seconds,
         anthropic_developer_no_writes=anthropic_developer_no_writes,
+        max_total_tokens=config.max_total_tokens,
+        count_estimated_tokens=config.count_estimated_tokens,
+        estimated_roles=estimated_roles,
+        usage_blind_roles=usage_blind_roles,
     )
 
 
@@ -177,6 +243,26 @@ def render_prerun_summary(summary: PrerunSummary, console) -> None:
         lines.append(
             "[yellow]\u26a0  Developer is on 'anthropic' \u2014 no files will be "
             "modified this run.[/yellow]"
+        )
+
+    if summary.token_budget_misleading:
+        blind = ", ".join(summary.usage_blind_roles)
+        lines.append("")
+        lines.append(
+            f"[bold yellow]\u26a0  max_total_tokens={summary.max_total_tokens:,} is set, "
+            f"but count_estimated_tokens is off and these roles only have "
+            f"estimated usage: {blind}.[/bold yellow]"
+        )
+        lines.append(
+            "[yellow]   Their spend won't count, so the cap may never trip. "
+            "Enable count_estimated_tokens to enforce it.[/yellow]"
+        )
+    elif summary.token_budget_estimated:
+        est = ", ".join(summary.estimated_roles)
+        lines.append("")
+        lines.append(
+            f"[dim]Token budget {summary.max_total_tokens:,} enforced; these "
+            f"role(s) are counted via estimate (approximate): {est}.[/dim]"
         )
 
     lines.append("")
