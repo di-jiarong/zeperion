@@ -223,5 +223,5 @@ __marimo__/
 
 # Scratch / working notes that should not be committed
 temp/
-.zeperion/state/
-.zeperion/checkpoints.db*
+# ZEPERION config + runtime artifacts (config.yaml, state/, logs/, checkpoints)
+.zeperion/

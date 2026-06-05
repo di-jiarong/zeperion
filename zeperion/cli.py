@@ -344,8 +344,12 @@ def init(
 
     added = ensure_gitignore_entries(
         project_path / ".gitignore",
-        entries=[".zeperion/state/", ".zeperion/logs/"],
-        header_comment="# ZEPERION runtime artifacts (do not commit)",
+        # Ignore the whole .zeperion/ dir: it holds machine-generated
+        # config (config.yaml), runtime state (state/, logs/, checkpoints)
+        # and per-run artifacts. None of it should ride along with the
+        # target project's source commits or clash between collaborators.
+        entries=[".zeperion/"],
+        header_comment="# ZEPERION config + runtime artifacts (do not commit)",
     )
     if added:
         console.print(f"✓ Updated .gitignore (added {len(added)} entry/entries)")
