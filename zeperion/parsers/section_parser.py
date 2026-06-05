@@ -32,6 +32,17 @@ class MissingRequiredFieldError(ValueError):
             )
 
 
+# Characters an LLM commonly prepends to a marker line: indentation plus
+# Markdown decoration. Real Claude/Opus output writes markers as headings
+# (``## GLOBAL_STATUS: CONTINUE``) or bold (``**GLOBAL_STATUS:** CONTINUE``).
+# Before this was tolerated, a heading-style ``GLOBAL_STATUS`` failed the
+# ``^\s*`` anchor, the field read as "missing", and a passing review got
+# force-collapsed to BLOCKED by extract_required_enum. Keep this in sync
+# across extract_field / extract_section / has_section and the
+# next-section boundary in extract_section. ``-`` is last so it is literal.
+_LINE_PREFIX = r"[ \t#>*_`-]*"
+
+
 class SectionParser:
     """
     Lenient parser for structured LLM output.
@@ -39,6 +50,7 @@ class SectionParser:
     Handles common formatting variations:
     - Case insensitivity
     - Extra whitespace
+    - Leading Markdown decoration (``#`` headings, ``**bold**``, blockquotes)
     - Missing sections
     - Malformed markers
     """
@@ -72,7 +84,7 @@ class SectionParser:
         """
         # Normalize field name for matching (allow spaces and underscores)
         normalized = field_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^\s*{normalized}\s*:\s*(.+?)\s*$"
+        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*(.+?)\s*$"
 
         match = re.search(pattern, self.text, re.MULTILINE)
         if match:
@@ -195,7 +207,7 @@ class SectionParser:
         """
         # Find section start
         normalized = section_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^\s*{normalized}\s*:\s*$"
+        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*$"
         match = re.search(pattern, self.text, re.MULTILINE)
 
         if not match:
@@ -206,8 +218,10 @@ class SectionParser:
         # Find section end
         remaining = self.text[start:]
 
-        # Default stop: next section marker (WORD:)
-        next_section = re.search(r"\n\s*[A-Z][A-Z_\s]*:", remaining)
+        # Default stop: next section marker (WORD:), tolerating a leading
+        # Markdown prefix like ``## FIX_REQUEST:`` so headings still act as
+        # section boundaries instead of being swallowed.
+        next_section = re.search(rf"\n{_LINE_PREFIX}[A-Z][A-Z_\s]*:", remaining)
         end = next_section.start() if next_section else len(remaining)
 
         # Check explicit stop markers
@@ -299,7 +313,7 @@ class SectionParser:
             True if section exists
         """
         normalized = section_name.replace("_", r"[\s_]")
-        pattern = rf"(?i)^\s*{normalized}\s*:\s*$"
+        pattern = rf"(?i)^{_LINE_PREFIX}{normalized}\s*:\s*$"
         return re.search(pattern, self.text, re.MULTILINE) is not None
 
 

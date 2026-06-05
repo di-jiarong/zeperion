@@ -39,6 +39,39 @@ TEST_STATUS :PASS
         assert parser.extract_field("TASK_ID") == "task-789"
         assert parser.extract_field("TEST_STATUS") == "PASS"
 
+    def test_extract_field_markdown_heading_prefix(self):
+        """Markers emitted as Markdown headings must still parse.
+
+        Regression: real Claude/Opus output wrote ``## GLOBAL_STATUS:
+        CONTINUE``; the old ``^\\s*`` anchor rejected the ``## `` prefix,
+        the field read as missing, and a passing review was force-collapsed
+        to BLOCKED via extract_required_enum.
+        """
+        text = """
+## REVIEW_STATUS: PASS
+## GLOBAL_STATUS: CONTINUE
+"""
+        parser = SectionParser(text)
+        assert parser.extract_field("REVIEW_STATUS") == "PASS"
+        assert parser.extract_field("GLOBAL_STATUS") == "CONTINUE"
+        assert (
+            parser.extract_required_enum("GLOBAL_STATUS", GlobalStatus)
+            == GlobalStatus.CONTINUE
+        )
+
+    def test_extract_section_markdown_heading_prefix(self):
+        """``## SECTION:`` headings parse and bound each other."""
+        text = """
+## FINDINGS:
+- finding one
+## FIX_REQUEST:
+- NONE
+"""
+        parser = SectionParser(text)
+        assert parser.has_section("FINDINGS")
+        assert parser.extract_section("FINDINGS") == "- finding one"
+        assert parser.extract_section("FIX_REQUEST") == "- NONE"
+
     def test_extract_field_missing(self):
         """Test missing field returns None."""
         text = "TASK_ID: task-123"
