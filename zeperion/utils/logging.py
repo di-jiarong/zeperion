@@ -94,7 +94,17 @@ class JsonFormatter(logging.Formatter):
 
 
 class HumanFormatter(logging.Formatter):
-    """Default human-friendly format with ``key=value`` extra suffix."""
+    """Default human-friendly format: clean prose, no structured suffix.
+
+    Earlier this appended every ``extra=`` field as a ``key=value`` tail.
+    In practice that tail just *repeated* the human message (``planner
+    done in 82288ms | duration_ms=82288 event='agent_completed' role=
+    'planner' ...``) and made the console hard to read. The structured
+    payload still belongs in machine logs, so it is emitted in full by
+    :class:`JsonFormatter` (``--log-format json`` / ``ZEPERION_LOG_FORMAT
+    =json``). Text mode now trusts each call site to write a
+    self-contained message.
+    """
 
     BASE = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
@@ -102,12 +112,7 @@ class HumanFormatter(logging.Formatter):
         super().__init__(self.BASE)
 
     def format(self, record: logging.LogRecord) -> str:
-        base = super().format(record)
-        extras = _record_extras(record)
-        if not extras:
-            return base
-        suffix = " ".join(f"{k}={extras[k]!r}" for k in sorted(extras))
-        return f"{base} | {suffix}"
+        return super().format(record)
 
 
 def configure_logging(

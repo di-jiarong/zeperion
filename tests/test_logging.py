@@ -64,18 +64,21 @@ class TestJsonFormat:
 
 
 class TestHumanFormat:
-    def test_extras_appear_as_key_value_suffix(self) -> None:
+    def test_text_mode_is_clean_prose_without_kv_suffix(self) -> None:
+        """Text mode emits the message only; the structured ``extra=``
+        payload must NOT be appended as a ``key=value`` tail (that just
+        duplicated the human message). It still goes to JSON mode."""
         log, buf = _capture("text")
         log.info(
-            "done",
+            "planner done in 9m26s",
             extra={"event": "agent_completed", "duration_ms": 42, "role": "planner"},
         )
         line = buf.getvalue().strip()
-        assert "done" in line
-        # Keys appear sorted, with repr-quoted values.
-        assert "duration_ms=42" in line
-        assert "event='agent_completed'" in line
-        assert "role='planner'" in line
+        assert "planner done in 9m26s" in line
+        # No structured suffix leaks into the human line.
+        assert " | " not in line
+        assert "duration_ms=42" not in line
+        assert "event=" not in line
 
     def test_record_without_extras_unchanged(self) -> None:
         log, buf = _capture("text")

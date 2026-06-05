@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 SpanAttrSetter = Callable[[Any, AgentOutput], None]
 
 
+def _fmt_duration(ms: int) -> str:
+    """Render milliseconds as a compact human string: ``820ms`` / ``9m26s``."""
+    if ms < 1000:
+        return f"{ms}ms"
+    seconds = ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}m{secs:02d}s"
+
+
+def _enum_value(value: Any) -> Any:
+    """Return ``value.value`` for enums, else ``value`` unchanged."""
+    return getattr(value, "value", value)
+
+
 class MultiAgentNodes:
     """StateGraph node callables for Planner/Developer/Reviewer/Tester."""
 
@@ -139,12 +155,24 @@ class MultiAgentNodes:
                 **usage_event,
             },
         )
+        # Build a self-contained human message: "<role> done in 9m26s →
+        # CONTINUE [PASS]" with a token tail only when usage is known
+        # (claude_code/pi rarely report it, and "?/?" was pure noise).
+        status_bits = [str(_enum_value(output.global_status))]
+        if agent_name == "tester" and output.test_status is not None:
+            status_bits.append(str(_enum_value(output.test_status)))
+        status_str = " ".join(status_bits)
+        token_tail = ""
+        if usage_event:
+            token_tail = (
+                f" ({usage_event['input_tokens']}+{usage_event['output_tokens']} tok)"
+            )
         logger.info(
-            "%s done in %sms (tokens in/out: %s/%s)",
+            "%s done in %s \u2192 %s%s",
             agent_name,
-            duration_ms,
-            usage_event.get("input_tokens", "?"),
-            usage_event.get("output_tokens", "?"),
+            _fmt_duration(duration_ms),
+            status_str,
+            token_tail,
             extra={
                 "event": "agent_completed",
                 "role": agent_name,
@@ -185,11 +213,14 @@ class MultiAgentNodes:
         when the fallback chain was exhausted — callers must return the
         error patch unchanged so the graph routes straight to ``blocked``.
         """
+        fix_attempt = state.get("fix_attempt") or 0
+        fix_note = f", fix {fix_attempt}" if fix_attempt else ""
         logger.info(
-            "%s: round=%s fix_attempt=%s",
+            "%s started (round %s%s) via %s",
             name,
             state["round"],
-            state.get("fix_attempt"),
+            fix_note,
+            model,
             extra={
                 "event": "agent_start",
                 "role": name,

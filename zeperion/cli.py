@@ -361,6 +361,38 @@ def init(
     console.print("3. Check status: zeperion status")
 
 
+# Graph nodes that only mutate counters/terminal state; printing a
+# ``→ increment_round`` style line for them is pure noise in the run log.
+_QUIET_NODES = {"increment_round", "increment_fix"}
+
+
+def _enum_str(value) -> str:
+    """Render an enum as its ``.value`` (``development``), not ``PhaseType.X``."""
+    return str(getattr(value, "value", value))
+
+
+def _print_node_progress(node_name: str, node_state) -> None:
+    """Print one compact progress line per meaningful graph node.
+
+    Replaces the old multi-line ``→ node / Phase: PhaseType.X / Round: N``
+    block, which printed enum reprs and a line for every control node.
+    """
+    if node_name in _QUIET_NODES:
+        return
+    if not isinstance(node_state, dict):
+        console.print(f"[cyan]→ {node_name}[/cyan]")
+        return
+    bits = []
+    if node_state.get("phase") is not None:
+        bits.append(_enum_str(node_state["phase"]))
+    if node_state.get("round") is not None:
+        bits.append(f"round {node_state['round']}")
+    if node_state.get("test_status") is not None:
+        bits.append(f"test={_enum_str(node_state['test_status'])}")
+    suffix = f"  [dim]({', '.join(bits)})[/dim]" if bits else ""
+    console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
+
+
 @app.command()
 def run(
     mode: str = typer.Option(
@@ -579,14 +611,7 @@ def run(
                 graph = build_graph(saver)
                 async for event in graph.astream(initial_state, config_obj):
                     for node_name, node_state in event.items():
-                        console.print(f"[cyan]→ {node_name}[/cyan]")
-                        if "phase" in node_state:
-                            console.print(f"  Phase: {node_state['phase']}")
-                        if "round" in node_state:
-                            console.print(f"  Round: {node_state['round']}")
-                        if "test_status" in node_state:
-                            console.print(f"  Test: {node_state['test_status']}")
-                        console.print()
+                        _print_node_progress(node_name, node_state)
 
             console.print("[bold green]\u2713 Workflow completed![/bold green]")
 
