@@ -169,8 +169,21 @@ def get_default_config() -> Dict[str, Any]:
         Dictionary with default config values.
     """
     defaults = WorkflowConfig.model_fields
+    # NOTE: the values below are written verbatim into
+    # ``<project>/.zeperion/config.yaml`` and later re-anchored by
+    # ``load_config_from_yaml`` *against that config file's directory*
+    # (``.zeperion/``), not the project root. So the relative paths
+    # here are expressed relative to ``.zeperion/``:
+    #   ``..``                -> project root
+    #   ``../requirement.txt``-> ``<project>/requirement.txt`` (where init writes it)
+    #   ``state``             -> ``<project>/.zeperion/state`` (where init mkdir's it)
+    # Using the model's own defaults (``.`` / ``.zeperion/state``) here
+    # would mis-resolve to ``.zeperion/`` / ``.zeperion/.zeperion/state``
+    # and make a fresh ``zeperion init`` project fail on ``run`` (the
+    # requirement file would not be found and agents would edit
+    # ``.zeperion/`` instead of the project).
     return {
-        "requirement_file": "./requirement.txt",
+        "requirement_file": "../requirement.txt",
         "planner_model": defaults["planner_model"].default,
         "developer_model": defaults["developer_model"].default,
         "reviewer_model": defaults["reviewer_model"].default,
@@ -183,8 +196,8 @@ def get_default_config() -> Dict[str, Any]:
         "max_fix_attempts": defaults["max_fix_attempts"].default,
         "max_total_tokens": defaults["max_total_tokens"].default,
         "enable_reviewer": defaults["enable_reviewer"].default,
-        "project_dir": defaults["project_dir"].default,
-        "state_dir": defaults["state_dir"].default,
+        "project_dir": "..",
+        "state_dir": "state",
         "claude_cli_tool": defaults["claude_cli_tool"].default,
         "claude_cli_timeout": defaults["claude_cli_timeout"].default,
         "claude_cli_use_worktree": defaults["claude_cli_use_worktree"].default,
