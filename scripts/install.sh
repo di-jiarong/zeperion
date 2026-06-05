@@ -110,7 +110,8 @@ Next:
   zeperion run --thread-id feature-x
 
 Maintenance:
-  pipx upgrade zeperion        # snapshot installs only; editable picks up git pulls
-  pipx reinstall zeperion      # rebuild the isolated env
+  zeperion update              # git pull the source + reinstall deps (recommended)
+  zeperion update --extras "anthropic,web"   # also refresh extras
+  pipx reinstall zeperion      # rebuild the isolated env from scratch
   pipx uninstall zeperion      # remove the global command
 EOF

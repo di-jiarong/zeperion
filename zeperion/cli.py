@@ -1382,6 +1382,81 @@ def serve(
 
 
 @app.command()
+def update(
+    extras: str = typer.Option(
+        "",
+        "--extras",
+        help=(
+            "Comma-separated extras to (re)install, e.g. 'anthropic,web'. "
+            "Empty keeps whatever is already installed."
+        ),
+    ),
+    no_pull: bool = typer.Option(
+        False,
+        "--no-pull",
+        help="Skip 'git pull'; just reinstall the current source tree.",
+    ),
+):
+    """Update ZEPERION in place.
+
+    For the common (editable) install this runs ``git pull`` in the source
+    checkout and reinstalls it into *this* command's own environment — so
+    new dependencies from an updated ``pyproject.toml`` land too. Because
+    ``sys.executable`` is the interpreter the ``zeperion`` shim runs on,
+    this targets the right venv whether you installed via pipx or pip.
+
+    A wheel/PyPI install (no local source checkout) can't self-update; the
+    command prints the correct ``pipx``/``pip`` upgrade line instead.
+    """
+    import subprocess
+
+    # cli.py lives at <root>/zeperion/cli.py, so root is two levels up.
+    root = Path(__file__).resolve().parent.parent
+    has_source = (root / "pyproject.toml").exists()
+    is_git = (root / ".git").exists()
+
+    console.print(f"[bold]ZEPERION update[/bold]  (current: {__version__})")
+    console.print(f"  source: {root}")
+
+    if not has_source:
+        on_pipx = "pipx" in sys.prefix or "/pipx/" in sys.executable
+        console.print(
+            "[yellow]No source checkout found next to the package "
+            "(installed from a wheel/PyPI).[/yellow]\n"
+            "Update with:"
+        )
+        if on_pipx:
+            console.print("  pipx upgrade zeperion")
+        else:
+            console.print("  pip install -U zeperion")
+        raise typer.Exit(0)
+
+    if is_git and not no_pull:
+        console.print("→ git pull --ff-only")
+        if subprocess.run(["git", "-C", str(root), "pull", "--ff-only"]).returncode:
+            console.print(
+                "[red]git pull failed.[/red] Resolve it manually "
+                "(uncommitted changes? diverged branch?), then re-run "
+                "'zeperion update'."
+            )
+            raise typer.Exit(1)
+    elif not is_git:
+        console.print("⚠ Not a git checkout; skipping pull, reinstalling as-is.")
+
+    spec = f"{root}[{extras.strip()}]" if extras.strip() else str(root)
+    cmd = [sys.executable, "-m", "pip", "install", "-e", spec]
+    console.print(f"→ {' '.join(cmd)}")
+    if subprocess.run(cmd).returncode:
+        console.print("[red]Reinstall failed.[/red] See pip output above.")
+        raise typer.Exit(1)
+
+    console.print(
+        "[bold green]✓ Updated.[/bold green] "
+        "Run 'zeperion version' to confirm."
+    )
+
+
+@app.command()
 def version():
     """Print the ZEPERION package version."""
     console.print(f"zeperion {__version__}")
