@@ -1,6 +1,7 @@
 """Base agent interface."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 
 from zeperion.models import (
     AgentOutput,
@@ -14,6 +15,11 @@ from zeperion.parsers.section_parser import (
     SectionParser,
     _strip_decorations,
 )
+
+#: Callback signature for real-time agent progress streaming.
+#: Receives a text chunk (may be partial) from the agent's output as it is
+#: generated. Called from within the agent's async execution context.
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 # Conservative upper bound for PR titles — GitHub itself accepts much
 # longer ones, but we truncate to keep PR lists scannable and to avoid
@@ -109,6 +115,7 @@ class BaseAgent(ABC):
         self,
         prompt: str,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         """
         Invoke the agent with a prompt.
@@ -116,6 +123,12 @@ class BaseAgent(ABC):
         Args:
             prompt: Input prompt for the agent
             session_id: Optional session ID for resuming
+            progress_callback: Optional async callback receiving text chunks
+                as the agent generates output. Called from within the
+                agent's async execution; implementations should call it
+                with meaningful progress text (e.g. assistant text deltas,
+                tool-call summaries) but never block the event loop for
+                long inside the callback.
 
         Returns:
             Parsed agent output

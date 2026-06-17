@@ -751,3 +751,158 @@ class TestExtractTextBlock:
         # empty string (e.g. mid-streaming truncation).
         blocks = [_Block(text=""), _Block(text="real")]
         assert _extract_text(blocks) == "real"
+
+
+class TestProgressCallbackSignature:
+    """Verify that all agent backends accept the new ``progress_callback``
+    keyword without requiring it — the parameter defaults to ``None`` so
+    existing callers are unaffected.
+    """
+
+    def test_pi_agent_accepts_progress_callback(self):
+        agent = PiAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
+        sig = agent.invoke
+        import inspect
+        params = inspect.signature(sig).parameters
+        assert "progress_callback" in params
+        assert params["progress_callback"].default is None
+
+    def test_anthropic_agent_accepts_progress_callback(self):
+        # Lazy import — looks at the class directly to avoid API-key guard.
+        from zeperion.agents.anthropic import AnthropicAgent
+        import inspect
+        params = inspect.signature(AnthropicAgent.invoke).parameters
+        assert "progress_callback" in params
+        assert params["progress_callback"].default is None
+
+    def test_claude_code_agent_accepts_progress_callback(self):
+        agent = ClaudeCodeAgent(role=AgentRole.DEVELOPER, model="claude-sonnet-4-6")
+        import inspect
+        params = inspect.signature(agent.invoke).parameters
+        assert "progress_callback" in params
+        assert params["progress_callback"].default is None
+
+    async def test_fallback_agent_passes_callback_to_primary(self):
+        """FallbackAgent must forward progress_callback to each agent in
+        the chain so the CLI's real-time display works regardless of which
+        model ends up handling the request."""
+        from zeperion.agents.fallback import FallbackAgent
+
+        called_with: list[str | None] = []
+
+        class _SpyPrimary(PiAgent):
+            async def invoke(self, prompt, session_id=None,
+                             progress_callback=None):
+                called_with.append("primary")
+                return AgentOutput(
+                    task_id="t1", global_status=GlobalStatus.CONTINUE,
+                    test_status=TestStatus.PENDING, raw_output="ok",
+                )
+
+        primary = _SpyPrimary(role=AgentRole.DEVELOPER, model="m1")
+        # Fake fallback that won't actually be called because primary succeeds.
+        class _SpyFallback(PiAgent):
+            async def invoke(self, prompt, session_id=None,
+                             progress_callback=None):
+                called_with.append("fallback")
+
+        fb = _SpyFallback(role=AgentRole.DEVELOPER, model="m2")
+        agent = FallbackAgent(primary, [fb])
+
+        async def _cb(text: str) -> None:
+            called_with.append(f"cb:{text[:20]}")
+
+        await agent.invoke("prompt", progress_callback=_cb)
+        assert called_with == ["primary"]
+
+
+class TestCLIProgressCallback:
+    """Unit tests for ``_make_progress_callback``, the line-buffered
+    console printer used by the ``zeperion run`` CLI command.
+    """
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        """Remove ANSI escape sequences so assertions work on plain text."""
+        import re
+        return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+    def test_buffers_and_prints_complete_lines(self, capsys):
+        import asyncio
+        from zeperion.cli import _make_progress_callback
+
+        cb = _make_progress_callback()
+
+        async def _feed():
+            await cb("Hello\nWorld\n")
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        assert "Hello" in plain
+        assert "World" in plain
+
+    def test_flushes_long_line_without_newline(self, capsys):
+        import asyncio
+        from zeperion.cli import _make_progress_callback, _PROGRESS_FLUSH_CHARS
+
+        cb = _make_progress_callback()
+        long_text = "X" * (_PROGRESS_FLUSH_CHARS + 10)
+
+        async def _feed():
+            await cb(long_text)
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        # The long line should be flushed even without a newline.
+        assert "X" * 10 in plain
+
+    def test_folds_after_max_lines(self, capsys):
+        import asyncio
+        from zeperion.cli import _make_progress_callback, _PROGRESS_MAX_LINES
+
+        cb = _make_progress_callback()
+
+        async def _feed():
+            for i in range(_PROGRESS_MAX_LINES + 5):
+                await cb(f"line {i}\n")
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        assert "output folded" in plain
+
+    def test_truncates_very_long_lines(self, capsys):
+        import asyncio
+        from zeperion.cli import _make_progress_callback, _PROGRESS_LINE_WIDTH
+
+        cb = _make_progress_callback()
+        very_long = "A" * (_PROGRESS_LINE_WIDTH + 50) + "\n"
+
+        async def _feed():
+            await cb(very_long)
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        # Should contain the truncation ellipsis character
+        assert "…" in plain
+        # Should NOT contain the full untruncated string
+        assert very_long.strip() not in plain
+
+    def test_empty_text_is_ignored(self, capsys):
+        import asyncio
+        from zeperion.cli import _make_progress_callback
+
+        cb = _make_progress_callback()
+
+        async def _feed():
+            await cb("")
+            await cb("   \n")
+            await cb("valid\n")
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        assert "valid" in plain
+        # Only valid text should produce output lines (whitespace-only
+        # lines are suppressed by the callback's ``if display.strip()``).
+        # Count lines with the pipe prefix — we expect exactly 1.
+        pipe_lines = [l for l in plain.split("\n") if "│" in l]
+        assert len(pipe_lines) == 1

@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
 from zeperion.models import AgentOutput, AgentRole, TokenUsage
 from zeperion.utils.token_estimate import estimate_usage
 
@@ -162,6 +162,7 @@ class ClaudeCodeAgent(BaseAgent):
         self,
         prompt: str,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         """Invoke ``claude --print`` with ``prompt`` on stdin.
 
@@ -170,6 +171,7 @@ class ClaudeCodeAgent(BaseAgent):
             session_id: When provided, the same session UUID is reused so
                 the CLI continues an existing conversation. The CLI
                 requires a *valid UUID*; non-UUID values are ignored.
+            progress_callback: Optional async callback for progress text.
 
         Raises:
             AgentInvocationError: For CLI launch errors, non-zero exit,
@@ -199,7 +201,8 @@ class ClaudeCodeAgent(BaseAgent):
             cmd = _with_session(self.build_command(execution_dir, json_output=True))
             logger.debug("Command: %s", " ".join(cmd))
             returncode, stdout, stderr = await self._spawn_and_communicate(
-                cmd, execution_dir, prompt_bytes
+                cmd, execution_dir, prompt_bytes,
+                progress_callback=progress_callback,
             )
             # Self-heal: an older Claude CLI that doesn't know
             # ``--output-format json`` exits non-zero with an
@@ -217,7 +220,8 @@ class ClaudeCodeAgent(BaseAgent):
                     self.build_command(execution_dir, json_output=False)
                 )
                 returncode, stdout, stderr = await self._spawn_and_communicate(
-                    cmd, execution_dir, prompt_bytes
+                    cmd, execution_dir, prompt_bytes,
+                    progress_callback=progress_callback,
                 )
         finally:
             if self.use_worktree and not self.keep_worktree:
@@ -259,15 +263,20 @@ class ClaudeCodeAgent(BaseAgent):
         cmd: list[str],
         execution_dir: Path,
         prompt_bytes: bytes,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> tuple[int, bytes, bytes]:
         """Run one ``claude`` subprocess and return ``(rc, stdout, stderr)``.
 
-        Handles process spawn, the progress heartbeat, and the hard
-        timeout. Raises :class:`AgentInvocationError` only for launch
-        failure or timeout; a non-zero exit is returned to the caller so
-        it can decide whether to retry (e.g. drop ``--output-format``).
-        Worktree cleanup is intentionally left to the caller so a retry
-        reuses the same execution dir.
+        When ``progress_callback`` is provided, stdout and stderr are read
+        concurrently (instead of the all-or-nothing ``communicate()``) and
+        stderr lines are forwarded to the callback so the operator can see
+        tool-call activity in real time.  stdout is still collected in
+        full for downstream parsing.
+
+        Raises :class:`AgentInvocationError` for launch failure or timeout;
+        a non-zero exit is returned to the caller so it can decide whether
+        to retry.
         """
         try:
             process = await asyncio.create_subprocess_exec(
@@ -287,12 +296,24 @@ class ClaudeCodeAgent(BaseAgent):
             if self.progress_interval_seconds > 0
             else None
         )
+
         try:
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt_bytes),
-                    timeout=self.timeout,
-                )
+                if progress_callback is not None and process.stdout is not None:
+                    # Streaming path: read stdout and stderr concurrently
+                    # so stderr (tool-call progress) reaches the operator
+                    # in real time.  stdout is still buffered fully.
+                    stdout, stderr = await asyncio.wait_for(
+                        self._stream_communicate(
+                            process, prompt_bytes, progress_callback
+                        ),
+                        timeout=self.timeout,
+                    )
+                else:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(input=prompt_bytes),
+                        timeout=self.timeout,
+                    )
             except asyncio.TimeoutError as exc:
                 process.kill()
                 await process.wait()
@@ -314,6 +335,58 @@ class ClaudeCodeAgent(BaseAgent):
             stdout,
             stderr,
         )
+
+    async def _stream_communicate(
+        self,
+        process: asyncio.subprocess.Process,
+        prompt_bytes: bytes,
+        progress_callback: ProgressCallback,
+    ) -> tuple[bytes, bytes]:
+        """Write stdin, then read stdout and stderr concurrently.
+
+        stderr lines are forwarded to ``progress_callback`` as they arrive
+        (Claude CLI emits tool-call activity there).  stdout is buffered
+        silently for final parsing.
+        """
+        if process.stdin is None:
+            raise AgentInvocationError("Claude CLI process missing stdin")
+
+        async def _write_stdin() -> None:
+            if process.stdin is not None:
+                process.stdin.write(prompt_bytes)
+                await process.stdin.drain()
+                process.stdin.close()
+
+        async def _read_stderr() -> bytes:
+            chunks: list[bytes] = []
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                chunks.append(line)
+                text = line.decode("utf-8", errors="replace").strip()
+                if text and progress_callback is not None:
+                    await progress_callback(text)
+            return b"".join(chunks)
+
+        async def _read_stdout() -> bytes:
+            chunks: list[bytes] = []
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        stdin_task = asyncio.create_task(_write_stdin())
+        stderr_task = asyncio.create_task(_read_stderr())
+        stdout_task = asyncio.create_task(_read_stdout())
+
+        await stdin_task
+        stdout = await stdout_task
+        stderr = await stderr_task
+
+        return stdout, stderr
 
     async def _heartbeat(self) -> None:
         """Emit a 'still running' log line every ``progress_interval_seconds``.

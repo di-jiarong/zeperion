@@ -73,7 +73,7 @@ class FakeAgent:
         self.role = role
         self.model = model
 
-    async def invoke(self, prompt, session_id=None) -> AgentOutput:
+    async def invoke(self, prompt, session_id=None, progress_callback=None) -> AgentOutput:
         if not FakeAgent.outputs:
             raise RuntimeError(
                 "FakeAgent ran out of pre-seeded outputs — script is buggy"

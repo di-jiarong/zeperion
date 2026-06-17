@@ -8,7 +8,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy
 
 from zeperion.agents import ClaudeCodeAgent, PiAgent
-from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
 from zeperion.agents.factory import create_agent as _create_agent_factory
 from zeperion.graphs.control import (
     block_workflow,
@@ -48,6 +48,7 @@ def create_multi_agent_graph(
     enable_checkpoint: bool | None = None,
     checkpoint_path: str | None = None,  # accepted for backward compatibility
     disable_pr_pipeline: bool = False,
+    progress_callback: ProgressCallback | None = None,
 ) -> StateGraph:
     """Create multi-agent workflow graph.
 
@@ -146,6 +147,7 @@ def create_multi_agent_graph(
         reviewer=reviewer,
         tester=tester,
         developer_can_edit_files=developer_can_edit_files,
+        progress_callback=progress_callback,
     )
 
     # PR Pipeline subgraph node — called when multi-agent work is done

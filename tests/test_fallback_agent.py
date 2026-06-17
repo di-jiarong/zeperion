@@ -53,7 +53,7 @@ class _ScriptedAgent(BaseAgent):
         super().__init__(role=role, model=model)
         self._script = list(script)
 
-    async def invoke(self, prompt: str, session_id: Any = None) -> AgentOutput:
+    async def invoke(self, prompt: str, session_id: Any = None, progress_callback: Any = None) -> AgentOutput:
         if not self._script:
             raise AssertionError(f"{self.model}: no scripted reply left")
         item = self._script.pop(0)
@@ -121,7 +121,7 @@ class TestFallbackAgent:
         # A programmer bug must propagate immediately — falling back
         # would only burn tokens without changing the outcome.
         class _Boom(_ScriptedAgent):
-            async def invoke(self, prompt: str, session_id: Any = None):
+            async def invoke(self, prompt: str, session_id: Any = None, progress_callback: Any = None):
                 raise ValueError("bug, not transient")
 
         primary = _Boom(AgentRole.TESTER, "a", [])
@@ -211,7 +211,7 @@ def workflow_repo(tmp_path: Path) -> Path:
 class _CrashingAgent(BaseAgent):
     """Always raises ``AgentInvocationError`` — simulates an LLM outage."""
 
-    async def invoke(self, prompt: str, session_id: Any = None) -> AgentOutput:
+    async def invoke(self, prompt: str, session_id: Any = None, progress_callback: Any = None) -> AgentOutput:
         raise AgentInvocationError(f"{self.role.value} is offline")
 
 
@@ -239,9 +239,9 @@ class TestGraphShortCircuitOnAgentFailure:
         seen_roles: list[AgentRole] = []
         original = _CrashingAgent.invoke
 
-        async def _track(self, prompt: str, session_id: Any = None):
+        async def _track(self, prompt: str, session_id: Any = None, progress_callback: Any = None):
             seen_roles.append(self.role)
-            return await original(self, prompt, session_id)
+            return await original(self, prompt, session_id, progress_callback=progress_callback)
 
         with patch.object(_CrashingAgent, "invoke", _track):
             final = await graph.ainvoke(create_initial_state(cfg))

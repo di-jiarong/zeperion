@@ -11,6 +11,7 @@ from zeperion.agents.base import (
     AgentInvocationError,
     AgentParseError,
     BaseAgent,
+    ProgressCallback,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - type-only imports
@@ -23,6 +24,7 @@ __all__ = [
     "AgentInvocationError",
     "AgentParseError",
     "BaseAgent",
+    "ProgressCallback",
     "AnthropicAgent",
     "ClaudeCodeAgent",
     "PiAgent",

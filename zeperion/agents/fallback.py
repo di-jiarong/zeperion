@@ -36,6 +36,7 @@ from collections.abc import Sequence
 from zeperion.agents.base import (
     AgentInvocationError,
     BaseAgent,
+    ProgressCallback,
 )
 from zeperion.models import AgentOutput, AgentRole
 
@@ -79,12 +80,15 @@ class FallbackAgent(BaseAgent):
         self,
         prompt: str,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         last_exc: AgentInvocationError | None = None
         for idx, agent in enumerate(self.chain):
             attempt = "primary" if idx == 0 else f"fallback#{idx}"
             try:
-                output = await agent.invoke(prompt, session_id)
+                output = await agent.invoke(
+                    prompt, session_id, progress_callback=progress_callback
+                )
                 if idx > 0:
                     # We want operators to *notice* when the primary
                     # silently degraded. INFO would get drowned out, so

@@ -1467,6 +1467,16 @@ def accept(
 # ``→ increment_round`` style line for them is pure noise in the run log.
 _QUIET_NODES = {"increment_round", "increment_fix"}
 
+# Maximum terminal width for progress lines (keep output scannable on
+# narrower screens while still showing enough context).
+_PROGRESS_LINE_WIDTH = 100
+# After this many progress lines per agent, fold further output into a
+# periodic heartbeat so we don't flood the terminal during long runs.
+_PROGRESS_MAX_LINES = 30
+# Flush the progress buffer after this many characters without a newline
+# so line-buffered output still reaches the operator promptly.
+_PROGRESS_FLUSH_CHARS = 160
+
 
 def _enum_str(value) -> str:
     """Render an enum as its ``.value`` (``development``), not ``PhaseType.X``."""
@@ -1493,6 +1503,81 @@ def _print_node_progress(node_name: str, node_state) -> None:
         bits.append(f"test={_enum_str(node_state['test_status'])}")
     suffix = f"  [dim]({', '.join(bits)})[/dim]" if bits else ""
     console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
+
+
+def _make_progress_callback():
+    """Return an async callback suitable for :class:`ProgressCallback`.
+
+    The callback buffers partial text from the agent and prints complete
+    lines to the console with a ``  \u2502 `` visual prefix.  After
+    ``_PROGRESS_MAX_LINES`` lines it switches to a periodic heartbeat
+    indicator so the terminal isn't flooded during long agent runs.
+    The state is captured in a closure and is *not* thread-safe \u2014 it must
+    only be awaited from a single event-loop task (the graph node that
+    invoked the agent).
+    """
+    buf: list[str] = []
+    line_count = 0
+    folded = False
+
+    async def _on_progress(text: str) -> None:
+        nonlocal buf, line_count, folded
+        if not text:
+            return
+
+        if folded:
+            # Already past the display cap; just log a heartbeat every
+            # _PROGRESS_FLUSH_CHARS accumulated characters.
+            buf.append(text)
+            if sum(len(c) for c in buf) >= _PROGRESS_FLUSH_CHARS:
+                console.print(
+                    "  [dim]  (agent still working...)[/dim]"
+                )
+                buf.clear()
+            return
+
+        buf.append(text)
+        combined = "".join(buf)
+
+        # Print every complete line in the buffer.
+        while "\n" in combined:
+            line, combined = combined.split("\n", 1)
+            line_count += 1
+            if line_count > _PROGRESS_MAX_LINES:
+                folded = True
+                console.print(
+                    "  [dim]  (output folded \u2014 agent still generating, "
+                    "full text in output file)[/dim]"
+                )
+                buf.clear()
+                return
+            display = line.rstrip()
+            if len(display) > _PROGRESS_LINE_WIDTH:
+                display = display[:_PROGRESS_LINE_WIDTH - 1] + "\u2026"
+            if display.strip():
+                console.print(f"  [dim]\u2502[/dim] {display}")
+        buf[:] = [combined] if combined else []
+
+        # Flush buffer when it gets long without a newline (streaming
+        # deltas from AnthropicAgent / PiAgent).
+        if len(combined) >= _PROGRESS_FLUSH_CHARS:
+            line_count += 1
+            if line_count > _PROGRESS_MAX_LINES:
+                folded = True
+                console.print(
+                    "  [dim]  (output folded \u2014 agent still generating, "
+                    "full text in output file)[/dim]"
+                )
+                buf.clear()
+                return
+            display = combined.rstrip()
+            if len(display) > _PROGRESS_LINE_WIDTH:
+                display = display[:_PROGRESS_LINE_WIDTH - 1] + "\u2026"
+            if display.strip():
+                console.print(f"  [dim]\u2502[/dim] {display}")
+            buf.clear()
+
+    return _on_progress
 
 
 async def _run_post_run_verify(
@@ -1974,12 +2059,18 @@ def run(
         # of scope this round, so we always disable it.
         disable_pr = no_pr_pipeline or use_workspace
 
+        # Create the real-time progress callback so agent output streams
+        # to the terminal while the agent is still running (instead of
+        # appearing only after the invocation completes).
+        progress_cb = _make_progress_callback()
+
         def build_graph(checkpointer):
             return create_multi_agent_graph(
                 run_config,
                 checkpointer=checkpointer,
                 thread_id=thread_id,
                 disable_pr_pipeline=disable_pr,
+                progress_callback=progress_cb,
             )
 
     elif mode == "pr_pipeline":

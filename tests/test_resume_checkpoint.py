@@ -60,7 +60,7 @@ class ScriptedAgent:
         cls.plan_calls = cls.dev_calls = cls.review_calls = cls.test_calls = 0
         cls.crash_dev_on_call = 0
 
-    async def invoke(self, prompt, session_id=None):
+    async def invoke(self, prompt, session_id=None, progress_callback=None):
         role = _role_name(self.role)
         if role == "planner":
             ScriptedAgent.plan_calls += 1
@@ -195,7 +195,7 @@ class TestInterruptResume:
                 self.role = role
                 self.model = model
 
-            async def invoke(self, prompt, session_id=None):
+            async def invoke(self, prompt, session_id=None, progress_callback=None):
                 role = _role_name(self.role)
                 if role == "planner":
                     OnceBlockingPlanner.plan_calls += 1

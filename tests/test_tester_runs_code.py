@@ -52,7 +52,7 @@ class CapturingFakeAgent:
         self.role = role
         self.model = model
 
-    async def invoke(self, prompt, session_id=None):
+    async def invoke(self, prompt, session_id=None, progress_callback=None):
         CapturingFakeAgent.invoked_prompts.append(
             (self.role.value, prompt)
         )

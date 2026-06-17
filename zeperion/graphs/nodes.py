@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
 from zeperion.models import (
     AgentOutput,
     GlobalStatus,
@@ -61,6 +61,7 @@ class MultiAgentNodes:
         reviewer: BaseAgent,
         tester: BaseAgent,
         developer_can_edit_files: bool,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         self.config = config
         self.thread_id = thread_id
@@ -72,6 +73,7 @@ class MultiAgentNodes:
         self.reviewer = reviewer
         self.tester = tester
         self.developer_can_edit_files = developer_can_edit_files
+        self.progress_callback = progress_callback
 
     def _record_agent_started(self, agent_name: str, state: WorkflowState) -> None:
         """Persist an ``agent_started`` event for status/log inspection."""
@@ -248,7 +250,11 @@ class MultiAgentNodes:
                 fix_attempt=state.get("fix_attempt"),
             ) as span:
                 started_at = time.monotonic()
-                output = await agent.invoke(prompt, state.get(f"{name}_session_id"))
+                output = await agent.invoke(
+                    prompt,
+                    state.get(f"{name}_session_id"),
+                    progress_callback=self.progress_callback,
+                )
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 span.set_attribute("zeperion.agent.duration_ms", duration_ms)
                 if span_attrs is not None:

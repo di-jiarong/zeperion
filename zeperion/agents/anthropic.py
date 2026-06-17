@@ -7,7 +7,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
-from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
 from zeperion.models import AgentOutput, AgentRole, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ class AnthropicAgent(BaseAgent):
         self,
         prompt: str,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         """
         Invoke the agent with a prompt.
@@ -120,6 +121,7 @@ class AnthropicAgent(BaseAgent):
         Args:
             prompt: Input prompt for the agent
             session_id: Optional session ID (not used by direct API calls)
+            progress_callback: Optional async callback for streaming text
 
         Returns:
             Parsed agent output
@@ -131,31 +133,78 @@ class AnthropicAgent(BaseAgent):
             logger.info(f"Invoking {self.role.value} with model {self.model}")
             logger.debug(f"Prompt length: {len(prompt)} chars")
 
-            response = await self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=self.system_prompt(),
-                messages=[{"role": "user", "content": prompt}],
-            )
+            # When the caller wants real-time progress, stream the response
+            # and call the callback with each text delta. Otherwise use a
+            # single request for lower latency / fewer round-trips.
+            if progress_callback is not None:
+                raw_output, usage = await self._invoke_streaming(
+                    prompt, progress_callback
+                )
+            else:
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    system=self.system_prompt(),
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw_output = _extract_text(response.content)
+                usage = _extract_usage(getattr(response, "usage", None))
 
-            raw_output = _extract_text(response.content)
             if not raw_output:
                 raise AgentInvocationError(
-                    f"{self.role.value}: response had no text blocks "
-                    f"(content types: "
-                    f"{[type(b).__name__ for b in response.content]})"
+                    f"{self.role.value}: response had no text blocks"
                 )
             logger.info(f"Received response: {len(raw_output)} chars")
             logger.debug(f"Raw output preview: {raw_output[:200]}...")
 
             output = self.parse_output(raw_output)
-            usage = _extract_usage(getattr(response, "usage", None))
             if usage is not None:
-                # ``model_copy`` because AgentOutput is frozen.
                 output = output.model_copy(update={"usage": usage})
             return output
 
+        except AgentInvocationError:
+            raise
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}")
             raise AgentInvocationError(f"Failed to invoke {self.role.value}: {e}") from e
+
+    async def _invoke_streaming(
+        self,
+        prompt: str,
+        progress_callback: ProgressCallback,
+    ) -> tuple[str, TokenUsage | None]:
+        """Stream the Anthropic response, calling ``progress_callback`` with
+        each text delta and returning the assembled full text + usage.
+        """
+        text_parts: list[str] = []
+        usage: TokenUsage | None = None
+
+        async with self.client.messages.stream(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            system=self.system_prompt(),
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    delta = getattr(event.delta, "text", None)
+                    if isinstance(delta, str) and delta:
+                        text_parts.append(delta)
+                        await progress_callback(delta)
+                elif event.type == "message_delta":
+                    usage = _extract_usage(
+                        getattr(event, "usage", None)
+                    )
+
+        # Fallback: pick up usage from the completed stream snapshot
+        # if the message_delta event didn't fire.
+        if usage is None:
+            try:
+                snapshot = stream.current_message_snapshot
+                usage = _extract_usage(getattr(snapshot, "usage", None))
+            except Exception:
+                pass
+
+        return "".join(text_parts), usage

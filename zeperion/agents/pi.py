@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from zeperion.agents.base import AgentInvocationError, BaseAgent
+from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
 from zeperion.models import AgentOutput, AgentRole, TokenUsage
 from zeperion.utils.token_estimate import estimate_usage
 
@@ -108,6 +108,7 @@ class PiAgent(BaseAgent):
         self,
         prompt: str,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         """Invoke Pi with ``prompt`` and parse the final assistant text."""
         if not self.project_dir.exists():
@@ -146,7 +147,11 @@ class PiAgent(BaseAgent):
         try:
             try:
                 raw_output, reported_usage = await asyncio.wait_for(
-                    self._drive_rpc(process, prompt, session_id=session_id),
+                    self._drive_rpc(
+                        process, prompt,
+                        session_id=session_id,
+                        progress_callback=progress_callback,
+                    ),
                     timeout=self.timeout,
                 )
             except asyncio.TimeoutError as exc:
@@ -202,6 +207,7 @@ class PiAgent(BaseAgent):
         prompt: str,
         *,
         session_id: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> tuple[str, TokenUsage | None]:
         if process.stdin is None or process.stdout is None:
             raise AgentInvocationError("Pi RPC process missing stdin/stdout")
@@ -261,10 +267,14 @@ class PiAgent(BaseAgent):
                         text = _extract_text(message)
                         if text:
                             assistant_text_fragments.append(text)
+                            if progress_callback is not None:
+                                await progress_callback(text)
                 delta = event.get("assistantMessageEvent") or event.get("delta")
                 text = _extract_text(delta)
                 if text:
                     assistant_text_fragments.append(text)
+                    if progress_callback is not None:
+                        await progress_callback(text)
                 continue
 
             if event_type == "extension_ui_request":

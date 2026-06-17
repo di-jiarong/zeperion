@@ -36,7 +36,7 @@ class FakeAgent:
         self.role = role
         self.model = model
 
-    async def invoke(self, prompt, session_id=None):
+    async def invoke(self, prompt, session_id=None, progress_callback=None):
         if not self.outputs:
             raise AssertionError("No fake agent outputs left")
         return self.outputs.pop(0)
