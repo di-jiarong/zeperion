@@ -122,6 +122,7 @@ class ClaudeCodeAgent(BaseAgent):
         worktree_parent: str | None = None,
         keep_worktree: bool = True,
         progress_interval_seconds: int = 30,
+        show_thinking: bool = False,
     ):
         """Initialise the Claude Code agent.
 
@@ -150,6 +151,9 @@ class ClaudeCodeAgent(BaseAgent):
                 ``0`` disables. Defaults to 30s — long enough to stay out
                 of the way during fast runs, short enough that a 5-minute
                 Developer call (live test #2: 298s) doesn't look hung.
+            show_thinking: When true, surface the model's thinking trace as
+                ``[Thinking]`` progress lines. Off by default to keep the
+                run log focused on tool activity.
         """
         super().__init__(role, model)
         self.cli_tool = cli_tool
@@ -162,6 +166,7 @@ class ClaudeCodeAgent(BaseAgent):
         self.keep_worktree = keep_worktree
         self.last_worktree_dir: Path | None = None
         self.progress_interval_seconds = progress_interval_seconds
+        self.show_thinking = show_thinking
 
     def build_command(
         self,
@@ -333,7 +338,9 @@ class ClaudeCodeAgent(BaseAgent):
                     )
 
                 if progress_callback is not None:
-                    line = _format_stream_event(ev)
+                    line = _format_stream_event(
+                        ev, show_thinking=self.show_thinking
+                    )
                     if line:
                         await progress_callback(line)
                 if ev.kind == "text" and ev.text:
@@ -982,21 +989,45 @@ def _usage_from_stream_result(raw: dict) -> TokenUsage | None:
 #: Suppress thinking deltas shorter than this to avoid word-by-word spam.
 _THINKING_MIN_CHARS = 40
 
+#: In ``show_thinking`` mode, accumulate thinking deltas and flush a
+#: ``[Thinking]`` line once this many characters have piled up, so the
+#: trace is readable instead of word-by-word.
+_THINKING_FLUSH_CHARS = 120
+_thinking_buffer: list[str] = []
+
 #: Only print tool-progress heartbeats every N seconds.
 _TOOL_PROGRESS_INTERVAL_S = 15
 _tool_progress_last: dict[str, float] = {}  # tool_use_id → last-printed timestamp
 
 
-def _format_stream_event(ev: StreamEvent) -> str | None:
-    """Format a StreamEvent as a human-readable progress line."""
+def _format_stream_event(ev: StreamEvent, *, show_thinking: bool = False) -> str | None:
+    """Format a StreamEvent as a human-readable progress line.
+
+    When ``show_thinking`` is true the model's thinking trace is surfaced:
+    word-by-word deltas are accumulated and flushed as readable
+    ``[Thinking]`` chunks. When false (the default) only a substantial
+    non-delta thinking block is shown, and deltas are suppressed entirely.
+    """
     import time as _time
 
     if ev.kind == "thinking":
-        if ev.is_delta:
-            # Suppress word-by-word thinking deltas — too noisy
+        if not show_thinking:
+            if (
+                not ev.is_delta
+                and ev.text
+                and len(ev.text) >= _THINKING_MIN_CHARS
+            ):
+                return f"[Thinking] {ev.text[:200]}"
             return None
-        if ev.text and len(ev.text) >= _THINKING_MIN_CHARS:
-            return f"[Thinking] {ev.text[:200]}"
+        # show_thinking: buffer deltas, flush in readable chunks.
+        if ev.text:
+            _thinking_buffer.append(ev.text)
+        buffered = sum(len(t) for t in _thinking_buffer)
+        if buffered >= _THINKING_FLUSH_CHARS:
+            combined = "".join(_thinking_buffer).strip()
+            _thinking_buffer.clear()
+            if combined:
+                return f"[Thinking] {combined[:300]}"
         return None
 
     if ev.kind == "tool_call":

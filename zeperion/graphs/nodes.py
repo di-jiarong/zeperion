@@ -263,6 +263,15 @@ class MultiAgentNodes:
         )
         self._record_agent_started(name, state, model=model, agent_type=agent_type)
 
+        # Give this invocation a fresh progress-display budget. Without the
+        # reset the closure in cli._make_progress_callback shares one
+        # line/fold counter across every agent and round, so after the
+        # first ~max_lines lines all later steps collapse to a silent
+        # heartbeat (the original "black box" symptom).
+        reset = getattr(self.progress_callback, "reset", None)
+        if callable(reset):
+            reset()
+
         try:
             async with trace_agent(
                 name,

@@ -46,6 +46,7 @@ def _instantiate(
             worktree_parent=config.claude_cli_worktree_parent,
             keep_worktree=config.claude_cli_keep_worktree,
             progress_interval_seconds=config.claude_cli_progress_interval_seconds,
+            show_thinking=config.progress_show_thinking,
         )
     if agent_class is PiAgent:
         return PiAgent(
@@ -58,6 +59,7 @@ def _instantiate(
             no_session=config.pi_rpc_no_session,
             progress_interval_seconds=config.pi_rpc_progress_interval_seconds,
             auto_respond_ui_requests=config.pi_rpc_auto_respond_ui_requests,
+            show_thinking=config.progress_show_thinking,
         )
     return agent_class(role=role, model=model)
 

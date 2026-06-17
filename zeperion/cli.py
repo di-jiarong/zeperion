@@ -1467,6 +1467,11 @@ def accept(
 # ``→ increment_round`` style line for them is pure noise in the run log.
 _QUIET_NODES = {"increment_round", "increment_fix"}
 
+# Agent nodes get a bold, rule-style header so the boundary between
+# Planner → Developer → Reviewer → Tester steps is easy to scan in a long
+# run log (the streamed detail lines below it are dim ``│``-prefixed).
+_AGENT_NODES = {"planner", "developer", "reviewer", "tester"}
+
 # Maximum terminal width for progress lines (keep output scannable on
 # narrower screens while still showing enough context).
 _PROGRESS_LINE_WIDTH = 100
@@ -1502,35 +1507,55 @@ def _print_node_progress(node_name: str, node_state) -> None:
     if node_state.get("test_status") is not None:
         bits.append(f"test={_enum_str(node_state['test_status'])}")
     suffix = f"  [dim]({', '.join(bits)})[/dim]" if bits else ""
+    if node_name in _AGENT_NODES:
+        # Bold, ruled header so each agent step stands out from the dim
+        # ``\u2502``-prefixed detail lines that follow it.
+        console.print(
+            f"\n[bold cyan]\u25c6 {node_name.upper()}[/bold cyan]{suffix}"
+        )
+        return
     console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
 
 
-def _make_progress_callback(out=None):
+def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES):
     """Return an async callback suitable for :class:`ProgressCallback`.
 
     The callback buffers partial text from the agent and prints complete
     lines to the console with a ``  \u2502 `` visual prefix.  After
-    ``_PROGRESS_MAX_LINES`` lines it switches to a periodic heartbeat
-    indicator so the terminal isn't flooded during long agent runs.
-    The state is captured in a closure and is *not* thread-safe \u2014 it must
-    only be awaited from a single event-loop task (the graph node that
-    invoked the agent).
+    ``max_lines`` lines it switches to a periodic heartbeat indicator so
+    the terminal isn't flooded during long agent runs.  The state is
+    captured in a closure and is *not* thread-safe \u2014 it must only be
+    awaited from a single event-loop task (the graph node that invoked
+    the agent).
+
+    The returned callable exposes a ``reset()`` method that clears the
+    line budget and fold state. Callers should invoke it at the start of
+    each agent invocation so every Planner/Developer/Reviewer/Tester step
+    gets a fresh ``max_lines`` budget instead of the whole run sharing one
+    (which made everything after the first ~30 lines collapse to a silent
+    heartbeat \u2014 the original "black box" symptom).
 
     Args:
         out: Rich Console to print to (defaults to the module-level
             ``console`` used by the CLI).
+        max_lines: How many detail lines to print per invocation before
+            folding into a periodic heartbeat.
     """
     _out = out if out is not None else console
-    buf: list[str] = []
-    line_count = 0
-    folded = False
+    state = {"buf": [], "line_count": 0, "folded": False}
+
+    def _reset() -> None:
+        """Clear the per-invocation line budget and fold state."""
+        state["buf"] = []
+        state["line_count"] = 0
+        state["folded"] = False
 
     async def _on_progress(text: str) -> None:
-        nonlocal buf, line_count, folded
+        buf = state["buf"]
         if not text:
             return
 
-        if folded:
+        if state["folded"]:
             # Already past the display cap; just log a heartbeat every
             # _PROGRESS_FLUSH_CHARS accumulated characters.
             buf.append(text)
@@ -1547,9 +1572,9 @@ def _make_progress_callback(out=None):
         # Print every complete line in the buffer.
         while "\n" in combined:
             line, combined = combined.split("\n", 1)
-            line_count += 1
-            if line_count > _PROGRESS_MAX_LINES:
-                folded = True
+            state["line_count"] += 1
+            if state["line_count"] > max_lines:
+                state["folded"] = True
                 _out.print(
                     "  [dim]  (output folded \u2014 agent still generating, "
                     "full text in output file)[/dim]"
@@ -1566,9 +1591,9 @@ def _make_progress_callback(out=None):
         # Flush buffer when it gets long without a newline (streaming
         # deltas from AnthropicAgent / PiAgent).
         if len(combined) >= _PROGRESS_FLUSH_CHARS:
-            line_count += 1
-            if line_count > _PROGRESS_MAX_LINES:
-                folded = True
+            state["line_count"] += 1
+            if state["line_count"] > max_lines:
+                state["folded"] = True
                 _out.print(
                     "  [dim]  (output folded \u2014 agent still generating, "
                     "full text in output file)[/dim]"
@@ -1582,6 +1607,7 @@ def _make_progress_callback(out=None):
                 _out.print(f"  [dim]\u2502[/dim] {display}")
             buf.clear()
 
+    _on_progress.reset = _reset  # type: ignore[attr-defined]
     return _on_progress
 
 
@@ -2069,8 +2095,12 @@ def run(
 
         # Create the real-time progress callback so agent output streams
         # to the terminal while the agent is still running (instead of
-        # appearing only after the invocation completes).
-        progress_cb = _make_progress_callback()
+        # appearing only after the invocation completes). The per-agent
+        # line budget is reset by each node (see nodes.py) so every
+        # Planner/Developer/Reviewer/Tester step gets a fresh budget.
+        progress_cb = _make_progress_callback(
+            max_lines=run_config.progress_max_lines
+        )
 
         def build_graph(checkpointer):
             return create_multi_agent_graph(

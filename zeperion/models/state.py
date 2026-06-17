@@ -279,6 +279,27 @@ class WorkflowConfig(BaseModel):
         ),
     )
 
+    # --- Live progress display (the streamed `  │ ...` lines a run prints
+    # to the terminal while an agent is working) ---
+    progress_max_lines: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "How many streamed detail lines to print per agent step before "
+            "folding into a periodic heartbeat. The budget resets at the "
+            "start of every Planner/Developer/Reviewer/Tester invocation, so "
+            "this is a per-step cap, not a whole-run cap."
+        ),
+    )
+    progress_show_thinking: bool = Field(
+        default=False,
+        description=(
+            "Surface the model's thinking trace as `[Thinking]` lines in the "
+            "live progress output (claude_code / pi backends). Off by default "
+            "to keep the run log focused on tool activity."
+        ),
+    )
+
     project_dir: str = Field(default=".")
     state_dir: str = Field(default=".zeperion/state")
 

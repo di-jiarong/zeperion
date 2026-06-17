@@ -90,6 +90,7 @@ class PiAgent(BaseAgent):
         no_session: bool = True,
         progress_interval_seconds: int = 30,
         auto_respond_ui_requests: bool = True,
+        show_thinking: bool = False,
     ):
         super().__init__(role, model)
         self.cli_tool = cli_tool
@@ -99,6 +100,7 @@ class PiAgent(BaseAgent):
         self.no_session = no_session
         self.progress_interval_seconds = progress_interval_seconds
         self.auto_respond_ui_requests = auto_respond_ui_requests
+        self.show_thinking = show_thinking
 
     def build_command(self) -> list[str]:
         """Assemble the Pi RPC argv list for one invocation."""
@@ -273,12 +275,14 @@ class PiAgent(BaseAgent):
                     if message.get("role") == "assistant":
                         await _emit_pi_message_events(
                             message, assistant_text_fragments, progress_callback,
+                            show_thinking=self.show_thinking,
                         )
                 # Parse streaming deltas (tool_use, thinking_delta, text_delta)
                 delta = event.get("assistantMessageEvent") or event.get("delta")
                 if isinstance(delta, dict):
                     await _emit_pi_delta_events(
                         delta, assistant_text_fragments, progress_callback,
+                        show_thinking=self.show_thinking,
                     )
                 continue
 
@@ -452,6 +456,8 @@ async def _emit_pi_message_events(
     message: dict,
     fragments: list[str],
     progress_callback: ProgressCallback | None = None,
+    *,
+    show_thinking: bool = False,
 ) -> None:
     """Parse an assistant message from Pi RPC and emit structured progress.
 
@@ -464,7 +470,7 @@ async def _emit_pi_message_events(
     envelope: dict[str, Any] = {"type": "assistant", "message": message}
     ev = _parse_assistant_message(envelope)
     if ev is not None and progress_callback is not None:
-        line = _format_stream_event(ev)
+        line = _format_stream_event(ev, show_thinking=show_thinking)
         if line:
             await progress_callback(line)
 
@@ -490,6 +496,8 @@ async def _emit_pi_delta_events(
     delta: dict,
     fragments: list[str],
     progress_callback: ProgressCallback | None = None,
+    *,
+    show_thinking: bool = False,
 ) -> None:
     """Parse a streaming delta from Pi RPC and emit structured progress.
 
@@ -521,7 +529,7 @@ async def _emit_pi_delta_events(
     if ev is None or progress_callback is None:
         return
 
-    line = _format_stream_event(ev)
+    line = _format_stream_event(ev, show_thinking=show_thinking)
     if line:
         await progress_callback(line)
 

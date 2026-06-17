@@ -816,6 +816,38 @@ class TestProgressCallbackSignature:
         assert called_with == ["primary"]
 
 
+class TestFormatStreamEventThinking:
+    """``_format_stream_event`` thinking-trace behaviour, gated on
+    ``show_thinking``.
+    """
+
+    def test_thinking_delta_suppressed_by_default(self):
+        from zeperion.agents.claude_code import StreamEvent, _format_stream_event
+
+        ev = StreamEvent(kind="thinking", text="pondering ", is_delta=True)
+        assert _format_stream_event(ev) is None
+        assert _format_stream_event(ev, show_thinking=False) is None
+
+    def test_thinking_deltas_flush_when_show_thinking(self):
+        import zeperion.agents.claude_code as cc
+        from zeperion.agents.claude_code import StreamEvent, _format_stream_event
+
+        cc._thinking_buffer.clear()
+        chunk = "x" * 30
+        out = None
+        # Feed deltas until the accumulator crosses the flush threshold.
+        for _ in range(10):
+            out = _format_stream_event(
+                StreamEvent(kind="thinking", text=chunk, is_delta=True),
+                show_thinking=True,
+            )
+            if out is not None:
+                break
+        assert out is not None
+        assert out.startswith("[Thinking]")
+        cc._thinking_buffer.clear()
+
+
 class TestCLIProgressCallback:
     """Unit tests for ``_make_progress_callback``, the line-buffered
     console printer used by the ``zeperion run`` CLI command.
@@ -906,3 +938,29 @@ class TestCLIProgressCallback:
         # Count lines with the pipe prefix — we expect exactly 1.
         pipe_lines = [l for l in plain.split("\n") if "│" in l]
         assert len(pipe_lines) == 1
+
+    def test_reset_restores_detail_after_fold(self, capsys):
+        """After folding past the cap, reset() must re-enable detail lines.
+
+        This is the regression guard for the "black box" bug: a single
+        shared callback used to fold once and stay folded for the whole
+        run, so every agent after the first went silent. Each agent node
+        calls ``reset()`` before invoking, which must clear the fold state.
+        """
+        import asyncio
+        from zeperion.cli import _make_progress_callback
+
+        cb = _make_progress_callback(max_lines=3)
+        assert hasattr(cb, "reset")
+
+        async def _feed():
+            for i in range(10):  # well past max_lines -> folds
+                await cb(f"first {i}\n")
+            cb.reset()
+            await cb("after reset line\n")
+
+        asyncio.run(_feed())
+        plain = self._strip_ansi(capsys.readouterr().out)
+        assert "output folded" in plain  # folded during the first burst
+        # Post-reset detail line must print again (not swallowed by fold).
+        assert "after reset line" in plain
