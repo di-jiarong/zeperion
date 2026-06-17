@@ -188,6 +188,7 @@ class ClaudeCodeAgent(BaseAgent):
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
                 "--include-partial-messages",
+                "--verbose",
             ])
         elif json_output:
             cmd.extend(["--output-format", "json"])
