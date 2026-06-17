@@ -81,6 +81,38 @@ class CodexStatus(str, Enum):
     WAITING = "waiting"           # Waiting for review
 
 
+#: Hard cap on how many lessons we carry in state (and therefore inject
+#: into every agent prompt). Without a cap the append reducer grows
+#: unbounded across rounds — every agent emits a LESSONS block and they
+#: pile up with near-duplicates, bloating prompts and token spend while
+#: drowning the genuinely useful lessons. Keeping the most recent N unique
+#: lessons preserves recency without the bloat.
+_MAX_LESSONS = 50
+
+
+def merge_lessons(existing: list[str], new: list[str]) -> list[str]:
+    """Reducer for ``lessons_learned``: append, de-duplicate, cap.
+
+    De-duplication is exact-match on the stripped text (order-preserving,
+    first occurrence wins), and the result is capped to the most recent
+    :data:`_MAX_LESSONS` entries. A module-level named function (rather
+    than a lambda) keeps the reducer importable and testable.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for lesson in [*(existing or []), *(new or [])]:
+        if not isinstance(lesson, str):
+            continue
+        key = lesson.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(lesson)
+    if len(merged) > _MAX_LESSONS:
+        merged = merged[-_MAX_LESSONS:]
+    return merged
+
+
 class WorkflowState(TypedDict):
     """
     LangGraph state for multi-agent workflow.
@@ -96,7 +128,7 @@ class WorkflowState(TypedDict):
     review_status: ReviewStatus
     global_status: GlobalStatus
     last_error: str | None
-    lessons_learned: Annotated[list[str], lambda x, y: x + y]  # Append reducer
+    lessons_learned: Annotated[list[str], merge_lessons]
     planner_session_id: str | None
     developer_session_id: str | None
     reviewer_session_id: str | None
@@ -129,7 +161,7 @@ class PRPipelineState(TypedDict):
     review_status: ReviewStatus
     global_status: GlobalStatus
     last_error: str | None
-    lessons_learned: Annotated[list[str], lambda x, y: x + y]
+    lessons_learned: Annotated[list[str], merge_lessons]
     planner_session_id: str | None
     developer_session_id: str | None
     reviewer_session_id: str | None

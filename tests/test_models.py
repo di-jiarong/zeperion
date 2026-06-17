@@ -15,6 +15,41 @@ from zeperion.models import (
 from zeperion.utils.time import iso_now
 
 
+class TestMergeLessons:
+    """The ``lessons_learned`` reducer must append, de-dupe, and cap."""
+
+    def test_appends_new_lessons(self):
+        from zeperion.models.state import merge_lessons
+
+        assert merge_lessons(["a"], ["b"]) == ["a", "b"]
+
+    def test_deduplicates_exact_matches(self):
+        from zeperion.models.state import merge_lessons
+
+        assert merge_lessons(["a", "b"], ["a", "c"]) == ["a", "b", "c"]
+
+    def test_strips_whitespace_for_dedup_and_drops_empty(self):
+        from zeperion.models.state import merge_lessons
+
+        assert merge_lessons(["a"], [" a ", "  ", "b"]) == ["a", "b"]
+
+    def test_caps_to_most_recent(self):
+        from zeperion.models.state import merge_lessons, _MAX_LESSONS
+
+        existing = [f"l{i}" for i in range(_MAX_LESSONS)]
+        out = merge_lessons(existing, ["new1", "new2"])
+        assert len(out) == _MAX_LESSONS
+        # Oldest dropped, newest kept.
+        assert out[-1] == "new2"
+        assert "l0" not in out
+
+    def test_handles_none(self):
+        from zeperion.models.state import merge_lessons
+
+        assert merge_lessons(None, None) == []
+        assert merge_lessons(None, ["a"]) == ["a"]
+
+
 class TestEnums:
     """Test enum definitions."""
 
