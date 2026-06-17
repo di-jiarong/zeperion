@@ -45,6 +45,28 @@ def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
+def _format_verify_results(results: list) -> str:
+    """Render verify-command results into a compact, prompt-friendly blob.
+
+    Each command becomes a header (command + PASS/FAIL + exit code) followed
+    by its combined stdout/stderr (already per-command truncated upstream by
+    ``run_verify_commands``). Failing commands sort first so the Developer
+    sees the actionable errors at the top.
+    """
+    if not results:
+        return ""
+    ordered = sorted(results, key=lambda r: r.passed)  # failures (False) first
+    blocks: list[str] = []
+    for r in ordered:
+        status = "PASS" if r.passed else "FAIL"
+        body = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
+        blocks.append(
+            f"$ {r.command}\n[{status}] exit={r.exit_code}"
+            + (f"\n{body}" if body else "")
+        )
+    return "\n\n".join(blocks)
+
+
 class MultiAgentNodes:
     """StateGraph node callables for Planner/Developer/Reviewer/Tester."""
 
@@ -426,6 +448,12 @@ class MultiAgentNodes:
         """Developer agent node."""
         plan = self.storage.load_agent_output("planner") or ""
         test_report = self.storage.load_agent_output("tester")
+        # On a fix attempt, surface the real verify command output (actual
+        # test errors) so the Developer fixes from facts, not the Tester's
+        # paraphrase. Only relevant when fixing; first implementation has none.
+        verify_output = None
+        if state["fix_attempt"] > 0:
+            verify_output = self.storage.load_agent_output("tester_verify")
 
         prompt = self.template_manager.render_developer(
             requirement=self.requirement,
@@ -434,6 +462,7 @@ class MultiAgentNodes:
             lessons=state["lessons_learned"],
             fix_attempt=state["fix_attempt"],
             uses_claude_code=self.developer_can_edit_files,
+            verify_output=verify_output,
         )
 
         def _span_attrs(span: Any, output: AgentOutput) -> None:
@@ -551,6 +580,18 @@ class MultiAgentNodes:
                         "stderr_len": len(r.stderr),
                     },
                 )
+
+            # Persist the raw verify output as a ``tester_verify`` artifact so
+            # the Developer can reason over actual test errors on the next fix
+            # attempt instead of the Tester's second-hand summary. Mirrors the
+            # other ``*_output.txt`` artifacts; loaded by ``developer_node``.
+            self.storage.save_agent_output(
+                "tester_verify",
+                _format_verify_results(verify_results),
+                thread_id=self.thread_id,
+                round_num=state["round"],
+                fix_attempt=state.get("fix_attempt"),
+            )
 
         prompt = self.template_manager.render_tester(
             requirement=self.requirement,

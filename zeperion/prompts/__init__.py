@@ -96,6 +96,7 @@ class PromptTemplate:
         lessons: list[str] | None = None,
         fix_attempt: int = 0,
         uses_claude_code: bool = False,
+        verify_output: str | None = None,
     ) -> str:
         """Render developer prompt.
 
@@ -106,6 +107,10 @@ class PromptTemplate:
             lessons: Lessons learned so far
             fix_attempt: Current fix attempt number (0 = first implementation)
             uses_claude_code: Whether the agent can directly edit project files
+            verify_output: Raw stdout/stderr of the latest failing verify
+                commands (real test output). Surfaced verbatim on fix
+                attempts so the Developer reasons over actual errors rather
+                than the Tester's second-hand summary.
 
         Returns:
             Rendered developer prompt
@@ -119,6 +124,7 @@ class PromptTemplate:
             fix_attempt=fix_attempt,
             is_fixing=fix_attempt > 0,
             uses_claude_code=uses_claude_code,
+            verify_output=verify_output or "无",
         )
 
     def render_pr_fixer(

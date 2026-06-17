@@ -278,3 +278,38 @@ async def test_failing_verify_command_still_reaches_tester_with_failure_signal(
     assert len(verify_events) == 1
     assert verify_events[0]["exit_code"] == 17
     assert verify_events[0]["passed"] is False
+
+
+class TestFormatVerifyResults:
+    """`_format_verify_results` renders a fixer-friendly, failures-first blob."""
+
+    @staticmethod
+    def _result(command, exit_code, stdout="", stderr=""):
+        from zeperion.utils.verify import CommandResult
+
+        return CommandResult(
+            command=command,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=1,
+            timed_out=False,
+            truncated=False,
+        )
+
+    def test_empty_returns_empty_string(self):
+        from zeperion.graphs.nodes import _format_verify_results
+
+        assert _format_verify_results([]) == ""
+
+    def test_failures_sorted_first_and_include_output(self):
+        from zeperion.graphs.nodes import _format_verify_results
+
+        ok = self._result("ruff check .", 0, stdout="All checks passed")
+        bad = self._result("pytest -q", 1, stderr="E   assert 1 == 2")
+        blob = _format_verify_results([ok, bad])
+        # Failing command appears before the passing one.
+        assert blob.index("pytest -q") < blob.index("ruff check .")
+        assert "[FAIL] exit=1" in blob
+        assert "assert 1 == 2" in blob
+        assert "[PASS] exit=0" in blob
