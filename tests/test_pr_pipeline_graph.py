@@ -459,6 +459,52 @@ class TestCodexThreshold:
         assert result["codex_status"] == expected
 
 
+class TestCommitFailureShortCircuits:
+    """A failed commit must NOT push a half-baked branch."""
+
+    @pytest.mark.asyncio
+    async def test_internal_leak_failure_skips_push_and_pr(self) -> None:
+        client = _make_github_mock(codex_thumbs=1, codex_reviewed_commit="abc")
+
+        # git diff --cached returns a protected internal path that survives
+        # un-staging, so commit_changes_node refuses and sets FAILED.
+        async def _git(args):
+            sub = args[0] if args else ""
+            if sub == "diff" and "--cached" in args:
+                return ".zeperion/state/checkpoints.db\n"
+            if sub == "rev-parse":
+                return "abc" * 8
+            return ""
+
+        client.run_git.side_effect = _git
+
+        with patch(
+            "zeperion.graphs.pr_pipeline.nodes.GitHubClient", return_value=client
+        ):
+            graph = create_pr_pipeline_graph(_config())
+            final = await graph.ainvoke(_initial_state())
+
+        assert final["pr_phase"] == PRPhase.FAILED
+        # The pipeline must have stopped before push / PR creation.
+        client.push_branch.assert_not_called()
+        client.create_pr.assert_not_called()
+        assert "internal paths" in (final.get("last_error") or "").lower()
+
+    def test_after_commit_routes_end_on_failed(self) -> None:
+        from zeperion.graphs.pr_pipeline import after_commit_changes
+
+        state = _initial_state()
+        state["pr_phase"] = PRPhase.FAILED
+        assert after_commit_changes(state) == "end"
+
+    def test_after_commit_routes_push_otherwise(self) -> None:
+        from zeperion.graphs.pr_pipeline import after_commit_changes
+
+        state = _initial_state()
+        state["pr_phase"] = PRPhase.COMMIT
+        assert after_commit_changes(state) == "push"
+
+
 class TestPipelineRouter:
     """``decide_next_action`` should be unit-testable in isolation."""
 

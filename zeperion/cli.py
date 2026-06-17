@@ -29,6 +29,7 @@ from zeperion.utils.timeline import (
     classify_blocker,
     derive_in_flight,
     describe_event,
+    is_error_event,
     read_events,
     suggest_next_commands,
     summarise,
@@ -77,6 +78,9 @@ def _spawn_detached_run(
     no_pr_pipeline: bool = False,
     yes: bool = False,
     allow_dirty: bool = False,
+    in_place: bool = False,
+    force_reset: bool = False,
+    verify: bool = True,
 ) -> None:
     """Re-invoke ``zeperion run`` in a detached child process.
 
@@ -108,8 +112,15 @@ def _spawn_detached_run(
     # prompt nor usefully block. We gate here, then force ``--yes`` into
     # the child argv so the child renders the summary into its log
     # without re-blocking on a dirty tree we already cleared.
+    use_workspace = config.use_run_workspace and not in_place
     if mode == "multi_agent":
-        prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
+        prerun_gate(
+            config,
+            console,
+            yes=yes,
+            allow_dirty=allow_dirty,
+            workspace_enabled=use_workspace,
+        )
 
     resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
     state_dir = Path(config.state_dir)
@@ -151,6 +162,12 @@ def _spawn_detached_run(
         argv.extend(["--from-thread", from_thread])
     if no_pr_pipeline:
         argv.append("--no-pr-pipeline")
+    if in_place:
+        argv.append("--in-place")
+    if force_reset:
+        argv.append("--force-reset")
+    if not verify:
+        argv.append("--no-verify")
     # Parent already ran the pre-run gate; suppress the child's gate so
     # it neither prompts (impossible in a detached session) nor blocks
     # on the dirty tree we deliberately allowed.
@@ -274,6 +291,8 @@ def prerun_gate(
     yes: bool,
     allow_dirty: bool,
     interactive: bool | None = None,
+    workspace_enabled: bool = False,
+    strict_state_dir_ignore: bool = False,
 ) -> None:
     """Render the pre-run safety summary and gate the run on it.
 
@@ -290,6 +309,11 @@ def prerun_gate(
     * Non-interactive sessions (detach / pipe / CI) never block on a
       clean tree and never prompt; they just print the summary.
 
+    When ``workspace_enabled`` is True the run executes inside an
+    isolated git worktree cut from ``HEAD``, so a dirty working tree no
+    longer pollutes the run — the dirty-tree block is skipped and a note
+    is printed instead. The confirmation prompt still shows.
+
     Raises ``typer.Exit`` to abort (1 = blocked, 0 = user declined).
     """
     from zeperion.utils.prerun import build_prerun_summary, render_prerun_summary
@@ -299,6 +323,47 @@ def prerun_gate(
 
     summary = build_prerun_summary(config)
     render_prerun_summary(summary, out)
+
+    # An in-repo, *un-ignored* state_dir is a correctness hazard: the PR
+    # pipeline stages with ``git add -A`` and would sweep zeperion's runtime
+    # artifacts into the commit. Warn always; for ``ship`` (which actually
+    # runs that staging) refuse outright — and this refusal is intentionally
+    # NOT bypassable by --yes / --allow-dirty.
+    from zeperion.utils.changes import state_dir_ignore_status
+
+    ignore_status = state_dir_ignore_status(config.project_dir, config.state_dir)
+    if ignore_status.at_risk:
+        out.print(
+            f"\n[bold yellow]\u26a0  state_dir is inside the repo and not "
+            f"git-ignored:[/bold yellow] [cyan]{ignore_status.rel_path}[/cyan]\n"
+            "  zeperion's runtime artifacts (checkpoints, run worktrees, "
+            "per-thread state) could be committed by a PR push.\n"
+            f"  Fix: add [cyan]{ignore_status.rel_path}/[/cyan] to your "
+            "[cyan].gitignore[/cyan]."
+        )
+        if strict_state_dir_ignore:
+            out.print(
+                "\n[bold red]Refusing to ship until state_dir is "
+                "git-ignored.[/bold red]"
+            )
+            raise typer.Exit(1)
+
+    if workspace_enabled:
+        if summary.git.is_repo:
+            out.print(
+                "\n[dim]Run Workspace: this run executes in an isolated git "
+                "worktree cut from the current HEAD on branch "
+                "[cyan]zeperion/run/<thread>[/cyan]. Your working tree is not "
+                "touched; review with [cyan]zeperion changes -t[/cyan] and apply "
+                "with [cyan]zeperion accept -t[/cyan] afterwards.[/dim]"
+            )
+        if interactive and not yes:
+            if not typer.confirm(
+                "\nStart the workflow with the settings above?", default=True
+            ):
+                out.print("[yellow]Aborted.[/yellow]")
+                raise typer.Exit(0)
+        return
 
     if summary.git.is_repo and not summary.git.is_clean and not (yes or allow_dirty):
         out.print(
@@ -569,6 +634,28 @@ def doctor(
         else:
             add("GitHub auth", shutil.which("gh") is not None, "gh on PATH")
 
+    # When the PR pipeline could run, an in-repo, un-ignored state_dir would
+    # get swept into the commit by ``git add -A``. Surface it here so the
+    # operator fixes .gitignore before a ship refuses.
+    if config.github_repo or config.github_token:
+        from zeperion.utils.changes import state_dir_ignore_status
+
+        ig = state_dir_ignore_status(config.project_dir, config.state_dir)
+        if ig.at_risk:
+            add(
+                "state_dir git-ignored",
+                False,
+                f"{ig.rel_path} is in the repo but NOT ignored — add it to "
+                ".gitignore so ship doesn't commit zeperion internals",
+            )
+        else:
+            detail = (
+                "outside repo"
+                if not ig.in_repo
+                else f"{ig.rel_path} is ignored"
+            )
+            add("state_dir git-ignored", True, detail)
+
     if config.tester_verify_commands:
         add("Tester verification", True, "; ".join(config.tester_verify_commands))
     else:
@@ -740,6 +827,20 @@ def verify(
         "--tail",
         help="On failure, how many trailing output lines to show per command.",
     ),
+    thread_id: str | None = typer.Option(
+        None,
+        "--thread-id",
+        "-t",
+        help=(
+            "Scope verification to tests related to this run's changed files "
+            "(uses the Run Workspace manifest). Ignored with --full."
+        ),
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Run the full configured command list (skip change-scoped selection).",
+    ),
 ):
     """Run, detect, or persist the Tester verification commands (no agents).
 
@@ -788,8 +889,46 @@ def verify(
         )
         raise typer.Exit(1)
 
+    changed_files: list[str] | None = None
+    resolved_thread: str | None = None
+    if thread_id and not full:
+        resolved_thread = default_thread_id(thread_id, project_dir=config.project_dir)
+        manifest = StateStorage(
+            Path(config.state_dir), thread_id=resolved_thread
+        ).load_run_manifest()
+        if manifest and manifest.get("changed_files"):
+            changed_files = list(manifest["changed_files"])
+        elif manifest:
+            console.print(
+                f"[dim]Run [cyan]{resolved_thread}[/cyan] has no changed files — "
+                "using full verification.[/dim]"
+            )
+
+    from zeperion.utils.verify import resolve_verify_commands
+
+    resolved = resolve_verify_commands(
+        list(commands),
+        changed_files=changed_files,
+        project_dir=Path(config.project_dir),
+        select_tests=not full and bool(changed_files),
+    )
+    commands = resolved.commands
+
     timeout_seconds = timeout or config.tester_verify_timeout_seconds
-    console.print(f"[bold]Running {len(commands)} verification command(s)[/bold]")
+    if resolved.scope == "scoped":
+        console.print(
+            f"[bold]Running {len(commands)} scoped verification command(s)[/bold] "
+            f"[dim]({len(resolved.test_paths)} related test file(s) from "
+            f"{'run ' + resolved_thread if thread_id else 'changes'})[/dim]"
+        )
+        for path in resolved.test_paths[:8]:
+            console.print(f"  [dim]•[/dim] [cyan]{path}[/cyan]")
+        if len(resolved.test_paths) > 8:
+            console.print(
+                f"  [dim]… and {len(resolved.test_paths) - 8} more[/dim]"
+            )
+    else:
+        console.print(f"[bold]Running {len(commands)} verification command(s)[/bold]")
     results = asyncio.run(
         run_verify_commands(
             commands,
@@ -847,6 +986,34 @@ def verify(
     console.print("\n[bold green]All verification commands passed.[/bold green]")
 
 
+def _render_file_list_and_diff(
+    changed_files: list[str],
+    diff: str,
+    *,
+    stat: bool,
+    title: str,
+) -> None:
+    """Render a changed-file table plus an optional unified diff."""
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table.add_column("Path", style="cyan")
+    for path in changed_files:
+        table.add_row(path)
+    console.print(table)
+    console.print(f"[dim]{len(changed_files)} file(s) changed.[/dim]")
+    if not stat and diff.strip():
+        console.print("\n[bold]Diff:[/bold]")
+        from rich.syntax import Syntax
+
+        console.print(Syntax(diff, "diff", theme="ansi_dark", word_wrap=False))
+
+
+def _resolve_run_manifest(config: WorkflowConfig, thread_id: str | None):
+    """Return (resolved_thread_id, manifest_dict | None) for a thread."""
+    resolved = default_thread_id(thread_id, project_dir=config.project_dir)
+    storage = StateStorage(Path(config.state_dir), thread_id=resolved)
+    return resolved, storage.load_run_manifest()
+
+
 @app.command()
 def changes(
     config_file: str = typer.Option(
@@ -855,34 +1022,113 @@ def changes(
         "-c",
         help="Path to config file",
     ),
+    thread_id: str | None = typer.Option(
+        None,
+        "--thread-id",
+        "-t",
+        help=(
+            "Show changes for a specific run (default: current git branch). "
+            "When the thread has a Run Workspace, only that run's changes are "
+            "shown; otherwise the whole working tree is shown."
+        ),
+    ),
     stat: bool = typer.Option(
         False,
         "--stat",
         help="Only list changed files; skip the full unified diff.",
     ),
 ):
-    """Show the project's current working-tree changes (read-only).
+    """Show what a run changed (read-only).
 
-    A ``multi_agent`` run on a file-writing backend edits files in place.
-    When the pre-run gate started from a clean tree, this snapshot is a
-    convenient review of what the agents left behind. If the run used
-    ``--allow-dirty`` or you edited files during the run, those edits are
-    included too. This is a thin, safe wrapper over ``git status`` +
-    ``git diff HEAD`` that never modifies anything — use
-    [cyan]zeperion discard[/cyan] to roll changes back.
+    With a Run Workspace (the default for ``zeperion run``), this shows
+    exactly the files that *this run* changed
+    (``git diff base_commit..final_commit``), isolated from anything you
+    edited in your own working tree. For legacy ``--in-place`` runs (no
+    workspace manifest), it falls back to the whole working tree
+    (``git status`` + ``git diff HEAD``). Never modifies anything — use
+    [cyan]zeperion accept[/cyan] / [cyan]discard[/cyan] afterwards.
     """
+    config, _ = _load_config_for_command(config_file)
+    resolved_thread, manifest = _resolve_run_manifest(config, thread_id)
+
+    from zeperion.models import RunStatus
+
+    if manifest and manifest.get("status") == RunStatus.DISCARDED.value:
+        console.print(
+            f"[yellow]Run [cyan]{resolved_thread}[/cyan] was discarded[/yellow] — "
+            "its worktree and branch no longer exist, so there is nothing to show."
+        )
+        return
+
+    if manifest:
+        from zeperion.utils.workspace import workspace_diff
+
+        final_commit = manifest.get("final_commit")
+        run_branch = manifest.get("run_branch", "?")
+        if final_commit:
+            res = workspace_diff(
+                config.project_dir, manifest["base_commit"], final_commit
+            )
+            if not res.ok:
+                console.print(f"[red]Error reading run diff:[/red] {res.error}")
+                raise typer.Exit(1)
+            if not res.changed_files:
+                console.print(
+                    f"[green]Run [cyan]{resolved_thread}[/cyan] produced no "
+                    "file changes.[/green]"
+                )
+                return
+            _render_file_list_and_diff(
+                res.changed_files,
+                res.diff,
+                stat=stat,
+                title=f"Run changes — {resolved_thread} ({run_branch})",
+            )
+        else:
+            # Run still active / not finalized: inspect the live worktree.
+            from zeperion.utils.changes import collect_changes
+
+            snapshot = collect_changes(manifest["worktree_path"])
+            if not snapshot.is_repo:
+                console.print(
+                    f"[yellow]Run worktree is gone:[/yellow] "
+                    f"{manifest['worktree_path']}"
+                )
+                raise typer.Exit(1)
+            if snapshot.is_clean:
+                console.print(
+                    f"[green]Run [cyan]{resolved_thread}[/cyan] worktree is "
+                    "clean[/green] — no changes yet."
+                )
+                return
+            _render_file_list_and_diff(
+                snapshot.modified + snapshot.untracked,
+                snapshot.diff,
+                stat=stat,
+                title=f"Run changes (in progress) — {resolved_thread}",
+            )
+
+        status = manifest.get("status")
+        if status == RunStatus.ACCEPTED.value:
+            console.print("\n[dim]This run was already accepted.[/dim]")
+        else:
+            console.print(
+                f"\n[bold]Next:[/bold] [cyan]zeperion accept -t {resolved_thread}[/cyan] "
+                f"to apply, or [cyan]zeperion discard -t {resolved_thread} --yes[/cyan] "
+                "to drop it."
+            )
+        return
+
+    # ---- Legacy whole-tree view (no Run Workspace manifest) ----
     from zeperion.utils.changes import collect_changes
 
-    config, _ = _load_config_for_command(config_file)
     snapshot = collect_changes(config.project_dir)
-
     if not snapshot.is_repo:
         console.print(
             f"[yellow]Not a git repository:[/yellow] {config.project_dir}\n"
             "  'zeperion changes' needs git to tell apart the agents' edits."
         )
         raise typer.Exit(1)
-
     if snapshot.is_clean:
         console.print("[green]Working tree is clean[/green] — no agent changes to show.")
         return
@@ -925,26 +1171,87 @@ def discard(
         "-c",
         help="Path to config file",
     ),
+    thread_id: str | None = typer.Option(
+        None,
+        "--thread-id",
+        "-t",
+        help=(
+            "Discard a specific run (default: current git branch). When the "
+            "thread has a Run Workspace, only that run's worktree + branch are "
+            "removed (your working tree is untouched); otherwise the whole "
+            "working tree is reset."
+        ),
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Required. Confirm the destructive reset; without it the command refuses.",
+        help="Required. Confirm the destructive operation; without it the command refuses.",
     ),
 ):
-    """Roll back every uncommitted change in the project tree. Destructive.
+    """Drop a run. Destructive.
 
-    Runs ``git reset --hard HEAD`` (drops tracked edits) then
-    ``git clean -fd`` (deletes untracked files the agents created). This
-    is irreversible — there is no undo — so the command refuses to do
-    anything unless you pass [cyan]--yes[/cyan]. Review first with
-    [cyan]zeperion changes[/cyan].
+    With a Run Workspace: removes the run's worktree and deletes its
+    ``zeperion/run/<thread>`` branch, leaving your own working tree
+    completely untouched. For legacy ``--in-place`` runs (no workspace
+    manifest): runs ``git reset --hard HEAD`` + ``git clean -fd`` on the
+    project tree. Either way the command refuses without
+    [cyan]--yes[/cyan]; review first with [cyan]zeperion changes[/cyan].
     """
+    config, _ = _load_config_for_command(config_file)
+    resolved_thread, manifest = _resolve_run_manifest(config, thread_id)
+
+    from zeperion.models import RunStatus
+
+    if manifest and manifest.get("status") == RunStatus.DISCARDED.value:
+        # Terminal state. Never fall through to the legacy whole-tree reset
+        # below — doing so would `git reset --hard` + `git clean -fd` the
+        # user's working tree, wiping unrelated edits.
+        console.print(
+            f"[green]Run [cyan]{resolved_thread}[/cyan] is already discarded[/green] — "
+            "nothing to do. Your working tree was not touched."
+        )
+        return
+
+    if manifest:
+        run_branch = manifest.get("run_branch", "")
+        worktree_path = manifest.get("worktree_path", "")
+        n = len(manifest.get("changed_files", []))
+        console.print(
+            f"[bold red]About to discard run [cyan]{resolved_thread}[/cyan]:[/bold red]\n"
+            f"  remove worktree [yellow]{worktree_path}[/yellow]\n"
+            f"  delete branch   [yellow]{run_branch}[/yellow]\n"
+            f"  [dim]({n} changed file(s); your working tree is NOT touched)[/dim]"
+        )
+        if not yes:
+            console.print(
+                "\n[bold red]Refusing to discard without confirmation.[/bold red]\n"
+                f"  Re-run with [cyan]zeperion discard -t {resolved_thread} --yes[/cyan]."
+            )
+            raise typer.Exit(1)
+
+        from zeperion.utils.time import iso_now
+        from zeperion.utils.workspace import discard_run_workspace
+
+        result = discard_run_workspace(config.project_dir, run_branch, worktree_path)
+        if not result.ok:
+            console.print(f"[red]Discard failed:[/red] {result.error}")
+            raise typer.Exit(1)
+
+        storage = StateStorage(Path(config.state_dir), thread_id=resolved_thread)
+        manifest["status"] = RunStatus.DISCARDED.value
+        manifest["finished_at"] = manifest.get("finished_at") or iso_now()
+        storage.save_run_manifest(manifest)
+        console.print(
+            f"[bold green]\u2713 Discarded run.[/bold green] Removed worktree and "
+            f"branch [cyan]{run_branch}[/cyan]. Your working tree is unchanged."
+        )
+        return
+
+    # ---- Legacy whole-tree discard (no Run Workspace manifest) ----
     from zeperion.utils.changes import collect_changes, discard_changes
 
-    config, _ = _load_config_for_command(config_file)
     snapshot = collect_changes(config.project_dir)
-
     if not snapshot.is_repo:
         console.print(
             f"[yellow]Not a git repository:[/yellow] {config.project_dir}\n"
@@ -983,6 +1290,179 @@ def discard(
     )
 
 
+@app.command()
+def accept(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml",
+        "--config",
+        "-c",
+        help="Path to config file",
+    ),
+    thread_id: str | None = typer.Option(
+        None,
+        "--thread-id",
+        "-t",
+        help="Run to accept (default: current git branch).",
+    ),
+    remove_workspace: bool = typer.Option(
+        False,
+        "--remove-workspace",
+        help="After applying, also remove the run worktree + branch (like discard).",
+    ),
+    allow_dirty: bool = typer.Option(
+        False,
+        "--allow-dirty",
+        help=(
+            "Apply even if your working tree has uncommitted changes. By "
+            "default accept refuses on a dirty tree so the run's result is "
+            "not mixed with your own edits."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt when the run's verify checks failed.",
+    ),
+):
+    """Apply a run's changes onto your current branch (staged, not committed).
+
+    Takes the run's diff (``base_commit..final_commit``) and applies it to
+    your current working tree with ``git apply --index``, so the changes
+    land [bold]staged[/bold] but uncommitted. Review them with
+    ``git diff --staged`` and commit yourself when satisfied. If the patch
+    conflicts with your current branch, nothing is applied and the error
+    is reported. Requires a Run Workspace manifest (a default ``zeperion
+    run`` produces one).
+    """
+    config, _ = _load_config_for_command(config_file)
+    resolved_thread, manifest = _resolve_run_manifest(config, thread_id)
+
+    from zeperion.models import RunStatus
+
+    if not manifest:
+        console.print(
+            f"[yellow]No Run Workspace for thread [cyan]{resolved_thread}[/cyan].[/yellow]\n"
+            "  Nothing to accept. (Legacy --in-place runs edit your working tree "
+            "directly — just commit them.)"
+        )
+        raise typer.Exit(1)
+    if manifest.get("status") == RunStatus.DISCARDED.value:
+        console.print(
+            f"[yellow]Run [cyan]{resolved_thread}[/cyan] was discarded[/yellow] — "
+            "nothing to accept."
+        )
+        raise typer.Exit(1)
+
+    final_commit = manifest.get("final_commit")
+    if not final_commit:
+        console.print(
+            f"[yellow]Run [cyan]{resolved_thread}[/cyan] has not been finalized "
+            "yet[/yellow] (still running, or interrupted before completion)."
+        )
+        raise typer.Exit(1)
+    if not manifest.get("changed_files"):
+        console.print(
+            f"[green]Run [cyan]{resolved_thread}[/cyan] produced no changes[/green] — "
+            "nothing to accept."
+        )
+        return
+
+    from zeperion.utils.changes import collect_changes
+    from zeperion.utils.time import iso_now
+    from zeperion.utils.workspace import apply_workspace_to_current, discard_run_workspace
+
+    # Refuse on a dirty working tree so the run's result is not silently
+    # interleaved with the user's own uncommitted edits (the user can opt
+    # out with --allow-dirty).
+    if not allow_dirty:
+        snapshot = collect_changes(config.project_dir)
+        if snapshot.is_repo and not snapshot.is_clean:
+            console.print(
+                f"[bold red]Refusing to accept onto a dirty working tree.[/bold red]\n"
+                f"  Your tree has {snapshot.total_count} uncommitted change(s); "
+                "applying the run on top would mix them with the run's result.\n"
+                "  Commit or stash your changes first, then re-run "
+                f"[cyan]zeperion accept -t {resolved_thread}[/cyan].\n"
+                "  To apply anyway, pass [cyan]--allow-dirty[/cyan]."
+            )
+            raise typer.Exit(1)
+
+    # Surface a known-failing verify result before applying, so the user
+    # doesn't accept a broken run unknowingly. Confirmable, not blocking.
+    if manifest.get("verify_status") == "fail" and not yes:
+        failed = [
+            r.get("command", "?")
+            for r in manifest.get("verify_results", [])
+            if not r.get("passed", False)
+        ]
+        detail = f" ({', '.join(failed)})" if failed else ""
+        console.print(
+            f"[bold yellow]\u26a0 This run's verify checks FAILED[/bold yellow]{detail}.\n"
+            "  Accepting will stage code that did not pass verification."
+        )
+        if not typer.confirm("Apply anyway?", default=False):
+            console.print(
+                "[yellow]Aborted.[/yellow] Fix it with "
+                f"[cyan]zeperion run --resume -t {resolved_thread}[/cyan] "
+                "or inspect with [cyan]zeperion verify[/cyan]."
+            )
+            raise typer.Exit(1)
+
+    files = manifest["changed_files"]
+    console.print(
+        f"[bold]Applying {len(files)} file(s) from run "
+        f"[cyan]{resolved_thread}[/cyan] onto your current branch:[/bold]"
+    )
+    for path in files:
+        console.print(f"  [cyan]{path}[/cyan]")
+
+    result = apply_workspace_to_current(
+        config.project_dir, manifest["base_commit"], final_commit
+    )
+    if not result.ok:
+        console.print(
+            f"\n[red]Accept failed:[/red] {result.error}\n"
+            "  Resolve the conflict manually (your working tree was not modified), "
+            "or inspect the run with "
+            f"[cyan]zeperion changes -t {resolved_thread}[/cyan]."
+        )
+        raise typer.Exit(1)
+
+    storage = StateStorage(Path(config.state_dir), thread_id=resolved_thread)
+    manifest["status"] = RunStatus.ACCEPTED.value
+    manifest["accepted_at"] = iso_now()
+    storage.save_run_manifest(manifest)
+
+    console.print(
+        "\n[bold green]\u2713 Applied (staged).[/bold green] "
+        "Review with [cyan]git diff --staged[/cyan], then commit when ready."
+    )
+    console.print(
+        "[dim]Or open a PR for these staged changes: "
+        f"[cyan]zeperion ship --pr-only -t {resolved_thread}[/cyan].[/dim]"
+    )
+
+    if remove_workspace:
+        cleanup = discard_run_workspace(
+            config.project_dir, manifest["run_branch"], manifest["worktree_path"]
+        )
+        if cleanup.ok:
+            console.print(
+                f"[dim]Removed run worktree + branch "
+                f"[cyan]{manifest['run_branch']}[/cyan].[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]\u26a0 Could not remove run workspace:[/yellow] {cleanup.error}"
+            )
+    else:
+        console.print(
+            f"[dim]When done, clean up with "
+            f"[cyan]zeperion discard -t {resolved_thread} --yes[/cyan].[/dim]"
+        )
+
+
 # Graph nodes that only mutate counters/terminal state; printing a
 # ``→ increment_round`` style line for them is pure noise in the run log.
 _QUIET_NODES = {"increment_round", "increment_fix"}
@@ -1013,6 +1493,171 @@ def _print_node_progress(node_name: str, node_state) -> None:
         bits.append(f"test={_enum_str(node_state['test_status'])}")
     suffix = f"  [dim]({', '.join(bits)})[/dim]" if bits else ""
     console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
+
+
+async def _run_post_run_verify(
+    *,
+    config: WorkflowConfig,
+    workspace,
+    manifest,
+    out: Console,
+) -> None:
+    """Run verification commands against the run's worktree and record them.
+
+    Mutates ``manifest.verify_status`` / ``verify_results`` in place. Uses
+    the configured ``tester_verify_commands`` or, failing that, an
+    auto-detected set so the user gets a signal even before configuring
+    one. Best-effort: never raises (``run_verify_commands`` is total).
+    """
+    from zeperion.utils.verify import (
+        detect_verify_commands,
+        resolve_verify_commands,
+        run_verify_commands,
+        summarize_verify_results,
+    )
+
+    worktree = Path(workspace.worktree_path)
+    commands = list(config.tester_verify_commands)
+    detected = False
+    if not commands:
+        commands = detect_verify_commands(worktree)
+        detected = bool(commands)
+
+    if not commands:
+        manifest.verify_status = "skipped"
+        out.print(
+            "[dim]Verify: no tester_verify_commands configured and none "
+            "detected — skipped. Add one with "
+            "[cyan]zeperion verify --write-config[/cyan].[/dim]"
+        )
+        return
+
+    resolved = resolve_verify_commands(
+        commands,
+        changed_files=manifest.changed_files,
+        project_dir=worktree,
+        select_tests=True,
+    )
+    commands = resolved.commands
+    manifest.verify_scope = resolved.scope
+    manifest.verify_test_paths = list(resolved.test_paths)
+
+    where = "auto-detected" if detected else "configured"
+    scope_note = ""
+    if resolved.scope == "scoped":
+        scope_note = (
+            f", scoped to {len(resolved.test_paths)} test file(s) "
+            "from this run's changes"
+        )
+    out.print(
+        f"\n[bold]Verifying[/bold] this run ({len(commands)} {where} "
+        f"command(s){scope_note}) in its isolated worktree…"
+    )
+    results = await run_verify_commands(
+        commands,
+        cwd=worktree,
+        timeout_seconds=config.tester_verify_timeout_seconds,
+    )
+    status, compact = summarize_verify_results(results)
+    manifest.verify_status = status
+    manifest.verify_results = compact
+
+    for rec in compact:
+        if rec["timed_out"]:
+            badge = "[yellow]TIMEOUT[/yellow]"
+        elif rec["passed"]:
+            badge = "[green]PASS[/green]"
+        else:
+            badge = "[red]FAIL[/red]"
+        out.print(
+            f"  {badge} [cyan]{rec['command']}[/cyan] "
+            f"[dim](exit {rec['exit_code']}, {rec['duration_ms']}ms)[/dim]"
+        )
+
+
+async def _finalize_run_workspace_manifest(
+    *,
+    config: WorkflowConfig,
+    thread_id: str,
+    workspace,
+    manifest,
+    blocked: bool,
+    phase_str: str | None,
+    global_str: str | None,
+    verify: bool,
+    out: Console,
+) -> None:
+    """Commit the worktree changes and persist the finished run manifest.
+
+    Called once the multi-agent stream completes normally (not on
+    Ctrl-C). Updates the manifest with the final commit + changed files,
+    optionally runs post-run verification against the worktree, and prints
+    the review/accept/discard next steps. Best-effort: a git failure here
+    is logged and surfaced but does not crash the run.
+    """
+    from zeperion.models import RunStatus
+    from zeperion.utils.time import iso_now
+    from zeperion.utils.workspace import finalize_run_workspace
+
+    storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
+    result = finalize_run_workspace(config.project_dir, workspace)
+
+    manifest.finished_at = iso_now()
+    manifest.phase = phase_str
+    manifest.global_status = global_str
+    manifest.status = RunStatus.BLOCKED if blocked else RunStatus.FINISHED
+    if result.ok:
+        manifest.final_commit = result.final_commit
+        manifest.changed_files = result.changed_files
+    else:
+        out.print(
+            f"[yellow]\u26a0 Could not finalize run workspace:[/yellow] {result.error}"
+        )
+
+    n = len(manifest.changed_files)
+
+    # Auto-verify the run's result in its isolated worktree (only when it
+    # actually produced changes and finished cleanly).
+    if verify and not blocked and result.ok and n > 0:
+        try:
+            await _run_post_run_verify(
+                config=config, workspace=workspace, manifest=manifest, out=out
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("post-run verify failed: %s", exc)
+
+    storage.save_run_manifest(manifest.model_dump(mode="json"))
+
+    if n == 0:
+        out.print(
+            "[dim]Run Workspace: no file changes were produced in this run.[/dim]"
+        )
+        return
+
+    verify_line = ""
+    if manifest.verify_status == "pass":
+        verify_line = " [green](verify passed)[/green]"
+    elif manifest.verify_status == "fail":
+        verify_line = " [red](verify FAILED)[/red]"
+    out.print(
+        f"\n[bold]Run Workspace:[/bold] {n} file(s) changed on branch "
+        f"[cyan]{manifest.run_branch}[/cyan].{verify_line}"
+    )
+    out.print("[bold]Next:[/bold]")
+    out.print(f"  [green]$[/green] [cyan]zeperion changes -t {thread_id}[/cyan]   # review")
+    if manifest.verify_status == "fail":
+        out.print(
+            "  [green]$[/green] [cyan]zeperion verify[/cyan]                 "
+            "# re-run / inspect failing checks"
+        )
+        out.print(
+            f"  [green]$[/green] [cyan]zeperion run --resume -t {thread_id}[/cyan]  "
+            "# let the agents fix it"
+        )
+    out.print(f"  [green]$[/green] [cyan]zeperion accept  -t {thread_id}[/cyan]   # apply (staged)")
+    out.print(
+        f"  [green]$[/green] [cyan]zeperion discard -t {thread_id} --yes[/cyan]  # drop this run"
+    )
 
 
 @app.command()
@@ -1103,6 +1748,36 @@ def run(
             "prompt still shows (unlike --yes)."
         ),
     ),
+    in_place: bool = typer.Option(
+        False,
+        "--in-place",
+        help=(
+            "Disable Run Workspace and edit the project's working tree "
+            "directly (legacy behaviour). By default a multi_agent run "
+            "executes inside an isolated git worktree so it can be "
+            "reviewed/accepted/discarded as a transaction."
+        ),
+    ),
+    force_reset: bool = typer.Option(
+        False,
+        "--force-reset",
+        help=(
+            "When a new (non-resume) run finds an existing Run Workspace "
+            "that is still active/finished/blocked (i.e. not yet accepted "
+            "or discarded), discard it and start fresh. Without this flag "
+            "such a run is refused so unreviewed work is not silently lost."
+        ),
+    ),
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help=(
+            "After a multi_agent run finishes, run the verification "
+            "commands (tester_verify_commands, or an auto-detected set) "
+            "against the run's worktree and record pass/fail in the run "
+            "manifest. Only applies in Run Workspace mode."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -1127,6 +1802,9 @@ def run(
             no_pr_pipeline=no_pr_pipeline,
             yes=yes,
             allow_dirty=allow_dirty,
+            in_place=in_place,
+            force_reset=force_reset,
+            verify=verify,
         )
         return
     if log_format:
@@ -1159,6 +1837,12 @@ def run(
     checkpoint_path = Path(config.state_dir) / "checkpoints.db"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Run Workspace state shared with run_workflow() below via closure.
+    # ``workspace`` is None in --in-place mode (or non-multi_agent).
+    use_workspace = mode == "multi_agent" and config.use_run_workspace and not in_place
+    workspace = None
+    workspace_manifest = None
+
     if mode == "multi_agent":
         from zeperion.graphs import create_multi_agent_graph
         from zeperion.models import create_initial_state
@@ -1168,8 +1852,115 @@ def run(
         # for confirmation in interactive sessions. It also folds in the
         # old "AnthropicAgent doesn't write files" footgun warning, so we
         # no longer call warn_if_anthropic_developer_lacks_file_writes
-        # separately here.
-        prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
+        # separately here. In workspace mode the dirty-tree block is
+        # skipped (the run is isolated in a worktree).
+        prerun_gate(
+            config,
+            console,
+            yes=yes,
+            allow_dirty=allow_dirty,
+            workspace_enabled=use_workspace,
+        )
+
+        # ``run_config`` is what the graph (and therefore the agents) sees.
+        # In workspace mode we point project_dir at the isolated worktree
+        # while keeping state_dir / requirement_file (resolved to absolute
+        # paths against the config dir) pointing at the real repo.
+        run_config = config
+        if use_workspace:
+            from dataclasses import replace as _dc_replace
+
+            from zeperion.models import RunManifest, RunStatus
+            from zeperion.utils.workspace import create_run_workspace
+
+            worktree_parent = config.run_workspace_parent or str(
+                Path(config.state_dir) / "worktrees"
+            )
+            storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
+            existing = storage.load_run_manifest()
+
+            # A fresh (non-resumed) run must start from a clean transaction:
+            # tear down any prior worktree/branch for this thread so the new
+            # run's diff is anchored at the current HEAD instead of inheriting
+            # the previous run's branch + accumulated commits. But never do
+            # that silently when the prior run still holds unreviewed work
+            # (active/finished/blocked) — that could wipe results the user
+            # has not accepted, or yank a worktree out from under a run that
+            # is still executing. Require an explicit accept/discard, or a
+            # deliberate --force-reset.
+            reset = not resume
+            if reset and existing:
+                prior_status = existing.get("status")
+                terminal = {RunStatus.ACCEPTED.value, RunStatus.DISCARDED.value}
+                if prior_status not in terminal and not force_reset:
+                    console.print(
+                        f"[bold red]Refusing to start a new run on thread "
+                        f"[cyan]{thread_id}[/cyan]:[/bold red] an existing Run "
+                        f"Workspace is [yellow]{prior_status}[/yellow] and has "
+                        "not been accepted or discarded.\n"
+                        "  Starting fresh would discard its worktree + branch "
+                        "and lose any unreviewed work.\n"
+                        f"  Review it: [cyan]zeperion changes -t {thread_id}[/cyan]\n"
+                        f"  Keep it:   [cyan]zeperion accept -t {thread_id}[/cyan]\n"
+                        f"  Drop it:   [cyan]zeperion discard -t {thread_id} --yes[/cyan]\n"
+                        f"  Resume it: [cyan]zeperion run --resume -t {thread_id}[/cyan]\n"
+                        "  Or start over anyway with [cyan]--force-reset[/cyan]."
+                    )
+                    raise typer.Exit(1)
+
+            ws_result = create_run_workspace(
+                config.project_dir,
+                thread_id,
+                worktree_parent=worktree_parent,
+                reset=reset,
+            )
+            if not ws_result.ok:
+                if not ws_result.is_repo:
+                    console.print(
+                        "[red]Error:[/red] Run Workspace needs a git repository "
+                        f"at [cyan]{config.project_dir}[/cyan].\n"
+                        "  Initialise git there, or run with "
+                        "[cyan]--in-place[/cyan] to edit the working tree directly."
+                    )
+                else:
+                    console.print(
+                        f"[red]Error:[/red] Could not create run workspace: "
+                        f"{ws_result.error}"
+                    )
+                raise typer.Exit(1)
+            workspace = ws_result.workspace
+
+            # On resume, preserve the original base_commit/branch/created_at
+            # so the run's diff range stays anchored even if HEAD moved. On a
+            # fresh run the workspace was just reset, so use the new base and
+            # overwrite the manifest entirely (no stale carry-over).
+            if resume and existing:
+                base_commit = existing.get("base_commit") or workspace.base_commit
+                base_branch = existing.get("base_branch") or workspace.base_branch
+            else:
+                base_commit = workspace.base_commit
+                base_branch = workspace.base_branch
+            workspace = _dc_replace(workspace, base_commit=base_commit)
+            workspace_manifest = RunManifest(
+                thread_id=thread_id,
+                status=RunStatus.ACTIVE,
+                base_branch=base_branch,
+                base_commit=base_commit,
+                run_branch=workspace.run_branch,
+                worktree_path=workspace.worktree_path,
+            )
+            if resume and existing and existing.get("created_at"):
+                workspace_manifest.created_at = existing["created_at"]
+            storage.save_run_manifest(workspace_manifest.model_dump(mode="json"))
+            run_config = config.model_copy(
+                update={"project_dir": workspace.worktree_path}
+            )
+            console.print(
+                f"[bold]Run Workspace:[/bold] worktree "
+                f"[cyan]{workspace.worktree_path}[/cyan] on branch "
+                f"[cyan]{workspace.run_branch}[/cyan] "
+                f"[dim](base {base_commit[:8]})[/dim]"
+            )
 
         if resume:
             console.print(f"[bold]Resuming from checkpoint:[/bold] {thread_id}")
@@ -1178,12 +1969,17 @@ def run(
             console.print("[bold]Starting new workflow[/bold]")
             initial_state = create_initial_state(config)
 
+        # In workspace mode the delivery path is ``zeperion accept``; the
+        # auto PR-pipeline tail would operate in the worktree and is out
+        # of scope this round, so we always disable it.
+        disable_pr = no_pr_pipeline or use_workspace
+
         def build_graph(checkpointer):
             return create_multi_agent_graph(
-                config,
+                run_config,
                 checkpointer=checkpointer,
                 thread_id=thread_id,
-                disable_pr_pipeline=no_pr_pipeline,
+                disable_pr_pipeline=disable_pr,
             )
 
     elif mode == "pr_pipeline":
@@ -1261,6 +2057,20 @@ def run(
         try:
             async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
                 graph = build_graph(saver)
+                if resume:
+                    from zeperion.utils.checkpoint_resume import prepare_terminal_resume
+
+                    prep = await prepare_terminal_resume(
+                        graph,
+                        config_obj,
+                        config=config,
+                        mode=mode,
+                    )
+                    if prep is not None:
+                        console.print(
+                            f"[dim]Unblocked terminal checkpoint — continuing from "
+                            f"[cyan]{prep.as_node}[/cyan]…[/dim]"
+                        )
                 async for event in graph.astream(initial_state, config_obj):
                     for node_name, node_state in event.items():
                         _print_node_progress(node_name, node_state)
@@ -1303,6 +2113,19 @@ def run(
                     f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
                 )
                 console.print(f"[bold green]\u2713 Workflow completed![/bold green]{tail}")
+
+            if use_workspace and workspace is not None and workspace_manifest is not None:
+                await _finalize_run_workspace_manifest(
+                    config=config,
+                    thread_id=thread_id,
+                    workspace=workspace,
+                    manifest=workspace_manifest,
+                    blocked=blocked,
+                    phase_str=phase_str,
+                    global_str=global_str,
+                    verify=verify,
+                    out=console,
+                )
 
         except KeyboardInterrupt:
             console.print("\n[yellow]\u26a0 Workflow interrupted[/yellow]")
@@ -1350,6 +2173,33 @@ def ship(
         "--allow-dirty",
         help="Allow shipping from a dirty git tree (prompt still shows unless --yes).",
     ),
+    in_place: bool = typer.Option(
+        False,
+        "--in-place",
+        help=(
+            "Run the agent phase directly in the working tree instead of an "
+            "isolated Run Workspace (legacy behaviour)."
+        ),
+    ),
+    force_reset: bool = typer.Option(
+        False,
+        "--force-reset",
+        help=(
+            "Discard an existing non-accepted/non-discarded Run Workspace for "
+            "this thread and start fresh. Without it, ship refuses rather than "
+            "clobbering unreviewed work."
+        ),
+    ),
+    pr_only: bool = typer.Option(
+        False,
+        "--pr-only",
+        help=(
+            "Skip the agent phase and open a PR for whatever is already in "
+            "your working tree. This is the natural follow-up to "
+            "``zeperion accept`` (which stages a finished run's diff) — it "
+            "ships those staged changes without re-running the agents."
+        ),
+    ),
 ):
     """One-shot: run multi_agent, then PR pipeline.
 
@@ -1375,13 +2225,25 @@ def ship(
     config, config_path = load_ship_config(config_file=config_file, console=console)
     if not validate_configured_cli_backends(config, console):
         raise typer.Exit(1)
-    prerun_gate(config, console, yes=yes, allow_dirty=allow_dirty)
+    prerun_gate(
+        config,
+        console,
+        yes=yes,
+        # --pr-only ships the *current* working tree (typically dirty with
+        # accept'd changes), so a dirty tree is expected, not a hazard. We
+        # still enforce the state_dir-ignore check below.
+        allow_dirty=allow_dirty or pr_only,
+        strict_state_dir_ignore=True,
+    )
     run_ship_command(
         config=config,
         config_path=config_path,
         thread_id=thread_id,
         log_format=log_format,
         console=console,
+        in_place=in_place,
+        force_reset=force_reset,
+        pr_only=pr_only,
     )
 
 
@@ -1478,13 +2340,22 @@ def _render_status_panel(config: WorkflowConfig, thread_id: str | None) -> None:
     # has enough breadcrumbs to show the user "yes, work happened here".
     events = read_events(Path(config.state_dir), thread_id)
 
-    if not workflow_state and not events:
+    run_manifest = storage.load_run_manifest()
+
+    if not workflow_state and not events and not run_manifest:
         console.print("[yellow]No workflow state found[/yellow]")
         console.print(f"Thread ID: [dim]{thread_id}[/dim]")
         console.print("Run 'zeperion run' to start a workflow")
         return
 
     workflow_state = workflow_state or {}
+
+    # A Run Workspace that finished but hasn't been accepted/discarded is
+    # awaiting the operator's review decision.
+    workspace_pending = bool(
+        run_manifest and run_manifest.get("status") in ("finished", "blocked")
+    )
+    verify_failed = bool(run_manifest and run_manifest.get("verify_status") == "fail")
 
     def _fmt(value, default: str = "-") -> str:
         """Render an enum or scalar as a short string.
@@ -1526,6 +2397,24 @@ def _render_status_panel(config: WorkflowConfig, thread_id: str | None) -> None:
         f"[dim]task[/dim] {_fmt(workflow_state.get('task_id'), 'none')}"
     )
 
+    # A finished Run Workspace is waiting on the operator's accept/discard
+    # decision — make that the loudest line so "where am I?" is obvious.
+    if workspace_pending and not in_flight:
+        vs = run_manifest.get("verify_status")
+        if vs == "pass":
+            vbadge = " [green](verify passed)[/green]"
+        elif vs == "fail":
+            vbadge = " [red](verify FAILED)[/red]"
+        elif vs == "skipped":
+            vbadge = " [dim](verify skipped)[/dim]"
+        else:
+            vbadge = ""
+        headline.append("")
+        headline.append(
+            f"[bold yellow]\u23f3 This run is awaiting your review"
+            f"[/bold yellow]{vbadge} \u2014 accept or discard (see Next step)."
+        )
+
     # 2) Current agent.
     headline.append("")
     if in_flight:
@@ -1559,6 +2448,8 @@ def _render_status_panel(config: WorkflowConfig, thread_id: str | None) -> None:
         category=blocker.category if blocker else None,
         in_flight=bool(in_flight),
         done=done,
+        workspace_pending=workspace_pending,
+        verify_failed=verify_failed,
     )
     headline.append("")
     headline.append("[bold]Next step:[/bold]")
@@ -1578,6 +2469,48 @@ def _render_status_panel(config: WorkflowConfig, thread_id: str | None) -> None:
             border_style="red" if blocked else ("green" if done else "blue"),
         )
     )
+
+    # ---- Run Workspace (isolated worktree transaction) ----
+    if run_manifest:
+        ws_status = run_manifest.get("status", "?")
+        status_style = {
+            "active": "yellow",
+            "finished": "green",
+            "blocked": "red",
+            "accepted": "green",
+            "discarded": "dim",
+        }.get(ws_status, "cyan")
+        ws_lines = ["[bold]Run Workspace:[/bold]"]
+        ws_lines.append(f"  Status: [{status_style}]{ws_status}[/{status_style}]")
+        ws_lines.append(f"  Branch: [cyan]{run_manifest.get('run_branch', '?')}[/cyan]")
+        base = (run_manifest.get("base_commit") or "")[:8]
+        final = (run_manifest.get("final_commit") or "")[:8]
+        if final:
+            ws_lines.append(f"  Commits: [dim]{base} → {final}[/dim]")
+        else:
+            ws_lines.append(f"  Base: [dim]{base}[/dim]")
+        ws_lines.append(f"  Changed files: {len(run_manifest.get('changed_files', []))}")
+        verify_status = run_manifest.get("verify_status")
+        if verify_status == "pass":
+            ws_lines.append("  Verify: [green]passed[/green]")
+        elif verify_status == "fail":
+            failed = [
+                r.get("command", "?")
+                for r in run_manifest.get("verify_results", [])
+                if not r.get("passed", False)
+            ]
+            detail = f" [dim]({', '.join(failed)})[/dim]" if failed else ""
+            ws_lines.append(f"  Verify: [red]FAILED[/red]{detail}")
+        elif verify_status == "skipped":
+            ws_lines.append("  Verify: [dim]skipped (no commands)[/dim]")
+        verify_scope = run_manifest.get("verify_scope")
+        if verify_scope == "scoped":
+            n_tests = len(run_manifest.get("verify_test_paths", []))
+            ws_lines.append(
+                f"  Verify scope: [cyan]scoped[/cyan] "
+                f"[dim]({n_tests} related test file(s))[/dim]"
+            )
+        console.print("\n".join(ws_lines))
 
     # ---- Secondary: tokens + PR pipeline (below the fold) ----
     summary = summarise(events)
@@ -1855,6 +2788,16 @@ def logs(
         "--poll-interval",
         help="Seconds between polls when --follow is on.",
     ),
+    errors_only: bool = typer.Option(
+        False,
+        "--errors-only",
+        "-e",
+        help=(
+            "Show only failure/blocker lines (recorded errors, BLOCKED "
+            "terminals, failed or timed-out verify commands) — the quickest "
+            "way to see why a run is unhappy."
+        ),
+    ),
 ):
     """Stream the workflow events file for a thread.
 
@@ -1891,7 +2834,13 @@ def logs(
 
     def _render(ev) -> str:
         ts = ev.timestamp.split("T")[-1][:8] if "T" in ev.timestamp else ev.timestamp
-        return f"[dim]{ts}[/dim] {describe_event(ev)}"
+        text = describe_event(ev)
+        if is_error_event(ev):
+            return f"[dim]{ts}[/dim] [red]{text}[/red]"
+        return f"[dim]{ts}[/dim] {text}"
+
+    def _keep(ev) -> bool:
+        return is_error_event(ev) if errors_only else True
 
     def _print_terminal(ev) -> None:
         """Print a clear end-of-run banner for the terminal event."""
@@ -1902,10 +2851,13 @@ def logs(
             tail = f" [dim]({ev.global_status})[/dim]" if ev.global_status else ""
             console.print(f"\n[bold green]\u2713 Workflow finished[/bold green]{tail}")
 
-    # Print the existing tail first.
-    seen = 0
+    # Print the existing tail first. ``seen`` tracks the *unfiltered* file
+    # position so --follow stays correct even when --errors-only hides rows.
     events = read_events(Path(config.state_dir), thread_id)
-    for ev in events[-tail:]:
+    shown = [ev for ev in events if _keep(ev)]
+    if errors_only and not shown:
+        console.print("[dim]No errors recorded for this thread.[/dim]")
+    for ev in shown[-tail:]:
         console.print(_render(ev))
     seen = len(events)
 
@@ -1936,7 +2888,8 @@ def logs(
             if len(current) > seen:
                 new_events = current[seen:]
                 for ev in new_events:
-                    console.print(_render(ev))
+                    if _keep(ev):
+                        console.print(_render(ev))
                 seen = len(current)
                 # Stop tailing once the workflow signals it's done.
                 terminal = next(

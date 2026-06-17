@@ -54,6 +54,38 @@ class TestCollectChanges:
         assert "tracked.txt" in snapshot.diff
 
 
+    def test_status_failure_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """A failing ``git status`` must NOT look clean (ship gates on this)."""
+        import zeperion.utils.changes as ch
+
+        _init_repo(tmp_path)
+        real = ch._run_git
+
+        def _fake(args, cwd, **kw):
+            if args[:2] == ["status", "--porcelain"]:
+                return subprocess.CompletedProcess(
+                    args=["git", *args], returncode=1, stdout="", stderr="boom"
+                )
+            return real(args, cwd, **kw)
+
+        monkeypatch.setattr(ch, "_run_git", _fake)
+        snapshot = collect_changes(tmp_path)
+        assert snapshot.is_repo is True
+        assert snapshot.status_ok is False
+        assert snapshot.is_clean is False  # fail closed
+
+    def test_run_git_never_raises_on_oserror(self, monkeypatch) -> None:
+        import zeperion.utils.changes as ch
+
+        def _boom(*a, **k):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(ch.subprocess, "run", _boom)
+        proc = ch._run_git(["status"], ".", timeout=5)
+        assert proc.returncode == 127
+        assert "denied" in proc.stderr
+
+
 class TestDiscardChanges:
     def test_non_repo_fails(self, tmp_path: Path) -> None:
         result = discard_changes(tmp_path)

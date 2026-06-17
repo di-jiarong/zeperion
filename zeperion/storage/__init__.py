@@ -49,6 +49,11 @@ class StateStorage:
         # legacy file left behind by an old install is still wiped by
         # ``clear_state`` below as best-effort cleanup.
         self.pipeline_state_file = self.thread_dir / "pipeline_state.json"
+        # Run Workspace manifest — owned by the multi-agent CLI run path.
+        # Records the git transaction (base/run branch/final commit) that
+        # wraps one isolated worktree-backed run so changes/accept/discard
+        # can scope to exactly this run's files.
+        self.run_manifest_file = self.thread_dir / "run_manifest.json"
         self.planner_output_file = self.thread_dir / "planner_output.txt"
         self.developer_output_file = self.thread_dir / "developer_output.txt"
         self.reviewer_output_file = self.thread_dir / "reviewer_output.txt"
@@ -76,6 +81,33 @@ class StateStorage:
             return json.loads(self.pipeline_state_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
             logger.error(f"Failed to load pipeline state: {e}")
+            return None
+
+    def save_run_manifest(self, manifest: dict) -> None:
+        """Persist the Run Workspace manifest for this thread.
+
+        Accepts a plain dict (e.g. ``RunManifest.model_dump(mode="json")``);
+        enum values are coerced to their ``.value`` so the file stays
+        human-readable and re-loadable without the model class.
+        """
+        serializable = {
+            key: (value.value if hasattr(value, "value") else value)
+            for key, value in manifest.items()
+        }
+        self.run_manifest_file.write_text(
+            json.dumps(serializable, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.debug(f"Saved run manifest to {self.run_manifest_file}")
+
+    def load_run_manifest(self) -> dict | None:
+        """Load the Run Workspace manifest for this thread; None if absent."""
+        if not self.run_manifest_file.exists():
+            return None
+        try:
+            return json.loads(self.run_manifest_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to load run manifest: {e}")
             return None
 
     def _safe_path_part(self, value: str) -> str:
@@ -200,6 +232,7 @@ class StateStorage:
         for file in [
             legacy_workflow_state,
             self.pipeline_state_file,
+            self.run_manifest_file,
             self.planner_output_file,
             self.developer_output_file,
             self.reviewer_output_file,

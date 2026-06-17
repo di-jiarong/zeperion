@@ -22,6 +22,8 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+from tests.conftest import strip_ansi
+
 from zeperion.cli import (
     app,
     validate_configured_cli_backends,
@@ -75,7 +77,8 @@ class TestListCommandDoesNotCrash:
         assert result.exit_code == 0
         # ``--config`` option must still be exposed even though the
         # internal Python function was renamed.
-        assert "--config" in result.output
+        # Rich renders ``--config`` across two ANSI spans; strip first.
+        assert "--config" in strip_ansi(result.output)
 
     def test_top_level_help_includes_list_command(self) -> None:
         # ``@app.command("list")`` must keep the user-facing name even
@@ -83,7 +86,7 @@ class TestListCommandDoesNotCrash:
         runner = CliRunner()
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert " list " in result.output
+        assert " list " in strip_ansi(result.output)
 
 
 class TestStatusCommandDoesNotCrash:
@@ -137,8 +140,9 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert "reviewer_agent_type: pi" in config_text
         assert "tester_agent_type: pi" in config_text
         assert "tester_verify_commands: []" in config_text
-        assert "Developer/Reviewer/Tester=pi" in result.output
-        assert "none detected" in result.output
+        plain = strip_ansi(result.output)
+        assert "Developer/Reviewer/Tester=pi" in plain
+        assert "none detected" in plain
 
     def test_init_detects_pytest_verify_command(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text(
@@ -164,7 +168,7 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert "developer_agent_type: claude_code" in config_text
         assert "reviewer_agent_type: claude_code" in config_text
         assert "tester_agent_type: claude_code" in config_text
-        assert "Developer/Reviewer/Tester=claude_code" in result.output
+        assert "Developer/Reviewer/Tester=claude_code" in strip_ansi(result.output)
 
     def test_init_backend_anthropic(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -176,7 +180,7 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert "developer_agent_type: anthropic" in config_text
         assert "reviewer_agent_type: anthropic" in config_text
         assert "tester_agent_type: anthropic" in config_text
-        assert "Developer/Reviewer/Tester=anthropic" in result.output
+        assert "Developer/Reviewer/Tester=anthropic" in strip_ansi(result.output)
 
     def test_init_rejects_unknown_backend(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -289,7 +293,7 @@ class TestNoPRPipelineFlag:
         runner = CliRunner()
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0, f"run --help crashed:\n{result.output}"
-        assert "--no-pr-pipeline" in result.output
+        assert "--no-pr-pipeline" in strip_ansi(result.output)
 
 
 class TestDoctorCommand:
@@ -315,15 +319,17 @@ class TestDoctorCommand:
             app,
             ["doctor", "-c", str(project_dir / ".zeperion" / "config.yaml")],
         )
-        assert "built-in default model name" in result.output
-        assert "planner" in result.output
+        plain = strip_ansi(result.output)
+        assert "built-in default model name" in plain
+        assert "planner" in plain
 
     def test_doctor_help_lists_probe_flag(self) -> None:
         runner = CliRunner()
         result = runner.invoke(app, ["doctor", "--help"])
         assert result.exit_code == 0, result.output
-        assert "--probe" in result.output
-        assert "--no-probe" in result.output
+        plain = strip_ansi(result.output)
+        assert "--probe" in plain
+        assert "--no-probe" in plain
 
     def test_doctor_probe_flags_broken_pi_backend(self, tmp_path: Path, monkeypatch) -> None:
         # A pi backend whose CLI isn't installed must surface as a failed
@@ -534,10 +540,14 @@ class TestVerifyCommand:
             ],
         )
         assert result.exit_code == 1
-        assert "Verification failed:" in result.output
-        assert "1/1" in result.output
-        assert "exit 3" in result.output
-        assert "boom_marker" in result.output
+        plain = strip_ansi(result.output)
+        assert "Verification failed:" in plain
+        # Rich renders a table row with FAIL and exit code; "1/1" is no longer
+        # the format — verify that the command, exit code, and error marker
+        # all appear in the output.
+        assert "FAIL" in plain
+        assert "exit 3" in plain
+        assert "boom_marker" in plain
 
 
 class TestPrerunGate:
@@ -566,6 +576,10 @@ class TestPrerunGate:
         (project_dir / "tracked.txt").write_text("v2", encoding="utf-8")
 
     def test_run_blocks_on_dirty_tree(self, project_dir: Path) -> None:
+        # The dirty-tree block only applies to legacy --in-place runs.
+        # With Run Workspace (the default) a dirty tree is fine because the
+        # run executes in an isolated worktree, so we pass --in-place to
+        # exercise the gate.
         self._make_dirty_repo(project_dir)
         runner = CliRunner()
         result = runner.invoke(
@@ -578,6 +592,7 @@ class TestPrerunGate:
                 str(project_dir / ".zeperion" / "config.yaml"),
                 "-t",
                 "gate-test",
+                "--in-place",
             ],
         )
         assert result.exit_code == 1, result.output
@@ -686,7 +701,82 @@ class TestLogsCommand:
             ],
         )
         assert result.exit_code == 0
-        assert "verify failed: pytest -q (exit=2) (123ms)" in result.output
+        plain = strip_ansi(result.output)
+        assert "verify failed: pytest -q" in plain
+        assert "(exit=2)" in plain
+        assert "(123ms)" in plain
+
+    def test_logs_errors_only_filters_non_errors(self, project_dir: Path) -> None:
+        events_path = project_dir / ".zeperion" / "state" / "runs" / "demo" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "timestamp": "2026-05-14T14:00:00+00:00",
+                "event": "agent_started",
+                "role": "planner",
+                "round": 1,
+            },
+            {
+                "timestamp": "2026-05-14T14:05:00+00:00",
+                "event": "tester_verify_command",
+                "role": "tester",
+                "round": 1,
+                "command": "pytest -q",
+                "exit_code": 2,
+                "passed": False,
+                "duration_ms": 123,
+            },
+        ]
+        events_path.write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "logs",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "-t",
+                "demo",
+                "--errors-only",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # The failing verify line is kept…
+        assert "verify failed: pytest -q" in result.output
+        # …but the benign "planner started" line is filtered out.
+        assert "planner started" not in result.output
+
+    def test_logs_errors_only_reports_none_when_clean(self, project_dir: Path) -> None:
+        events_path = project_dir / ".zeperion" / "state" / "runs" / "demo" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-14T14:00:00+00:00",
+                    "event": "agent_started",
+                    "role": "planner",
+                    "round": 1,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "logs",
+                "-c",
+                str(project_dir / ".zeperion" / "config.yaml"),
+                "-t",
+                "demo",
+                "-e",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "No errors recorded" in result.output
 
 
 class TestVersionCommand:
@@ -694,7 +784,8 @@ class TestVersionCommand:
         runner = CliRunner()
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0, f"version crashed:\n{result.output}"
-        assert result.stdout.strip() == "zeperion 0.1.0"
+        # Rich styles the version number with ANSI; strip and compare.
+        assert strip_ansi(result.stdout).strip() == "zeperion 0.1.0"
 
     def test_version_command_help(self) -> None:
         runner = CliRunner()

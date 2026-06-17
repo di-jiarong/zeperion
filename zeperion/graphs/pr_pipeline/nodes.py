@@ -76,17 +76,53 @@ ZEPERION_INTERNAL_PATHS: tuple[str, ...] = (
 )
 
 
-async def _unstage_zeperion_internals(github: "GitHubClient") -> None:
+def _protected_internal_paths(extra_paths: "list[str] | None" = None) -> list[str]:
+    """Repo-root-relative paths the PR pipeline must never commit."""
+    paths = list(ZEPERION_INTERNAL_PATHS)
+    for extra in extra_paths or []:
+        if extra and extra not in paths:
+            paths.append(extra)
+    return paths
+
+
+def _staged_internal_leaks(
+    staged_files: "list[str]", extra_paths: "list[str] | None" = None
+) -> list[str]:
+    """Return staged paths that fall under a protected internal directory.
+
+    ``git diff --cached --name-only`` reports paths relative to the repo
+    root, so we compare against the repo-root-relative protected prefixes.
+    """
+    protected = [p.rstrip("/") for p in _protected_internal_paths(extra_paths)]
+    leaks: list[str] = []
+    for path in staged_files:
+        p = path.strip()
+        if not p:
+            continue
+        if any(p == pref or p.startswith(pref + "/") for pref in protected):
+            leaks.append(p)
+    return leaks
+
+
+async def _unstage_zeperion_internals(
+    github: "GitHubClient", extra_paths: "list[str] | None" = None
+) -> None:
     """Best-effort un-stage of zeperion's own runtime artifacts.
 
-    Failures are tolerated: missing paths or unborn HEAD just mean there
-    was nothing to unstage.
+    ``extra_paths`` lets callers add a custom (non-default) ``state_dir`` so
+    a state_dir configured outside ``.zeperion/state`` is still excluded.
+
+    Pathspecs are anchored at the repo root with the ``:(top)`` magic prefix
+    so the un-stage is correct even when git runs from a sub-directory.
+    Failures are tolerated here (missing paths / unborn HEAD); the caller
+    enforces the hard guarantee via :func:`_staged_internal_leaks` before
+    committing.
     """
-    for path in ZEPERION_INTERNAL_PATHS:
+    for path in _protected_internal_paths(extra_paths):
         try:
-            await github.run_git(["reset", "HEAD", "--", path])
+            await github.run_git(["reset", "HEAD", "--", f":(top){path}"])
         except RuntimeError as exc:
-            logger.debug("reset HEAD -- %s skipped: %s", path, exc)
+            logger.debug("reset HEAD -- :(top)%s skipped: %s", path, exc)
 
 
 def _derive_commit_subject(state: PRPipelineState) -> str:
@@ -129,11 +165,31 @@ async def commit_changes_node(state: PRPipelineState) -> dict:
                 "updated_at": iso_now(),
             }
 
+        extra_internal = [state.get("zeperion_state_dir")]
         await github.run_git(["add", "-A"])
-        await _unstage_zeperion_internals(github)
+        await _unstage_zeperion_internals(github, extra_paths=extra_internal)
 
         diff_cached = await github.run_git(["diff", "--cached", "--name-only"])
         staged_files = [line for line in diff_cached.splitlines() if line.strip()]
+
+        # Hard guarantee: un-stage is best-effort (it can silently fail on an
+        # unborn HEAD), so verify nothing protected is still staged before we
+        # commit. Refuse rather than leak zeperion internals into the PR.
+        leaks = _staged_internal_leaks(staged_files, extra_internal)
+        if leaks:
+            msg = (
+                "Refusing to commit: zeperion internal paths are still staged "
+                f"after un-stage: {', '.join(leaks[:10])}. Add the state_dir to "
+                ".gitignore."
+            )
+            logger.error(msg)
+            span.set_attribute("zeperion.commit.aborted", "internals_staged")
+            return {
+                "pr_phase": PRPhase.FAILED,
+                "last_error": msg,
+                "updated_at": iso_now(),
+            }
+
         if not staged_files:
             logger.info("Nothing to commit after excluding zeperion internals")
             span.set_attribute("zeperion.commit.skipped", "only_zeperion_internals")
@@ -613,10 +669,25 @@ def _build_pr_fixer_node(config: WorkflowConfig):
 
         # Same two-step staging as commit_changes_node so we never leak
         # zeperion's own state into the fix commit either.
+        extra_internal = [state.get("zeperion_state_dir")]
         await github.run_git(["add", "-A"])
-        await _unstage_zeperion_internals(github)
+        await _unstage_zeperion_internals(github, extra_paths=extra_internal)
         diff_cached = await github.run_git(["diff", "--cached", "--name-only"])
         staged_files = [line for line in diff_cached.splitlines() if line.strip()]
+
+        leaks = _staged_internal_leaks(staged_files, extra_internal)
+        if leaks:
+            msg = (
+                "pr_fixer refusing to commit: zeperion internal paths still "
+                f"staged: {', '.join(leaks[:10])}. Add state_dir to .gitignore."
+            )
+            logger.error(msg)
+            return {
+                "pr_phase": PRPhase.FAILED,
+                "last_error": msg,
+                "updated_at": iso_now(),
+            }
+
         if not staged_files:
             logger.info(
                 "pr_fixer: agent's edits all fell in excluded paths; nothing to commit"

@@ -148,6 +148,13 @@ class PRPipelineState(TypedDict):
     github_repo: str
     github_token: str
 
+    # Repo-root-relative path of zeperion's state_dir when it lives inside
+    # the repo, else None. ``commit_changes_node`` unstages it after
+    # ``git add -A`` so a custom (non-``.zeperion/state``) state_dir never
+    # leaks zeperion internals into the PR. Populated by
+    # ``create_initial_pr_state``.
+    zeperion_state_dir: str | None
+
     # Codex review
     codex_status: CodexStatus
     codex_thumbs_count: int
@@ -274,6 +281,30 @@ class WorkflowConfig(BaseModel):
 
     project_dir: str = Field(default=".")
     state_dir: str = Field(default=".zeperion/state")
+
+    # Run Workspace: when enabled (the default), a ``multi_agent`` run is
+    # executed inside an isolated git worktree cut from the current HEAD
+    # on a ``zeperion/run/<thread>`` branch, instead of editing the user's
+    # working tree in place. This makes each run a reviewable / acceptable
+    # / discardable transaction (``zeperion changes|accept|discard -t``)
+    # and keeps the user free to edit files during the run without mixing
+    # their changes into the agents'. ``zeperion run --in-place`` (or
+    # setting this False) restores the legacy in-place behaviour.
+    use_run_workspace: bool = Field(
+        default=True,
+        description=(
+            "Run multi_agent inside an isolated git worktree so each run is "
+            "a reviewable/acceptable/discardable transaction. Disable (or use "
+            "--in-place) to edit the working tree directly like before."
+        ),
+    )
+    run_workspace_parent: str | None = Field(
+        default=None,
+        description=(
+            "Parent directory for run worktrees. When unset, defaults to "
+            "<state_dir>/worktrees (kept inside the gitignored .zeperion/)."
+        ),
+    )
     prompts_dir: str | None = Field(
         default=None,
         description=(
@@ -478,6 +509,71 @@ class AgentOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class RunStatus(str, Enum):
+    """Lifecycle status of a Run Workspace (see ``RunManifest``)."""
+
+    ACTIVE = "active"  # worktree created, agent loop in progress
+    FINISHED = "finished"  # loop ended (not blocked), changes committed to run branch
+    BLOCKED = "blocked"  # loop ended in a blocked/failed state
+    ACCEPTED = "accepted"  # diff applied (staged) onto the user's current branch
+    DISCARDED = "discarded"  # worktree + run branch removed
+
+
+class RunManifest(BaseModel):
+    """Per-run record of an isolated worktree-backed agent run.
+
+    Owned by the multi-agent CLI run path and persisted as
+    ``threads/<thread_id>/run_manifest.json`` (alongside
+    ``pipeline_state.json``). It is deliberately *separate* from
+    ``WorkflowState`` / the LangGraph checkpoint: those describe graph
+    progress, this describes the git transaction wrapping the run so
+    ``changes`` / ``accept`` / ``discard`` can operate on exactly the
+    files this run produced.
+    """
+
+    thread_id: str
+    status: RunStatus = RunStatus.ACTIVE
+    base_branch: str | None = None
+    base_commit: str
+    run_branch: str
+    worktree_path: str
+    final_commit: str | None = None
+    changed_files: list[str] = Field(default_factory=list)
+    global_status: str | None = None
+    phase: str | None = None
+    created_at: str = Field(default_factory=iso_now)
+    finished_at: str | None = None
+    accepted_at: str | None = None
+
+    # Post-run verification (``tester_verify_commands``) executed against
+    # the run's worktree right after the agent loop finished. ``None`` =
+    # not run; otherwise "pass" / "fail" / "skipped". ``verify_results``
+    # holds a compact per-command record for status / changes display.
+    verify_status: str | None = None
+    verify_results: list[dict] = Field(default_factory=list)
+    verify_scope: str | None = None  # "scoped" | "full" when verify ran
+    verify_test_paths: list[str] = Field(default_factory=list)
+
+    @property
+    def verify_passed(self) -> bool | None:
+        """Tri-state: True/False once verify ran, None when it didn't."""
+        if self.verify_status == "pass":
+            return True
+        if self.verify_status == "fail":
+            return False
+        return None
+
+    @property
+    def is_terminal(self) -> bool:
+        """True once the run can no longer change (accepted or discarded)."""
+        return self.status in (RunStatus.ACCEPTED, RunStatus.DISCARDED)
+
+    @property
+    def is_pending_review(self) -> bool:
+        """True when the run finished and is awaiting accept/discard."""
+        return self.status in (RunStatus.FINISHED, RunStatus.BLOCKED)
+
+
 def create_initial_state(config: WorkflowConfig) -> WorkflowState:
     """Create initial workflow state."""
     return WorkflowState(
@@ -498,6 +594,47 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
         total_tokens=0,
         updated_at=iso_now(),
     )
+
+
+def _repo_relative_state_dir(config: WorkflowConfig) -> str | None:
+    """Path of ``state_dir`` relative to the **git repo root**, else ``None``.
+
+    The PR pipeline stages with ``git add -A`` and reports/unstages paths
+    relative to the repository top level — NOT ``project_dir`` (which may be
+    a nested sub-directory of the repo). So we resolve the real toplevel via
+    ``git rev-parse --show-toplevel`` and make ``state_dir`` relative to it.
+
+    Returns ``None`` when there is no repo, when ``state_dir`` is outside the
+    repo, or when paths are unresolvable — in those cases ``git add -A`` from
+    the repo root cannot stage it and there is nothing to unstage.
+    """
+    import subprocess
+    from pathlib import Path
+
+    try:
+        pd = Path(config.project_dir).resolve()
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(pd),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if toplevel.returncode != 0 or not toplevel.stdout.strip():
+        return None
+
+    try:
+        root = Path(toplevel.stdout.strip()).resolve()
+        sd = Path(config.state_dir)
+        sd = sd if sd.is_absolute() else pd / sd
+        rel = sd.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return None
+    rel_str = rel.as_posix()
+    return rel_str if rel_str not in ("", ".") else None
 
 
 def create_initial_pr_state(
@@ -521,6 +658,7 @@ def create_initial_pr_state(
             pr_url=None,
             github_repo=config.github_repo or "",
             github_token=config.github_token or "",
+            zeperion_state_dir=_repo_relative_state_dir(config),
             codex_status=CodexStatus.PENDING,
             codex_thumbs_count=0,
             codex_comments_count=0,
@@ -558,6 +696,7 @@ def create_initial_pr_state(
             pr_title=None,
             github_repo=config.github_repo or "",
             github_token=config.github_token or "",
+            zeperion_state_dir=_repo_relative_state_dir(config),
             codex_status=CodexStatus.PENDING,
             codex_thumbs_count=0,
             codex_comments_count=0,

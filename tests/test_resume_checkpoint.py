@@ -176,3 +176,90 @@ class TestInterruptResume:
         assert ScriptedAgent.dev_calls == 2, "interrupted developer should re-run"
         assert ScriptedAgent.review_calls == 1
         assert ScriptedAgent.test_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_terminal_blocked_resume_unwraps_and_continues(
+        self, resume_config
+    ):
+        """A workflow that reached ``blocked → END`` must not no-op on --resume.
+
+        ``prepare_terminal_resume`` rewinds the checkpoint so the next
+        ``astream(None, ...)`` actually runs agents again.
+        """
+        from zeperion.utils.checkpoint_resume import prepare_terminal_resume
+
+        class OnceBlockingPlanner:
+            plan_calls = 0
+
+            def __init__(self, role, model):
+                self.role = role
+                self.model = model
+
+            async def invoke(self, prompt, session_id=None):
+                role = _role_name(self.role)
+                if role == "planner":
+                    OnceBlockingPlanner.plan_calls += 1
+                    if OnceBlockingPlanner.plan_calls == 1:
+                        return AgentOutput(
+                            task_id="calc_v1",
+                            global_status=GlobalStatus.BLOCKED,
+                            raw_output="TASK_ID: calc_v1\nGLOBAL_STATUS: BLOCKED",
+                        )
+                    return AgentOutput(
+                        task_id="calc_v1",
+                        global_status=GlobalStatus.CONTINUE,
+                        raw_output="TASK_ID: calc_v1\nGLOBAL_STATUS: CONTINUE",
+                    )
+                if role == "developer":
+                    return AgentOutput(
+                        global_status=GlobalStatus.CONTINUE,
+                        raw_output="GLOBAL_STATUS: CONTINUE",
+                    )
+                if role == "reviewer":
+                    return AgentOutput(
+                        review_status=ReviewStatus.PASS,
+                        global_status=GlobalStatus.CONTINUE,
+                        raw_output="REVIEW_STATUS: PASS\nGLOBAL_STATUS: CONTINUE",
+                    )
+                if role == "tester":
+                    return AgentOutput(
+                        test_status=TestStatus.PASS,
+                        global_status=GlobalStatus.DONE,
+                        raw_output="TEST_STATUS: PASS\nGLOBAL_STATUS: DONE",
+                    )
+                raise AssertionError(role)
+
+        OnceBlockingPlanner.plan_calls = 0
+        saver = InMemorySaver()
+        cfg = {"configurable": {"thread_id": "blocked-resume"}}
+
+        graph = create_multi_agent_graph(
+            resume_config,
+            agent_class=OnceBlockingPlanner,
+            checkpointer=saver,
+            thread_id="blocked-resume",
+            disable_pr_pipeline=True,
+        )
+
+        # Run 1: planner blocks → END.
+        await _drain(graph, create_initial_state(resume_config), cfg)
+        snap = await graph.aget_state(cfg)
+        assert snap.values["global_status"] == GlobalStatus.BLOCKED
+        assert snap.next == ()
+
+        # Naive resume is a no-op (no events, state unchanged).
+        await _drain(graph, None, cfg)
+        snap_noop = await graph.aget_state(cfg)
+        assert snap_noop.values["global_status"] == GlobalStatus.BLOCKED
+        assert OnceBlockingPlanner.plan_calls == 1
+
+        # Run 2: unwrap terminal block, then resume for real.
+        prep = await prepare_terminal_resume(
+            graph, cfg, config=resume_config, mode="multi_agent"
+        )
+        assert prep is not None
+        assert prep.as_node == "increment_round"
+
+        resumed = await _drain(graph, None, cfg)
+        assert resumed["global_status"] == GlobalStatus.DONE
+        assert OnceBlockingPlanner.plan_calls == 2

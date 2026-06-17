@@ -33,6 +33,7 @@ _PATH_FIELDS_RELATIVE_TO_CONFIG: tuple[str, ...] = (
     "prompts_dir",
     "project_dir",
     "claude_cli_worktree_parent",
+    "run_workspace_parent",
 )
 
 
@@ -124,6 +125,7 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
         "enable_reviewer": config.enable_reviewer,
         "project_dir": config.project_dir,
         "state_dir": config.state_dir,
+        "use_run_workspace": config.use_run_workspace,
         "claude_cli_tool": config.claude_cli_tool,
         "claude_cli_timeout": config.claude_cli_timeout,
         "claude_cli_use_worktree": config.claude_cli_use_worktree,
@@ -142,6 +144,8 @@ def save_config_to_yaml(config: WorkflowConfig, config_path: Path) -> None:
     }
     if config.prompts_dir is not None:
         config_dict["prompts_dir"] = config.prompts_dir
+    if config.run_workspace_parent is not None:
+        config_dict["run_workspace_parent"] = config.run_workspace_parent
     if config.github_repo is not None:
         config_dict["github_repo"] = config.github_repo
 
@@ -257,6 +261,7 @@ def get_default_config() -> dict[str, Any]:
         "enable_reviewer": defaults["enable_reviewer"].default,
         "project_dir": "..",
         "state_dir": "state",
+        "use_run_workspace": defaults["use_run_workspace"].default,
         "claude_cli_tool": defaults["claude_cli_tool"].default,
         "claude_cli_timeout": defaults["claude_cli_timeout"].default,
         "claude_cli_use_worktree": defaults["claude_cli_use_worktree"].default,

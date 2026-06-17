@@ -44,11 +44,20 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Cap scoped pytest invocations so a huge diff does not blow argv limits.
+_MAX_SCOPED_TEST_PATHS: int = 25
+
+_PYTEST_CMD_RE = re.compile(r"^pytest\b", re.IGNORECASE)
+_RUFF_CHECK_RE = re.compile(r"^ruff\s+check\b", re.IGNORECASE)
+_GO_TEST_RE = re.compile(r"^go\s+test\b", re.IGNORECASE)
 
 
 # Per-command output budget injected into the Tester prompt. 16 KiB
@@ -100,6 +109,211 @@ def detect_verify_commands(project_dir: Path) -> list[str]:
     # Preserve order while avoiding duplicates in polyglot repos where
     # two detectors might suggest the same shell command.
     return list(dict.fromkeys(commands))
+
+
+def _norm_rel_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
+
+
+def _is_test_path(rel: str) -> bool:
+    name = Path(rel).name
+    return (
+        rel.startswith("tests/")
+        or "/tests/" in f"/{rel}/"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def related_test_paths(changed_files: Iterable[str], project_dir: Path) -> list[str]:
+    """Map changed source paths to existing test files under ``project_dir``.
+
+    Heuristics (best-effort, conservative):
+
+    * Changed test files are included directly.
+    * Python ``pkg/mod/foo.py`` → ``tests/test_foo.py``, mirror paths, fuzzy
+      ``tests/test_*foo*.py`` matches.
+    * Go ``pkg/foo.go`` → ``pkg/foo_test.go``.
+    * JS/TS co-located ``*.test.*`` / ``*.spec.*`` siblings.
+    """
+    project_dir = Path(project_dir)
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        rel = _norm_rel_path(raw)
+        if not rel or rel in seen:
+            return
+        if (project_dir / rel).is_file():
+            seen.add(rel)
+            found.append(rel)
+
+    tests_root = project_dir / "tests"
+
+    for raw in changed_files:
+        rel = _norm_rel_path(raw)
+        if not rel:
+            continue
+        if _is_test_path(rel):
+            add(rel)
+            continue
+
+        path = Path(rel)
+        stem = path.stem
+
+        if rel.endswith(".py") and not _is_test_path(rel):
+            add(f"tests/test_{stem}.py")
+            parts = path.parts
+            if len(parts) >= 2 and parts[0] == "zeperion":
+                sub = "/".join(parts[1:-1])
+                if sub:
+                    add(f"tests/{sub}/test_{stem}.py")
+            if tests_root.is_dir():
+                for candidate in tests_root.glob(f"test_*{stem}*.py"):
+                    add(str(candidate.relative_to(project_dir)))
+                for candidate in tests_root.rglob(f"*{stem}*.py"):
+                    if candidate.name.startswith("test_"):
+                        add(str(candidate.relative_to(project_dir)))
+                for part in stem.split("_"):
+                    if len(part) < 4:
+                        continue
+                    for candidate in tests_root.glob(f"test_*{part}*.py"):
+                        add(str(candidate.relative_to(project_dir)))
+
+        if rel.endswith(".go") and not rel.endswith("_test.go"):
+            add(str(path.with_name(f"{stem}_test.go")))
+
+        for suffix in (".test.ts", ".test.js", ".test.tsx", ".spec.ts", ".spec.js"):
+            add(str(path.with_suffix(suffix)))
+
+    return found[:_MAX_SCOPED_TEST_PATHS]
+
+
+def _narrow_pytest(command: str, test_paths: list[str]) -> str | None:
+    if not _PYTEST_CMD_RE.match(command.strip()) or not test_paths:
+        return None
+    quoted = " ".join(shlex.quote(p) for p in test_paths)
+    return f"{command.rstrip()} {quoted}"
+
+
+def _narrow_ruff_check(command: str, changed_files: Iterable[str]) -> str | None:
+    if not _RUFF_CHECK_RE.match(command.strip()):
+        return None
+    py_files = [_norm_rel_path(p) for p in changed_files if p.endswith(".py")]
+    if not py_files:
+        return None
+    quoted = " ".join(shlex.quote(p) for p in py_files[:_MAX_SCOPED_TEST_PATHS])
+    return f"ruff check {quoted}"
+
+
+def _narrow_go_test(command: str, changed_files: Iterable[str]) -> str | None:
+    if not _GO_TEST_RE.match(command.strip()):
+        return None
+    packages: set[str] = set()
+    for raw in changed_files:
+        rel = _norm_rel_path(raw)
+        if not rel.endswith(".go"):
+            continue
+        parent = str(Path(rel).parent)
+        packages.add("./..." if parent in (".", "") else f"./{parent}/...")
+    if not packages:
+        return None
+    return f"go test {' '.join(sorted(packages))}"
+
+
+@dataclass(frozen=True)
+class ResolvedVerifyCommands:
+    """Verification commands after optional change-aware narrowing."""
+
+    commands: list[str]
+    scope: str  # "full" | "scoped"
+    test_paths: tuple[str, ...]
+
+
+def resolve_verify_commands(
+    commands: list[str],
+    *,
+    changed_files: Iterable[str] | None,
+    project_dir: Path,
+    select_tests: bool = True,
+) -> ResolvedVerifyCommands:
+    """Pick a fast, change-scoped command list when possible.
+
+    When ``changed_files`` is non-empty and ``select_tests`` is true, map
+    edits to related test files / packages and rewrite pytest/ruff/go
+    invocations. Falls back to the original ``commands`` when nothing maps
+    or no command can be narrowed (safe default: run the full suite).
+    """
+    base = list(commands)
+    if not select_tests or not changed_files:
+        return ResolvedVerifyCommands(commands=base, scope="full", test_paths=())
+
+    changed = [_norm_rel_path(p) for p in changed_files if p.strip()]
+    if not changed:
+        return ResolvedVerifyCommands(commands=base, scope="full", test_paths=())
+
+    test_paths = related_test_paths(changed, project_dir)
+
+    narrowed: list[str] = []
+    any_scoped = False
+    for cmd in base:
+        replacement = _narrow_pytest(cmd, test_paths) if test_paths else None
+        if not replacement:
+            replacement = _narrow_ruff_check(cmd, changed) or _narrow_go_test(cmd, changed)
+        if replacement and replacement != cmd:
+            narrowed.append(replacement)
+            any_scoped = True
+        else:
+            narrowed.append(cmd)
+
+    if not any_scoped:
+        return ResolvedVerifyCommands(commands=base, scope="full", test_paths=())
+
+    return ResolvedVerifyCommands(
+        commands=narrowed,
+        scope="scoped",
+        test_paths=tuple(test_paths),
+    )
+
+
+def summarize_verify_results(
+    results: list[CommandResult], *, tail_lines: int = 20
+) -> tuple[str, list[dict]]:
+    """Reduce per-command results to ``(status, compact_records)``.
+
+    ``status`` is ``"pass"`` when every command passed, ``"fail"`` when any
+    failed/timed-out, and ``"skipped"`` when there were no commands. The
+    compact records are JSON-serialisable (suitable for the run manifest):
+    each carries the command, pass flag, exit code, duration, timeout flag,
+    and — only for failures — a short tail of combined output for display.
+    """
+    if not results:
+        return "skipped", []
+
+    compact: list[dict] = []
+    all_passed = True
+    for r in results:
+        if not r.passed:
+            all_passed = False
+        tail = ""
+        if not r.passed:
+            combined = (r.stdout or "")
+            if r.stderr:
+                combined = f"{combined}\n{r.stderr}" if combined else r.stderr
+            tail = "\n".join(combined.splitlines()[-tail_lines:]).strip()
+        compact.append(
+            {
+                "command": r.command,
+                "passed": r.passed,
+                "exit_code": r.exit_code,
+                "duration_ms": r.duration_ms,
+                "timed_out": r.timed_out,
+                "tail": tail,
+            }
+        )
+    return ("pass" if all_passed else "fail"), compact
 
 
 @dataclass(frozen=True)

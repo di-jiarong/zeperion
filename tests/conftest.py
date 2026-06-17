@@ -1,6 +1,18 @@
 """Test configuration."""
 
+import re
+
 import pytest
+
+# Rich / Typer help text renders option names across multiple ANSI spans
+# (e.g. ``--config`` is emitted as ``\\x1b[1;36m-\\x1b[0m\\x1b[1;36m-config\\x1b[0m``),
+# which defeats naive substring assertions.  Strip ANSI before comparing.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from *text*."""
+    return _ANSI_RE.sub("", text)
 
 
 @pytest.fixture

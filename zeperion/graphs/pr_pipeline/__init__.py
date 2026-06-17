@@ -21,11 +21,12 @@ from zeperion.graphs.pr_pipeline.nodes import (
     validate_git_node,
     wait_for_review_node,
 )
-from zeperion.graphs.pr_pipeline.routes import decide_next_action
+from zeperion.graphs.pr_pipeline.routes import after_commit_changes, decide_next_action
 
 __all__ = [
     "create_pr_pipeline_graph",
     "decide_next_action",
+    "after_commit_changes",
     "derive_sibling_multi_agent_thread",
     "load_planner_handoff_from_sibling_thread",
     "validate_git_node",

@@ -175,6 +175,28 @@ def _shorten(text: str, limit: int = 80) -> str:
     return text[: limit - 1].rstrip() + "..."
 
 
+def is_error_event(ev: TimelineEvent) -> bool:
+    """True for events that represent a failure / blocker worth surfacing.
+
+    Used by ``zeperion logs --errors-only`` to cut a long timeline down to
+    just the lines that explain *why* a run is unhappy: a recorded
+    ``last_error``, a BLOCKED terminal/agent event, or a failed/timed-out
+    verify command.
+    """
+    raw = ev.raw
+    if raw.get("last_error"):
+        return True
+    if ev.event == "workflow_finished":
+        gs = (ev.global_status or "").upper()
+        phase = (raw.get("phase") or "").lower()
+        return gs == "BLOCKED" or phase == "blocked"
+    if ev.event == "agent_completed":
+        return (ev.global_status or "").upper() == "BLOCKED"
+    if ev.event == "tester_verify_command":
+        return raw.get("passed") is False or bool(raw.get("timed_out"))
+    return False
+
+
 def describe_event(ev: TimelineEvent) -> str:
     """Render one timeline event as a compact human-readable sentence."""
     role = ev.role or ev.raw.get("role")
@@ -380,6 +402,8 @@ def suggest_next_commands(
     category: str | None = None,
     in_flight: bool = False,
     done: bool = False,
+    workspace_pending: bool = False,
+    verify_failed: bool = False,
 ) -> list[str]:
     """Return concrete copy-pasteable next commands for the operator.
 
@@ -387,13 +411,31 @@ def suggest_next_commands(
     suggest the *same* commands for the same situation. The ordering is
     "do this first" → "then maybe this":
 
+    * still running → follow the logs / live-watch status;
+    * Run Workspace awaiting review (``workspace_pending``) → review the
+      run's diff, then accept (apply staged) or discard it (plus resume
+      if it blocked);
     * blocked → resume, plus a category-specific diagnostic
       (``doctor`` for environment, ``verify`` for failed tests);
-    * still running → follow the logs / live-watch status;
     * done → offer to ship a PR;
     * otherwise (idle / partial) → resume.
     """
     cmds: list[str] = []
+    if in_flight:
+        cmds.append(f"zeperion logs -t {thread_id} --follow")
+        cmds.append(f"zeperion status -t {thread_id} --watch")
+        return cmds
+    if workspace_pending:
+        # The run finished inside an isolated worktree and is waiting to be
+        # accepted or discarded — that is the operator's primary decision.
+        cmds.append(f"zeperion changes -t {thread_id}")
+        if blocked or verify_failed:
+            # The run produced changes but didn't pass: steer toward fixing
+            # (resume) rather than accepting a known-broken result first.
+            cmds.append(f"zeperion run --resume -t {thread_id}")
+        cmds.append(f"zeperion accept -t {thread_id}")
+        cmds.append(f"zeperion discard -t {thread_id} --yes")
+        return cmds
     if blocked:
         cmds.append(f"zeperion run --resume -t {thread_id}")
         if category == BlockerCategory.ENVIRONMENT:
@@ -402,9 +444,6 @@ def suggest_next_commands(
             cmds.append("zeperion verify")
         elif category == BlockerCategory.NO_CHANGES:
             cmds.append("zeperion doctor  # confirm a file-writing backend")
-    elif in_flight:
-        cmds.append(f"zeperion logs -t {thread_id} --follow")
-        cmds.append(f"zeperion status -t {thread_id} --watch")
     elif done:
         cmds.append(f"zeperion ship -t {thread_id}")
     else:

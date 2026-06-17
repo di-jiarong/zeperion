@@ -32,7 +32,7 @@ def block_workflow(state: WorkflowState) -> WorkflowState:
         "global_status": GlobalStatus.BLOCKED,
         "last_error": (
             state.get("last_error")
-            or "Max fix attempts reached. Human intervention required."
+            or "Workflow blocked. Human intervention required."
         ),
         "updated_at": iso_now(),
     }

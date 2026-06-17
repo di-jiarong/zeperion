@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +115,10 @@ _BASE_HTML = """\
     background: rgba(88,166,255,0.15); color: var(--accent);
   }
   .pill.in-flight { background: rgba(219,109,40,0.2); color: var(--in-flight); }
+  .pill.finished, .pill.accepted { background: rgba(63,185,80,0.15); color: var(--good); }
+  .pill.active { background: rgba(219,109,40,0.2); color: var(--in-flight); }
+  .pill.blocked { background: rgba(248,81,73,0.15); color: var(--bad); }
+  .pill.discarded { background: rgba(139,148,158,0.15); color: var(--muted); }
   .panel {
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 6px; padding: 16px; margin-bottom: 16px;
@@ -178,6 +183,7 @@ _INDEX_HTML = """\
         <th>Test</th>
         <th>Global</th>
         <th>PR phase</th>
+        <th>Run WS</th>
         <th>Live</th>
         <th>Updated</th>
       </tr>
@@ -191,6 +197,13 @@ _INDEX_HTML = """\
         <td><span class="pill {{ t.test_status }}">{{ t.test_status }}</span></td>
         <td><span class="pill {{ t.global_status }}">{{ t.global_status }}</span></td>
         <td><span class="pill {{ t.pr_phase }}">{{ t.pr_phase }}</span></td>
+        <td>
+          {% if t.run_status %}
+            <span class="pill {{ t.run_status }}">{{ t.run_status }}</span>
+          {% else %}
+            <span style="color: var(--muted)">—</span>
+          {% endif %}
+        </td>
         <td>
           {% if t.in_flight %}
             <span class="pill in-flight">● {{ t.in_flight.role }} {{ t.in_flight.elapsed_human }}</span>
@@ -254,6 +267,24 @@ _THREAD_HTML = """\
       </div>
     {% endif %}
   </div>
+  {% if manifest %}
+  <div class="panel">
+    <h2>Run Workspace</h2>
+    <table>
+      <tr><td>Status</td><td><span class="pill {{ manifest.status }}">{{ manifest.status }}</span></td></tr>
+      <tr><td>Branch</td><td><code>{{ manifest.run_branch }}</code></td></tr>
+      <tr><td>Base</td><td style="color: var(--muted)">{{ manifest.base_commit[:8] }}{% if manifest.final_commit %} &rarr; {{ manifest.final_commit[:8] }}{% endif %}</td></tr>
+      <tr><td>Changed files</td><td>{{ manifest.changed_files|length }}</td></tr>
+    </table>
+    {% if manifest.changed_files %}
+      <details>
+        <summary>Files</summary>
+        <pre>{% for f in manifest.changed_files %}{{ f }}
+{% endfor %}</pre>
+      </details>
+    {% endif %}
+  </div>
+  {% endif %}
   <div class="panel">
     <h2>Aggregates ({{ summary.total_events }} events)</h2>
     <table>
@@ -411,6 +442,33 @@ def _pid_alive(state_dir: Path, thread_id: str) -> tuple[int | None, bool]:
     return pid, is_alive(pid)
 
 
+def _safe_thread_part(value: str) -> str:
+    """Mirror ``StateStorage._safe_path_part`` for direct manifest reads."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return safe.strip("._") or "default"
+
+
+def _read_run_manifest(state_dir: Path, thread_id: str) -> dict | None:
+    """Read ``threads/<thread_id>/run_manifest.json`` for a thread; None if absent."""
+    path = state_dir / "threads" / _safe_thread_part(thread_id) / "run_manifest.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _workspace_pending(manifest: dict | None) -> bool:
+    """True when a Run Workspace finished and awaits accept/discard."""
+    return bool(manifest and manifest.get("status") in ("finished", "blocked"))
+
+
+def _verify_failed(manifest: dict | None) -> bool:
+    """True when the run's post-run verification recorded a failure."""
+    return bool(manifest and manifest.get("verify_status") == "fail")
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -458,6 +516,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             events = read_events(state_dir, thread_id)
             in_flight = derive_in_flight(events)
             pid, alive = _pid_alive(state_dir, thread_id)
+            manifest = _read_run_manifest(state_dir, thread_id)
             entry = {
                 "thread_id": thread_id,
                 **_format_state(raw),
@@ -470,6 +529,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
                     else None
                 ),
                 "pid_alive": alive,
+                "run_status": manifest.get("status") if manifest else None,
             }
             threads.append(entry)
         # Most-recently-updated first — humans almost always want to
@@ -493,6 +553,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
         )
         max_duration = max((ev.duration_ms or 0 for ev in events), default=0)
         pid, alive = _pid_alive(state_dir, thread_id)
+        manifest = _read_run_manifest(state_dir, thread_id)
         formatted_state = _format_state(raw)
         blocker_hints: list[str] = []
         blocker_category = ""
@@ -512,6 +573,8 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
                 formatted_state["global_status"] == "DONE"
                 or formatted_state["phase"] == "completed"
             ),
+            workspace_pending=_workspace_pending(manifest),
+            verify_failed=_verify_failed(manifest),
         )
 
         # JSON-safe payload for the frontend seeding step. Use the
@@ -523,6 +586,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             title=thread_id,
             thread_id=thread_id,
             state=formatted_state,
+            manifest=manifest,
             in_flight=in_flight,
             blocker_hints=blocker_hints,
             blocker_category=blocker_category,
@@ -559,6 +623,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
             }
             for a in derive_in_flight(events)
         ]
+        manifest = _read_run_manifest(state_dir, thread_id)
         blocked = _is_blocked_view(formatted_state, events)
         blocker = (
             classify_blocker(formatted_state.get("last_error"), events) if blocked else None
@@ -572,11 +637,14 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
                 formatted_state["global_status"] == "DONE"
                 or formatted_state["phase"] == "completed"
             ),
+            workspace_pending=_workspace_pending(manifest),
+            verify_failed=_verify_failed(manifest),
         )
         return JSONResponse(
             {
                 "thread_id": thread_id,
                 "state": formatted_state,
+                "run_workspace": manifest,
                 "summary": summarise(events),
                 "blocker_hints": blocker.hints if blocker else [],
                 "blocker_category": blocker.category if blocker else "",

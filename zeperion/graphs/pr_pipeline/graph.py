@@ -15,7 +15,7 @@ from zeperion.graphs.pr_pipeline.nodes import (
     validate_git_node,
     wait_for_review_node,
 )
-from zeperion.graphs.pr_pipeline.routes import decide_next_action
+from zeperion.graphs.pr_pipeline.routes import after_commit_changes, decide_next_action
 from zeperion.models import PRPipelineState, WorkflowConfig
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,13 @@ def create_pr_pipeline_graph(
 
     workflow.set_entry_point("validate_git")
     workflow.add_edge("validate_git", "commit_changes")
-    workflow.add_edge("commit_changes", "push_branch")
+    # A failed commit (e.g. zeperion internals still staged) must not push a
+    # half-baked branch — short-circuit to END so the error is recoverable.
+    workflow.add_conditional_edges(
+        "commit_changes",
+        after_commit_changes,
+        {"push": "push_branch", "end": END},
+    )
     workflow.add_edge("push_branch", "create_or_update_pr")
     workflow.add_edge("create_or_update_pr", "check_codex_review")
 

@@ -20,14 +20,62 @@ from pathlib import Path
 
 from zeperion.utils.timeline import (
     BlockerCategory,
+    TimelineEvent,
     classify_blocker,
     derive_in_flight,
     describe_event,
     explain_blocker,
+    is_error_event,
     read_events,
     suggest_next_commands,
     summarise,
 )
+
+
+class TestIsErrorEvent:
+    def test_last_error_is_error(self) -> None:
+        ev = TimelineEvent.from_raw({"event": "agent_completed", "last_error": "boom"})
+        assert is_error_event(ev) is True
+
+    def test_blocked_workflow_finished_is_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "workflow_finished", "global_status": "BLOCKED"}
+        )
+        assert is_error_event(ev) is True
+
+    def test_blocked_phase_finished_is_error(self) -> None:
+        ev = TimelineEvent.from_raw({"event": "workflow_finished", "phase": "blocked"})
+        assert is_error_event(ev) is True
+
+    def test_failed_verify_command_is_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "tester_verify_command", "passed": False, "exit_code": 1}
+        )
+        assert is_error_event(ev) is True
+
+    def test_timed_out_verify_is_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "tester_verify_command", "passed": False, "timed_out": True}
+        )
+        assert is_error_event(ev) is True
+
+    def test_normal_completion_is_not_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "agent_completed", "global_status": "CONTINUE"}
+        )
+        assert is_error_event(ev) is False
+
+    def test_passing_verify_is_not_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "tester_verify_command", "passed": True, "exit_code": 0}
+        )
+        assert is_error_event(ev) is False
+
+    def test_done_finished_is_not_error(self) -> None:
+        ev = TimelineEvent.from_raw(
+            {"event": "workflow_finished", "global_status": "DONE", "phase": "completed"}
+        )
+        assert is_error_event(ev) is False
 
 
 def _write_events(state_dir: Path, thread_id: str, lines: list[str]) -> Path:
@@ -338,3 +386,18 @@ class TestSuggestNextCommands:
     def test_idle_suggests_resume(self) -> None:
         cmds = suggest_next_commands("feat")
         assert any("--resume" in c for c in cmds)
+
+    def test_workspace_pending_passing_offers_accept_not_resume(self) -> None:
+        cmds = suggest_next_commands("feat", workspace_pending=True)
+        assert any("changes" in c for c in cmds)
+        assert any("accept" in c for c in cmds)
+        assert not any("--resume" in c for c in cmds)
+
+    def test_workspace_pending_verify_failed_steers_to_resume(self) -> None:
+        cmds = suggest_next_commands(
+            "feat", workspace_pending=True, verify_failed=True
+        )
+        # changes (review) first, then resume to fix, then accept/discard.
+        assert cmds[0].endswith("changes -t feat") or "changes" in cmds[0]
+        assert any("--resume" in c for c in cmds)
+        assert any("accept" in c for c in cmds)
