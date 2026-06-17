@@ -67,7 +67,29 @@ class TestReviewerRouting:
             == "developer"
         )
 
-    def test_fail_blocks_when_attempts_exhausted(self):
+    def test_fail_escalates_to_replan_when_rounds_remain(self):
+        # Fix budget spent but rounds remain -> re-plan instead of giving up.
+        assert (
+            route_after_reviewer(
+                _state(review_status=ReviewStatus.FAIL, fix_attempt=3, round=1),
+                max_fix_attempts=3,
+                max_rounds=5,
+            )
+            == "replan"
+        )
+
+    def test_fail_blocks_when_fixes_and_rounds_exhausted(self):
+        assert (
+            route_after_reviewer(
+                _state(review_status=ReviewStatus.FAIL, fix_attempt=3, round=5),
+                max_fix_attempts=3,
+                max_rounds=5,
+            )
+            == "blocked"
+        )
+
+    def test_fail_blocks_when_attempts_exhausted_legacy_no_rounds(self):
+        # Without max_rounds (legacy callers), exhausted fixes block.
         assert (
             route_after_reviewer(
                 _state(review_status=ReviewStatus.FAIL, fix_attempt=3),
@@ -99,10 +121,23 @@ class TestTesterRouting:
             == "developer"
         )
 
-    def test_fail_blocks_when_attempts_exhausted(self):
+    def test_fail_escalates_to_planner_when_rounds_remain(self):
+        # Fix budget spent but rounds remain -> re-plan instead of giving up.
         assert (
             route_after_tester(
-                _state(test_status=TestStatus.FAIL, fix_attempt=3),
+                _state(test_status=TestStatus.FAIL, fix_attempt=3, round=1),
+                max_fix_attempts=3,
+                max_rounds=10,
+                github_configured=False,
+                disable_pr_pipeline=False,
+            )
+            == "planner"
+        )
+
+    def test_fail_blocks_when_fixes_and_rounds_exhausted(self):
+        assert (
+            route_after_tester(
+                _state(test_status=TestStatus.FAIL, fix_attempt=3, round=10),
                 max_fix_attempts=3,
                 max_rounds=10,
                 github_configured=False,

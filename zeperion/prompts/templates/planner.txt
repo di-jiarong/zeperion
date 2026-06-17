@@ -42,6 +42,12 @@ LESSONS:
 {{ test_report }}
 {% endif %}
 
+{% if replan_after_failure %}
+⚠️ 注意：上一轮计划经过多次修复仍未通过验证（测试/审查失败）。
+请不要重复同样的实现思路——重新审视根因，换一种更稳妥的方案或更小的拆分，
+并在 RISKS 中说明上次失败的原因和这次的不同点。
+{% endif %}
+
 {% if lessons %}
 历史经验：
 {% for lesson in lessons %}

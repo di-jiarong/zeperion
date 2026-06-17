@@ -60,6 +60,7 @@ class PromptTemplate:
         test_report: str | None = None,
         lessons: list[str] | None = None,
         round_num: int = 1,
+        replan_after_failure: bool = False,
     ) -> str:
         """Render planner prompt.
 
@@ -69,6 +70,10 @@ class PromptTemplate:
             test_report: Latest test report (if any)
             lessons: Lessons learned so far
             round_num: Current round number
+            replan_after_failure: True when this round was reached because
+                the Developer exhausted its fix attempts on the previous
+                plan — the prompt then tells the Planner to change strategy
+                rather than repeat the failing approach.
 
         Returns:
             Rendered planner prompt
@@ -80,6 +85,7 @@ class PromptTemplate:
             test_report=test_report or "无",
             lessons=lessons or [],
             round_num=round_num,
+            replan_after_failure=replan_after_failure,
         )
 
     def render_developer(

@@ -37,20 +37,39 @@ def route_after_reviewer(
     state: WorkflowState,
     *,
     max_fix_attempts: int,
-) -> Literal["developer", "tester", "blocked"]:
-    """Review failures loop back to Developer before tests run."""
+    max_rounds: int = 0,
+) -> Literal["developer", "tester", "replan", "blocked"]:
+    """Review failures loop back to Developer before tests run.
+
+    Escalation ladder: while fix attempts remain, a FAIL/BLOCKED review
+    loops back to the Developer. When the per-round fix budget is
+    exhausted but rounds remain, the workflow escalates to the Planner
+    (``replan``) so it can try a *different* approach with the reviewer's
+    findings in hand — instead of giving up. Only when rounds are also
+    exhausted does it block. ``max_rounds=0`` preserves the legacy
+    "block immediately on exhausted fixes" behaviour for callers that do
+    not pass it.
+    """
     if is_blocked(state):
         return "blocked"
 
     review_status = state.get("review_status")
     fix_attempt = state["fix_attempt"]
+    round_num = state.get("round", 1)
 
     if review_status in (ReviewStatus.FAIL, ReviewStatus.BLOCKED):
-        if fix_attempt >= max_fix_attempts:
-            logger.warning("Max review fix attempts reached, blocking workflow")
-            return "blocked"
-        logger.info("Review failed, retry fix attempt %s", fix_attempt + 1)
-        return "developer"
+        if fix_attempt < max_fix_attempts:
+            logger.info("Review failed, retry fix attempt %s", fix_attempt + 1)
+            return "developer"
+        if round_num < max_rounds:
+            logger.info(
+                "Review fixes exhausted (round %s); escalating to Planner "
+                "to re-plan",
+                round_num,
+            )
+            return "replan"
+        logger.warning("Max review fix attempts and rounds reached, blocking")
+        return "blocked"
 
     if review_status != ReviewStatus.PASS:
         logger.warning("Unexpected review status %r, blocking workflow", review_status)
@@ -67,7 +86,13 @@ def route_after_tester(
     github_configured: bool,
     disable_pr_pipeline: bool,
 ) -> Literal["developer", "planner", "pr_pipeline", "blocked", "end"]:
-    """Decide the next node after Tester finishes."""
+    """Decide the next node after Tester finishes.
+
+    Escalation ladder on test failure mirrors :func:`route_after_reviewer`:
+    retry the Developer while fix attempts remain, then escalate to the
+    Planner (a fresh round) to re-plan when fixes are exhausted but rounds
+    remain, and only block when both budgets are spent.
+    """
     test_status = state["test_status"]
     fix_attempt = state["fix_attempt"]
     round_num = state["round"]
@@ -77,11 +102,18 @@ def route_after_tester(
         return "blocked"
 
     if test_status in (TestStatus.FAIL, TestStatus.ERROR):
-        if fix_attempt >= max_fix_attempts:
-            logger.warning("Max fix attempts reached, blocking workflow")
-            return "blocked"
-        logger.info("Test failed, retry fix attempt %s", fix_attempt + 1)
-        return "developer"
+        if fix_attempt < max_fix_attempts:
+            logger.info("Test failed, retry fix attempt %s", fix_attempt + 1)
+            return "developer"
+        if round_num < max_rounds:
+            logger.info(
+                "Test fixes exhausted (round %s); escalating to Planner "
+                "to re-plan",
+                round_num,
+            )
+            return "planner"
+        logger.warning("Max fix attempts and rounds reached, blocking workflow")
+        return "blocked"
 
     if test_status != TestStatus.PASS:
         logger.warning("Unexpected test status %r, blocking workflow", test_status)

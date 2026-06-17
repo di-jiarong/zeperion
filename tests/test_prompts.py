@@ -49,6 +49,26 @@ class TestPromptTemplate:
         assert "Use async handlers" in prompt
         assert "第 3 轮" in prompt
 
+    def test_render_planner_replan_after_failure_adds_directive(self):
+        """A failure-escalated re-plan tells the Planner to change strategy."""
+        manager = PromptTemplate()
+        prompt = manager.render_planner(
+            requirement="Build a REST API",
+            test_report="Test failed repeatedly",
+            round_num=2,
+            replan_after_failure=True,
+        )
+        assert "不要重复同样" in prompt
+
+    def test_render_planner_no_replan_directive_by_default(self):
+        manager = PromptTemplate()
+        prompt = manager.render_planner(
+            requirement="Build a REST API",
+            test_report="All tests passed",
+            round_num=2,
+        )
+        assert "不要重复同样" not in prompt
+
     def test_render_developer_first_implementation(self):
         """Test developer prompt for first implementation."""
         manager = PromptTemplate()

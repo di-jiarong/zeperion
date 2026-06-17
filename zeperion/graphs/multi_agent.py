@@ -282,10 +282,12 @@ def create_multi_agent_graph(
         lambda state: route_after_reviewer(
             state,
             max_fix_attempts=config.max_fix_attempts,
+            max_rounds=config.max_rounds,
         ),
         {
             "developer": "increment_fix",
             "tester": "tester",
+            "replan": "increment_round",
             "blocked": "blocked",
         },
     )

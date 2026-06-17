@@ -370,12 +370,27 @@ class MultiAgentNodes:
             if part
         )
 
+        # Detect a failure-driven re-plan: the escalation ladder routes the
+        # workflow back here (via increment_round) when the Developer
+        # exhausted its fix attempts. ``increment_round`` does NOT reset
+        # test_status/review_status, so a lingering FAIL/ERROR/BLOCKED is a
+        # reliable signal that the previous approach failed (vs. a normal
+        # PASS-then-continue round).
+        replan_after_failure = state.get("test_status") in (
+            TestStatus.FAIL,
+            TestStatus.ERROR,
+        ) or state.get("review_status") in (
+            ReviewStatus.FAIL,
+            ReviewStatus.BLOCKED,
+        )
+
         prompt = self.template_manager.render_planner(
             requirement=self.requirement,
             current_plan=current_plan,
             test_report=fix_report or None,
             lessons=state["lessons_learned"],
             round_num=state["round"],
+            replan_after_failure=replan_after_failure,
         )
 
         def _span_attrs(span: Any, output: AgentOutput) -> None:
