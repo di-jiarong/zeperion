@@ -5,6 +5,8 @@ import json
 import logging
 import shutil
 import tempfile
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,29 @@ from zeperion.models import AgentOutput, AgentRole, TokenUsage
 from zeperion.utils.token_estimate import estimate_usage
 
 logger = logging.getLogger(__name__)
+
+
+# ---- Structured progress events (stream-json mode) ----
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """A structured progress event parsed from stream-json stdout."""
+
+    kind: str  # "text"|"thinking"|"tool_call"|"tool_result"|"task"|"init"|"result"
+    role: str | None = None
+    text: str | None = None
+    tool_name: str | None = None
+    tool_use_id: str | None = None
+    tool_input: dict | None = None
+    tool_output: str | None = None
+    is_delta: bool = False
+    is_start: bool = False
+    is_stop: bool = False
+    usage: dict | None = None
+    raw: dict = field(default_factory=dict)
+
+
+StructuredProgressCallback = Callable[[StreamEvent], Awaitable[None]]
 
 
 def _usage_from_claude_obj(usage_obj: Any) -> TokenUsage | None:
@@ -139,7 +164,11 @@ class ClaudeCodeAgent(BaseAgent):
         self.progress_interval_seconds = progress_interval_seconds
 
     def build_command(
-        self, project_dir: Path | None = None, *, json_output: bool = True
+        self,
+        project_dir: Path | None = None,
+        *,
+        json_output: bool = True,
+        stream_json: bool = False,
     ) -> list[str]:
         """Assemble the CLI argv list for one invocation.
 
@@ -147,10 +176,20 @@ class ClaudeCodeAgent(BaseAgent):
         envelope carries the assistant text *and* a per-call ``usage``
         block for the token budget. Older Claude CLIs reject the flag; the
         invoke path retries with ``json_output=False`` in that case.
+
+        ``stream_json`` enables ``--output-format stream-json`` +
+        ``--input-format stream-json`` + ``--include-partial-messages``
+        for structured event streaming (Claude CLI v2.x+).
         """
         active_project_dir = (project_dir or self.project_dir).resolve()
         cmd = [self.cli_tool, "--print"]
-        if json_output:
+        if stream_json:
+            cmd.extend([
+                "--output-format", "stream-json",
+                "--input-format", "stream-json",
+                "--include-partial-messages",
+            ])
+        elif json_output:
             cmd.extend(["--output-format", "json"])
         cmd.extend(["--model", self.model, "--add-dir", str(active_project_dir)])
         if self.permission_mode:
@@ -165,6 +204,10 @@ class ClaudeCodeAgent(BaseAgent):
         progress_callback: ProgressCallback | None = None,
     ) -> AgentOutput:
         """Invoke ``claude --print`` with ``prompt`` on stdin.
+
+        Prefers ``--output-format stream-json`` (structured streaming) on
+        supported Claude CLI versions (v2.x+). Falls back to
+        ``--output-format json`` for older CLIs.
 
         Args:
             prompt: User-visible prompt; stdin contents.
@@ -189,31 +232,232 @@ class ClaudeCodeAgent(BaseAgent):
         execution_dir = await self._prepare_execution_dir()
 
         def _with_session(cmd: list[str]) -> list[str]:
-            # Session reuse is optional; only valid UUIDs are accepted.
             if session_id and _looks_like_uuid(session_id):
                 return [*cmd, "--session-id", session_id]
             return cmd
 
         prompt_bytes = prompt.encode("utf-8")
-        logger.info(f"Invoking {self.role.value} with model {self.model}")
+        logger.info("Invoking %s with model %s", self.role.value, self.model)
+
+        # --- Primary path: stream-json ---
+        try:
+            return await self._invoke_via_stream_json(
+                _with_session, execution_dir, prompt, prompt_bytes,
+                progress_callback,
+            )
+        except _StreamJsonNotSupported:
+            logger.info(
+                "%s: stream-json not supported; "
+                "falling back to --output-format json",
+                self.role.value,
+            )
+        finally:
+            if self.use_worktree and not self.keep_worktree:
+                await self._remove_worktree(execution_dir)
+
+        # --- Fallback: --output-format json ---
+        return await self._invoke_via_json_envelope(
+            _with_session, execution_dir, prompt, prompt_bytes,
+            progress_callback,
+        )
+
+    async def _invoke_via_stream_json(
+        self,
+        _with_session: Callable[[list[str]], list[str]],
+        execution_dir: Path,
+        prompt: str,
+        prompt_bytes: bytes,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AgentOutput:
+        """Invoke via ``--output-format stream-json``."""
+        result_text, reported_usage = await self._run_stream_json(
+            _with_session, execution_dir, prompt_bytes, progress_callback,
+        )
+        if result_text is not None and result_text.strip():
+            output = self.parse_output(result_text)
+            usage = reported_usage or estimate_usage(prompt, result_text)
+            return output.model_copy(update={"usage": usage})
+        raise AgentInvocationError(
+            f"{self.role.value}: stream-json produced no result text"
+        )
+
+    async def _run_stream_json(
+        self,
+        _with_session: Callable[[list[str]], list[str]],
+        execution_dir: Path,
+        prompt_bytes: bytes,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[str | None, TokenUsage | None]:
+        """Core stream-json subprocess runner.
+
+        Yields structured events to ``progress_callback`` and collects
+        the final result text + usage.
+        """
+        cmd = _with_session(
+            self.build_command(execution_dir, stream_json=True)
+        )
+        logger.debug("Command (stream-json): %s", " ".join(cmd))
+
+        result_text: str | None = None
+        result_usage: TokenUsage | None = None
+        accumulated_text: list[str] = []
 
         try:
-            cmd = _with_session(self.build_command(execution_dir, json_output=True))
+            async for ev in self._stream_json_read(
+                cmd, execution_dir, prompt_bytes
+            ):
+                if progress_callback is not None:
+                    line = _format_stream_event(ev)
+                    if line:
+                        await progress_callback(line)
+                if ev.kind == "text" and ev.text:
+                    accumulated_text.append(ev.text)
+                elif ev.kind == "result":
+                    result_text = ev.text
+                    result_usage = _usage_from_stream_result(ev.raw)
+        except _StreamJsonExit as exit_info:
+            if exit_info.stderr:
+                err_text = exit_info.stderr.decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                if _is_unknown_output_format_error(exit_info.stderr, b""):
+                    raise _StreamJsonNotSupported() from None
+                logger.debug(
+                    "stream-json stderr: %s", err_text[:500],
+                )
+
+        if result_text is not None:
+            return result_text, result_usage
+
+        combined = "".join(accumulated_text)
+        if combined.strip():
+            return combined, estimate_usage(
+                prompt_bytes.decode("utf-8"), combined,
+            )
+
+        return None, None
+
+    async def _stream_json_read(
+        self,
+        cmd: list[str],
+        execution_dir: Path,
+        prompt_bytes: bytes,
+    ) -> AsyncIterator[StreamEvent]:
+        """Spawn stream-json subprocess and yield parsed StreamEvents."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(execution_dir),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            raise _StreamJsonNotSupported() from exc
+
+        proc_stdin = getattr(process, "stdin", None)
+        proc_stdout = getattr(process, "stdout", None)
+        proc_stderr = getattr(process, "stderr", None)
+
+        if proc_stdin is None or proc_stdout is None:
+            raise _StreamJsonNotSupported()
+
+        user_msg = json.dumps({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": prompt_bytes.decode("utf-8"),
+            },
+        })
+        proc_stdin.write((user_msg + "\n").encode("utf-8"))
+        await proc_stdin.drain()
+        proc_stdin.close()
+
+        heartbeat_task = (
+            asyncio.create_task(self._heartbeat())
+            if self.progress_interval_seconds > 0
+            else None
+        )
+
+        stderr_buf: list[bytes] = []
+
+        try:
+            async def _read_stderr() -> None:
+                while True:
+                    line = await proc_stderr.readline()
+                    if not line:
+                        break
+                    stderr_buf.append(line)
+
+            stderr_task = asyncio.create_task(_read_stderr())
+
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        proc_stdout.readline(), timeout=self.timeout,
+                    )
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    raise AgentInvocationError(
+                        f"{self.role.value} invocation timed out "
+                        f"after {self.timeout}s",
+                    )
+
+                if not line:
+                    break
+
+                try:
+                    msg = json.loads(line.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    logger.debug("stream-json: non-JSON stdout line ignored")
+                    continue
+
+                ev = _parse_stream_message(msg)
+                if ev is not None:
+                    yield ev
+
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
+
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await process.wait()
+
+        raise _StreamJsonExit(b"".join(stderr_buf))
+
+    async def _invoke_via_json_envelope(
+        self,
+        _with_session: Callable[[list[str]], list[str]],
+        execution_dir: Path,
+        prompt: str,
+        prompt_bytes: bytes,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AgentOutput:
+        """Fallback: ``--output-format json`` (existing path)."""
+        try:
+            cmd = _with_session(
+                self.build_command(execution_dir, json_output=True)
+            )
             logger.debug("Command: %s", " ".join(cmd))
             returncode, stdout, stderr = await self._spawn_and_communicate(
                 cmd, execution_dir, prompt_bytes,
                 progress_callback=progress_callback,
             )
-            # Self-heal: an older Claude CLI that doesn't know
-            # ``--output-format json`` exits non-zero with an
-            # unknown-option message instead of producing plain text, so
-            # the plain-text JSON-parse fallback never gets a chance.
-            # Retry once without the flag; usage then falls back to an
-            # estimate downstream.
-            if returncode != 0 and _is_unknown_output_format_error(stderr, stdout):
+            if returncode != 0 and _is_unknown_output_format_error(
+                stderr, stdout
+            ):
                 logger.warning(
                     "%s: Claude CLI rejected --output-format json; "
-                    "retrying in plain-text mode (token usage will be estimated)",
+                    "retrying plain-text (token usage estimated)",
                     self.role.value,
                 )
                 cmd = _with_session(
@@ -243,10 +487,6 @@ class ClaudeCodeAgent(BaseAgent):
                 f"{self.role.value}: Claude CLI returned empty output"
             )
 
-        # Prefer the JSON envelope (real usage). Fall back to treating
-        # stdout as plain assistant text when it isn't JSON (older CLI),
-        # in which case we estimate usage from prompt + response so the
-        # token budget still sees a non-zero figure.
         result_text, reported_usage = _parse_claude_json_envelope(raw_output)
         text = result_text if result_text is not None else raw_output
         if not text.strip():
@@ -525,4 +765,245 @@ def _looks_like_uuid(value: str) -> bool:
     return all(
         c == "-" or c in "0123456789abcdefABCDEF" for c in value
     ) and value.count("-") == 4
+
+
+# ---------------------------------------------------------------------------
+#  stream-json protocol helpers (module-level)
+# ---------------------------------------------------------------------------
+
+class _StreamJsonNotSupported(Exception):
+    """Raised when the CLI rejects stream-json flags (old CLI version)."""
+
+
+class _StreamJsonExit(Exception):
+    """Internal: stream-json subprocess exited (control-flow signal)."""
+
+    def __init__(self, stderr: bytes) -> None:
+        super().__init__()
+        self.stderr = stderr
+
+
+def _parse_stream_message(msg: dict) -> StreamEvent | None:
+    """Parse one JSON line from stream-json stdout into a StreamEvent."""
+    msg_type = msg.get("type", "")
+    if msg_type == "stream_event":
+        return _parse_stream_event(msg)
+    if msg_type == "assistant":
+        return _parse_assistant_message(msg)
+    if msg_type == "tool_progress":
+        return _parse_tool_progress(msg)
+    if msg_type == "result":
+        return _parse_result(msg)
+    if msg_type == "user":
+        return _parse_user_message(msg)
+    if msg_type == "system":
+        return _parse_system_message(msg)
+    return None
+
+
+def _parse_stream_event(msg: dict) -> StreamEvent | None:
+    """Parse a ``stream_event`` — partial Anthropic streaming event."""
+    event = msg.get("event", {})
+    event_type = event.get("type", "")
+
+    if event_type == "content_block_start":
+        block = event.get("content_block", {})
+        block_type = block.get("type", "")
+        if block_type == "text":
+            return StreamEvent(
+                kind="text", role="assistant", text=block.get("text", ""),
+                is_start=True, raw=msg,
+            )
+        if block_type == "thinking":
+            return StreamEvent(
+                kind="thinking", role="assistant",
+                text=block.get("thinking", ""), is_start=True, raw=msg,
+            )
+        if block_type == "tool_use":
+            return StreamEvent(
+                kind="tool_call",
+                tool_name=block.get("name", "unknown"),
+                tool_use_id=block.get("id", ""),
+                is_start=True, raw=msg,
+            )
+
+    elif event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        delta_type = delta.get("type", "")
+        if delta_type == "text_delta":
+            return StreamEvent(
+                kind="text", role="assistant",
+                text=delta.get("text", ""), is_delta=True, raw=msg,
+            )
+        if delta_type == "thinking_delta":
+            return StreamEvent(
+                kind="thinking", role="assistant",
+                text=delta.get("thinking", ""), is_delta=True, raw=msg,
+            )
+        if delta_type == "input_json_delta":
+            return StreamEvent(
+                kind="tool_call", tool_input=delta,
+                is_delta=True, raw=msg,
+            )
+
+    elif event_type == "content_block_stop":
+        return StreamEvent(kind="text", is_stop=True, raw=msg)
+
+    return None
+
+
+def _parse_assistant_message(msg: dict) -> StreamEvent | None:
+    """Parse an ``assistant`` message — complete content blocks."""
+    message = msg.get("message", {})
+    for block in message.get("content", []):
+        if block.get("type") == "tool_use":
+            tool_input = block.get("input", {})
+            return StreamEvent(
+                kind="tool_call",
+                tool_name=block.get("name", "unknown"),
+                tool_use_id=block.get("id", ""),
+                tool_input=tool_input if isinstance(tool_input, dict) else {},
+                is_stop=True, raw=msg,
+            )
+    return None
+
+
+def _parse_tool_progress(msg: dict) -> StreamEvent | None:
+    """Parse a ``tool_progress`` update."""
+    return StreamEvent(
+        kind="tool_call",
+        tool_name=msg.get("tool_name"),
+        tool_use_id=msg.get("tool_use_id"),
+        raw=msg,
+    )
+
+
+def _parse_result(msg: dict) -> StreamEvent | None:
+    """Parse a ``result`` message — final output."""
+    return StreamEvent(
+        kind="result",
+        text=msg.get("result", ""),
+        usage=msg.get("usage"),
+        raw=msg,
+    )
+
+
+def _parse_user_message(msg: dict) -> StreamEvent | None:
+    """Parse a ``user`` message — tool result echoes."""
+    message = msg.get("message", {})
+    results: list[str] = []
+    for block in message.get("content", []):
+        if block.get("type") == "tool_result":
+            content = block.get("content", "")
+            if isinstance(content, str):
+                results.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        results.append(item.get("text", ""))
+    if results:
+        return StreamEvent(
+            kind="tool_result",
+            tool_use_id=msg.get("parent_tool_use_id"),
+            tool_output="\n".join(results)[:300],
+            raw=msg,
+        )
+    return None
+
+
+def _parse_system_message(msg: dict) -> StreamEvent | None:
+    """Parse a ``system`` message — init, task progress, etc."""
+    subtype = msg.get("subtype", "")
+    if subtype == "init":
+        return StreamEvent(
+            kind="init",
+            text=msg.get("model"),
+            usage={"session_id": msg.get("session_id")},
+            raw=msg,
+        )
+    return None
+
+
+def _usage_from_stream_result(raw: dict) -> TokenUsage | None:
+    """Extract TokenUsage from a stream-json result message."""
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return TokenUsage(
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+        cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+    )
+
+
+def _format_stream_event(ev: StreamEvent) -> str | None:
+    """Format a StreamEvent as a human-readable progress line."""
+    if ev.kind == "thinking":
+        if ev.text:
+            return f"[Thinking] {ev.text[:200]}"
+        return None
+
+    if ev.kind == "tool_call":
+        name = _humanize_tool_name(ev.tool_name or "?")
+        if ev.is_start:
+            return f"[Tool: {name}] starting..."
+        if ev.is_stop:
+            detail = _tool_input_summary(ev.tool_name or "", ev.tool_input or {})
+            return f"[Tool: {name}] {detail}"
+        elapsed = ev.raw.get("elapsed_time_seconds", "?")
+        return f"[Tool: {name}] running ({elapsed}s)"
+
+    if ev.kind == "tool_result":
+        if ev.tool_output:
+            return f"[Tool Result] {ev.tool_output[:200]}"
+        return None
+
+    if ev.kind == "init":
+        model = ev.text or "unknown"
+        return f"[Init] session started, model={model}"
+
+    if ev.kind == "result":
+        return None
+
+    if ev.kind == "text" and ev.text:
+        return ev.text
+
+    return None
+
+
+def _humanize_tool_name(name: str) -> str:
+    """Convert a tool name to a human-readable label."""
+    return {
+        "Read": "Read", "Write": "Write", "Edit": "Edit",
+        "Bash": "Shell", "Glob": "Search", "Grep": "Search",
+        "WebFetch": "Fetch", "WebSearch": "WebSearch",
+        "Task": "Task", "Skill": "Skill",
+        "TodoWrite": "Todo", "NotebookEdit": "NotebookEdit",
+    }.get(name, name)
+
+
+def _tool_input_summary(tool_name: str, tool_input: dict) -> str:
+    """Produce a short summary of a tool call from its input."""
+    fp = tool_input.get("file_path", "")
+    if tool_name in ("Read", "Write", "NotebookEdit"):
+        return str(fp) if fp else "working..."
+    if tool_name == "Edit":
+        return str(fp) if fp else "editing..."
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        return str(cmd)[:120] if cmd else "running command..."
+    if tool_name in ("Grep", "Glob"):
+        pattern = tool_input.get("pattern", tool_input.get("query", ""))
+        return str(pattern)[:120] if pattern else "searching..."
+    if tool_name in ("WebFetch", "WebSearch"):
+        url = tool_input.get("url", "")
+        return str(url)[:120] if url else "fetching..."
+    if tool_name == "Task":
+        desc = tool_input.get("description", "")
+        return str(desc)[:120] if desc else "running sub-agent..."
+    if tool_name == "Skill":
+        skill = tool_input.get("skill", "")
+        return str(skill)[:80] if skill else "invoking skill..."
+    return str(list(tool_input.keys()))[:80]
 

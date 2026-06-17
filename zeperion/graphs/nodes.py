@@ -75,7 +75,14 @@ class MultiAgentNodes:
         self.developer_can_edit_files = developer_can_edit_files
         self.progress_callback = progress_callback
 
-    def _record_agent_started(self, agent_name: str, state: WorkflowState) -> None:
+    def _record_agent_started(
+        self,
+        agent_name: str,
+        state: WorkflowState,
+        *,
+        model: str = "",
+        agent_type: str = "",
+    ) -> None:
         """Persist an ``agent_started`` event for status/log inspection."""
         self.storage.append_event(
             self.thread_id,
@@ -86,6 +93,9 @@ class MultiAgentNodes:
                 "fix_attempt": state.get("fix_attempt"),
                 "phase": state.get("phase"),
                 "task_id": state.get("task_id"),
+                "thread_id": self.thread_id,
+                "model": model,
+                "agent_type": agent_type,
             },
         )
 
@@ -122,6 +132,9 @@ class MultiAgentNodes:
         state: WorkflowState,
         output: Any,
         duration_ms: int,
+        *,
+        model: str = "",
+        agent_type: str = "",
     ) -> None:
         """Persist latest output, per-round artifact, and structured event."""
         self.storage.save_agent_output(
@@ -146,6 +159,7 @@ class MultiAgentNodes:
                 "estimated": usage.estimated,
             }
 
+        last_error = getattr(output, "parse_error", None) or None
         self.storage.append_event(
             self.thread_id,
             {
@@ -159,6 +173,10 @@ class MultiAgentNodes:
                 "global_status": output.global_status,
                 "duration_ms": duration_ms,
                 "output_chars": len(output.raw_output),
+                "thread_id": self.thread_id,
+                "model": model,
+                "agent_type": agent_type,
+                "last_error": last_error,
                 **usage_event,
             },
         )
@@ -192,6 +210,8 @@ class MultiAgentNodes:
                 "task_id": output.task_id,
                 "test_status": getattr(output.test_status, "value", output.test_status),
                 "global_status": getattr(output.global_status, "value", output.global_status),
+                "model": model,
+                "agent_type": agent_type,
                 **usage_event,
             },
         )
@@ -224,6 +244,7 @@ class MultiAgentNodes:
         """
         fix_attempt = state.get("fix_attempt") or 0
         fix_note = f", fix {fix_attempt}" if fix_attempt else ""
+        agent_type = getattr(self.config, f"{name}_agent_type", "unknown")
         logger.info(
             "%s started (round %s%s) via %s",
             name,
@@ -237,9 +258,10 @@ class MultiAgentNodes:
                 "fix_attempt": state.get("fix_attempt"),
                 "thread_id": self.thread_id,
                 "model": model,
+                "agent_type": agent_type,
             },
         )
-        self._record_agent_started(name, state)
+        self._record_agent_started(name, state, model=model, agent_type=agent_type)
 
         try:
             async with trace_agent(
@@ -262,7 +284,9 @@ class MultiAgentNodes:
         except AgentInvocationError as exc:
             return None, self._agent_invocation_failed(name, state, exc)
 
-        self._record_agent_result(name, state, output, duration_ms)
+        self._record_agent_result(
+            name, state, output, duration_ms, model=model, agent_type=agent_type
+        )
         self._append_lessons(output.lessons)
         return output, None
 

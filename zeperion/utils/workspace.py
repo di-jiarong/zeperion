@@ -88,6 +88,7 @@ class WorkspaceResult:
 
 
 from zeperion.utils.changes import _is_git_repo, _run_git as _changes_run_git
+from zeperion.utils.gitignore import ensure_gitignore_entries
 
 
 def _run_git(
@@ -245,6 +246,16 @@ def create_run_workspace(
     if add.returncode != 0:
         return WorkspaceResult(ok=False, error=_err(add, "git worktree add failed"))
 
+    # Ensure .zeperion/ is git-ignored inside the worktree. The project's
+    # .gitignore may have been modified locally by ``zeperion init`` but not
+    # yet committed — the worktree was cut from HEAD and would otherwise
+    # lack the protection, staging runtime artifacts on ``git add -A``.
+    ensure_gitignore_entries(
+        worktree_path / ".gitignore",
+        entries=[".zeperion/"],
+        header_comment="# ZEPERION config + runtime artifacts (do not commit)",
+    )
+
     logger.info("Created run worktree at %s on branch %s", worktree_path, run_branch)
     return WorkspaceResult(ok=True, workspace=workspace)
 
@@ -285,6 +296,11 @@ def finalize_run_workspace(
     add = _run_git(["add", "-A"], wt, timeout=60)
     if add.returncode != 0:
         return WorkspaceResult(ok=False, error=_err(add, "git add -A failed"))
+
+    # Belt-and-suspenders: unstage any zeperion runtime artifacts that may
+    # have leaked past .gitignore (e.g. when the worktree's .gitignore
+    # doesn't cover .zeperion/). Best-effort — failures are tolerated.
+    _run_git(["reset", "HEAD", "--", ".zeperion/"], wt, timeout=30)
 
     status = _run_git(["status", "--porcelain"], wt, timeout=30)
     if status.returncode != 0:

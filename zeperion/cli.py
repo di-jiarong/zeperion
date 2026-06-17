@@ -2153,6 +2153,7 @@ def run(
         final_phase = None
         final_global = None
         final_test = None
+        final_last_error = None
         try:
             async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
                 graph = build_graph(saver)
@@ -2180,6 +2181,8 @@ def run(
                                 final_global = node_state["global_status"]
                             if node_state.get("test_status") is not None:
                                 final_test = node_state["test_status"]
+                            if node_state.get("last_error") is not None:
+                                final_last_error = node_state["last_error"]
 
             phase_str = _enum_str(final_phase) if final_phase is not None else None
             global_str = _enum_str(final_global) if final_global is not None else None
@@ -2193,6 +2196,7 @@ def run(
                         "phase": phase_str,
                         "global_status": global_str,
                         "test_status": test_str,
+                        "last_error": final_last_error,
                     },
                 )
             except Exception as exc:  # pragma: no cover - best-effort marker

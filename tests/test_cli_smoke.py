@@ -785,7 +785,7 @@ class TestVersionCommand:
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0, f"version crashed:\n{result.output}"
         # Rich styles the version number with ANSI; strip and compare.
-        assert strip_ansi(result.stdout).strip() == "zeperion 0.1.0"
+        assert strip_ansi(result.stdout).strip() == "zeperion 0.2.0"
 
     def test_version_command_help(self) -> None:
         runner = CliRunner()

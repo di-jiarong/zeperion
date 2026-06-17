@@ -61,7 +61,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
-_TRACER = trace.get_tracer("zeperion", "0.1.0")
+_TRACER = trace.get_tracer("zeperion", "0.2.0")
 
 
 def _flatten_attributes(attrs: Mapping[str, Any]) -> dict[str, Any]:

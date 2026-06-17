@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from zeperion.agents.base import AgentInvocationError, BaseAgent, ProgressCallback
+from zeperion.agents.claude_code import (
+    StreamEvent,
+    _format_stream_event,
+    _parse_assistant_message,
+    _parse_stream_event,
+)
 from zeperion.models import AgentOutput, AgentRole, TokenUsage
 from zeperion.utils.token_estimate import estimate_usage
 
@@ -260,21 +266,20 @@ class PiAgent(BaseAgent):
                 continue
 
             if event_type == "message_update":
+                # --- structured parsing: extract tool calls + thinking ---
                 message = event.get("message")
                 if isinstance(message, dict):
                     messages.append(message)
                     if message.get("role") == "assistant":
-                        text = _extract_text(message)
-                        if text:
-                            assistant_text_fragments.append(text)
-                            if progress_callback is not None:
-                                await progress_callback(text)
+                        await _emit_pi_message_events(
+                            message, assistant_text_fragments, progress_callback,
+                        )
+                # Parse streaming deltas (tool_use, thinking_delta, text_delta)
                 delta = event.get("assistantMessageEvent") or event.get("delta")
-                text = _extract_text(delta)
-                if text:
-                    assistant_text_fragments.append(text)
-                    if progress_callback is not None:
-                        await progress_callback(text)
+                if isinstance(delta, dict):
+                    await _emit_pi_delta_events(
+                        delta, assistant_text_fragments, progress_callback,
+                    )
                 continue
 
             if event_type == "extension_ui_request":
@@ -437,3 +442,89 @@ def _with_role_contract(role: AgentRole, prompt: str) -> str:
         "by the prompt below.\n\n"
         f"{prompt}"
     )
+
+
+# ---------------------------------------------------------------------------
+#  Structured Pi RPC event parsing (reuses Claude stream-json parsers)
+# ---------------------------------------------------------------------------
+
+async def _emit_pi_message_events(
+    message: dict,
+    fragments: list[str],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    """Parse an assistant message from Pi RPC and emit structured progress.
+
+    Pi's ``message_update`` carries an Anthropic-format ``BetaMessage``
+    with ``content`` blocks. We reuse :func:`_parse_assistant_message` to
+    extract tool_use blocks and text, then format them via
+    :func:`_format_stream_event`.
+    """
+    # Fake the outer envelope that _parse_assistant_message expects
+    envelope: dict[str, Any] = {"type": "assistant", "message": message}
+    ev = _parse_assistant_message(envelope)
+    if ev is not None and progress_callback is not None:
+        line = _format_stream_event(ev)
+        if line:
+            await progress_callback(line)
+
+    # Also extract plain text for final output accumulation
+    text = _extract_text(message)
+    if text:
+        fragments.append(text)
+        if progress_callback is not None:
+            # Don't double-print if we already formatted a tool call
+            pass  # text is forwarded as raw text below
+
+    # Forward raw text deltas for continuous streaming display
+    for block in message.get("content", []):
+        if isinstance(block, dict) and block.get("type") == "text":
+            block_text = block.get("text", "")
+            if block_text and progress_callback is not None:
+                # Check whether _format_stream_event already covered this
+                if ev is None or ev.kind != "tool_call":
+                    await progress_callback(block_text)
+
+
+async def _emit_pi_delta_events(
+    delta: dict,
+    fragments: list[str],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    """Parse a streaming delta from Pi RPC and emit structured progress.
+
+    Pi's ``assistantMessageEvent`` / ``delta`` fields carry
+    ``BetaRawMessageStreamEvent`` objects (content_block_start / delta /
+    stop). We wrap them in the format expected by :func:`_parse_stream_event`
+    and forward formatted text to the callback.
+
+    For ``input_json_delta`` events (tool input streaming), we skip
+    formatting since the partial JSON fragments are not human-readable.
+    """
+    delta_type = delta.get("type", "")
+
+    # Skip non-content-block deltas (message_start, message_stop, ping, etc.)
+    if delta_type not in {
+        "content_block_start", "content_block_delta", "content_block_stop",
+    }:
+        return
+
+    # For input_json_delta, we skip — partial JSON is noise
+    if delta_type == "content_block_delta":
+        inner_delta = delta.get("delta", {})
+        if isinstance(inner_delta, dict) and inner_delta.get("type") == "input_json_delta":
+            return
+
+    # Fake the outer envelope that _parse_stream_event expects
+    envelope: dict[str, Any] = {"type": "stream_event", "event": delta}
+    ev = _parse_stream_event(envelope)
+    if ev is None or progress_callback is None:
+        return
+
+    line = _format_stream_event(ev)
+    if line:
+        await progress_callback(line)
+
+    # Accumulate text for final output
+    if ev.kind == "text" and ev.text:
+        fragments.append(ev.text)

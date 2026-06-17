@@ -46,6 +46,9 @@ class TimelineEvent:
     task_id: str | None
     test_status: str | None
     global_status: str | None
+    model: str | None
+    agent_type: str | None
+    last_error: str | None
     raw: dict
 
     @classmethod
@@ -60,6 +63,9 @@ class TimelineEvent:
             task_id=raw.get("task_id"),
             test_status=raw.get("test_status"),
             global_status=raw.get("global_status"),
+            model=raw.get("model"),
+            agent_type=raw.get("agent_type"),
+            last_error=raw.get("last_error"),
             raw=raw,
         )
 
@@ -197,19 +203,71 @@ def is_error_event(ev: TimelineEvent) -> bool:
     return False
 
 
+def _fmt_duration_ms(ms: int | None) -> str:
+    """Format a millisecond duration as human-readable string."""
+    if ms is None:
+        return "?"
+    s = ms // 1000
+    if s < 60:
+        return f"{ms}ms"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m{s:02d}s"
+
+
 def describe_event(ev: TimelineEvent) -> str:
     """Render one timeline event as a compact human-readable sentence."""
     role = ev.role or ev.raw.get("role")
     round_part = f" r{ev.round}" if ev.round is not None else ""
-    duration_part = f" ({ev.duration_ms}ms)" if ev.duration_ms is not None else ""
+    duration_part = (
+        f" ({_fmt_duration_ms(ev.duration_ms)})"
+        if ev.duration_ms is not None
+        else ""
+    )
+
+    def _backend_tag() -> str:
+        """Build a compact backend tag like ``(claude_code, deepseek-v4)``."""
+        parts: list[str] = []
+        at = ev.agent_type or ev.raw.get("agent_type")
+        model = ev.model or ev.raw.get("model")
+        if at:
+            parts.append(str(at))
+        if model:
+            parts.append(str(model))
+        if parts:
+            return " (" + ", ".join(parts) + ")"
+        return ""
+
+    def _token_tail() -> str:
+        """Build token usage suffix when available."""
+        in_t = ev.raw.get("input_tokens")
+        out_t = ev.raw.get("output_tokens")
+        if isinstance(in_t, int) and isinstance(out_t, int):
+            est = "~" if ev.raw.get("estimated") else ""
+            return f" ({in_t}+{out_t} tok{est})"
+        return ""
+
+    def _error_tail() -> str:
+        """Append error context for blocked/failed events."""
+        err = ev.last_error or ev.raw.get("last_error")
+        if err:
+            return f" [{_shorten(str(err), 100)}]"
+        return ""
 
     if ev.event == "agent_started":
-        return f"{role or 'agent'} started{round_part}"
+        return f"{role or 'agent'}{_backend_tag()} started{round_part}"
 
     if ev.event == "agent_completed":
         status = ev.global_status or ev.test_status
         status_part = f" -> {status}" if status else ""
-        return f"{role or 'agent'} completed{round_part}{status_part}{duration_part}"
+        token_part = _token_tail()
+        error_part = _error_tail() if status and status.upper() == "BLOCKED" else ""
+        return (
+            f"{role or 'agent'} completed{round_part}{status_part}"
+            f"{duration_part}{token_part}{error_part}"
+        )
 
     if ev.event == "tester_verify_started":
         count = ev.raw.get("command_count")
@@ -230,7 +288,8 @@ def describe_event(ev: TimelineEvent) -> str:
         phase = ev.raw.get("phase") or "unknown"
         global_status = ev.raw.get("global_status")
         tail = f" / {global_status}" if global_status else ""
-        return f"workflow finished: {phase}{tail}"
+        error_part = _error_tail()
+        return f"workflow finished: {phase}{tail}{error_part}"
 
     return ev.event.replace("_", " ")
 

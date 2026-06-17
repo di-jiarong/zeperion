@@ -489,7 +489,7 @@ def create_app(config: WorkflowConfig, *, poll_interval: float = 2.0) -> FastAPI
     state_dir = Path(config.state_dir)
     app = FastAPI(
         title="ZEPERION",
-        version="0.1.0",
+        version="0.2.0",
         docs_url=None,  # don't expose the Swagger UI by default; this app is local
         redoc_url=None,
     )
