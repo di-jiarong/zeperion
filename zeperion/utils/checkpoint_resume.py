@@ -52,17 +52,14 @@ def infer_multi_agent_resume_anchor(
     last_error = (state.get("last_error") or "").lower()
     patch: dict = {"global_status": GlobalStatus.CONTINUE}
 
-    # Budget / max-fix terminal blocks — operator explicitly chose to resume.
+    # Budget terminal block — operator explicitly chose to resume.
     if "token budget" in last_error:
         patch["phase"] = PhaseType.PLANNING
         return "increment_round", patch
 
-    if "max fix attempts" in last_error:
-        patch["fix_attempt"] = max(0, config.max_fix_attempts - 1)
-        patch["phase"] = PhaseType.DEVELOPMENT
-        _reset_downstream_status(state, patch)
-        return "increment_fix", patch
-
+    # Max-fix-attempts block. The default error message from block_workflow
+    # is generic ("Workflow blocked..."), so we rely on the numeric
+    # fix_attempt counter rather than string-matching last_error.
     fix_attempt = state.get("fix_attempt") or 0
     if config.max_fix_attempts and fix_attempt >= config.max_fix_attempts:
         patch["fix_attempt"] = max(0, config.max_fix_attempts - 1)

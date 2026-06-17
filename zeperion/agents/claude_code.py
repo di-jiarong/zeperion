@@ -382,9 +382,22 @@ class ClaudeCodeAgent(BaseAgent):
         stderr_task = asyncio.create_task(_read_stderr())
         stdout_task = asyncio.create_task(_read_stdout())
 
-        await stdin_task
-        stdout = await stdout_task
-        stderr = await stderr_task
+        try:
+            await stdin_task
+            stdout = await stdout_task
+            stderr = await stderr_task
+        finally:
+            # If any task raised (e.g. BrokenPipeError on stdin), cancel
+            # the others so they don't leak as orphaned background tasks
+            # holding file descriptors to the now-dead subprocess.
+            for t in (stdin_task, stderr_task, stdout_task):
+                if not t.done():
+                    t.cancel()
+            # Reap the process so the caller can read ``process.returncode``.
+            # Without this, a successfully-exited process may still report
+            # ``returncode is None``, which the caller converts to -1 and
+            # treats as a fatal error.
+            await process.wait()
 
         return stdout, stderr
 

@@ -194,9 +194,27 @@ class AnthropicAgent(BaseAgent):
                         text_parts.append(delta)
                         await progress_callback(delta)
                 elif event.type == "message_delta":
-                    usage = _extract_usage(
+                    # message_delta.usage historically only carries output_tokens.
+                    # Merge with any input_tokens we caught earlier so we don't
+                    # lose the full picture.
+                    delta_usage = _extract_usage(
                         getattr(event, "usage", None)
                     )
+                    if usage is not None and delta_usage is not None:
+                        # Merge: prefer input_tokens from usage (message_start)
+                        # and output_tokens from delta_usage (message_delta).
+                        merged = dict(usage.__dict__)
+                        if delta_usage.output_tokens is not None:
+                            merged["output_tokens"] = delta_usage.output_tokens
+                        usage = TokenUsage(**merged)
+                    else:
+                        usage = delta_usage or usage
+                elif event.type == "message_start":
+                    # message_start carries the full usage (including input_tokens).
+                    # Capture it early; message_delta may only add output_tokens.
+                    msg = getattr(event, "message", None)
+                    if msg is not None:
+                        usage = _extract_usage(getattr(msg, "usage", None))
 
         # Fallback: pick up usage from the completed stream snapshot
         # if the message_delta event didn't fire.

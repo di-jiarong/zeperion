@@ -363,11 +363,17 @@ def run_ship_command(
             )
 
         async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
+            # Provide real-time progress streaming so the operator sees agent
+            # output as it's generated (not just a wall of text at the end).
+            # Lazy import avoids a circular dependency (cli.py imports cli_ship).
+            from zeperion.cli import _make_progress_callback
+
             graph = create_multi_agent_graph(
                 run_config,
                 checkpointer=saver,
                 thread_id=multi_thread,
                 disable_pr_pipeline=True,
+                progress_callback=_make_progress_callback(out=console),
             )
             async for event in graph.astream(ma_initial, ma_cfg):
                 for node_name, node_state in event.items():

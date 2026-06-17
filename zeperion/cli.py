@@ -1505,7 +1505,7 @@ def _print_node_progress(node_name: str, node_state) -> None:
     console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
 
 
-def _make_progress_callback():
+def _make_progress_callback(out=None):
     """Return an async callback suitable for :class:`ProgressCallback`.
 
     The callback buffers partial text from the agent and prints complete
@@ -1515,7 +1515,12 @@ def _make_progress_callback():
     The state is captured in a closure and is *not* thread-safe \u2014 it must
     only be awaited from a single event-loop task (the graph node that
     invoked the agent).
+
+    Args:
+        out: Rich Console to print to (defaults to the module-level
+            ``console`` used by the CLI).
     """
+    _out = out if out is not None else console
     buf: list[str] = []
     line_count = 0
     folded = False
@@ -1530,7 +1535,7 @@ def _make_progress_callback():
             # _PROGRESS_FLUSH_CHARS accumulated characters.
             buf.append(text)
             if sum(len(c) for c in buf) >= _PROGRESS_FLUSH_CHARS:
-                console.print(
+                _out.print(
                     "  [dim]  (agent still working...)[/dim]"
                 )
                 buf.clear()
@@ -1545,7 +1550,7 @@ def _make_progress_callback():
             line_count += 1
             if line_count > _PROGRESS_MAX_LINES:
                 folded = True
-                console.print(
+                _out.print(
                     "  [dim]  (output folded \u2014 agent still generating, "
                     "full text in output file)[/dim]"
                 )
@@ -1555,7 +1560,7 @@ def _make_progress_callback():
             if len(display) > _PROGRESS_LINE_WIDTH:
                 display = display[:_PROGRESS_LINE_WIDTH - 1] + "\u2026"
             if display.strip():
-                console.print(f"  [dim]\u2502[/dim] {display}")
+                _out.print(f"  [dim]\u2502[/dim] {display}")
         buf[:] = [combined] if combined else []
 
         # Flush buffer when it gets long without a newline (streaming
@@ -1564,7 +1569,7 @@ def _make_progress_callback():
             line_count += 1
             if line_count > _PROGRESS_MAX_LINES:
                 folded = True
-                console.print(
+                _out.print(
                     "  [dim]  (output folded \u2014 agent still generating, "
                     "full text in output file)[/dim]"
                 )
@@ -1574,7 +1579,7 @@ def _make_progress_callback():
             if len(display) > _PROGRESS_LINE_WIDTH:
                 display = display[:_PROGRESS_LINE_WIDTH - 1] + "\u2026"
             if display.strip():
-                console.print(f"  [dim]\u2502[/dim] {display}")
+                _out.print(f"  [dim]\u2502[/dim] {display}")
             buf.clear()
 
     return _on_progress
@@ -1712,6 +1717,9 @@ async def _finalize_run_workspace_manifest(
             logger.warning("post-run verify failed: %s", exc)
 
     storage.save_run_manifest(manifest.model_dump(mode="json"))
+
+    if not result.ok:
+        return  # git failure; already printed above, don't follow with "no changes"
 
     if n == 0:
         out.print(

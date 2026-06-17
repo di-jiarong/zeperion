@@ -608,21 +608,16 @@ def _repo_relative_state_dir(config: WorkflowConfig) -> str | None:
     repo, or when paths are unresolvable — in those cases ``git add -A`` from
     the repo root cannot stage it and there is nothing to unstage.
     """
-    import subprocess
     from pathlib import Path
 
-    try:
-        pd = Path(config.project_dir).resolve()
-        toplevel = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(pd),
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    from zeperion.utils.changes import _run_git
+
+    pd = Path(config.project_dir).resolve()
+    toplevel = _run_git(
+        ["rev-parse", "--show-toplevel"],
+        pd,
+        timeout=10,
+    )
     if toplevel.returncode != 0 or not toplevel.stdout.strip():
         return None
 

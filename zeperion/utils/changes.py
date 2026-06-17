@@ -100,12 +100,21 @@ class StateDirIgnoreStatus:
         return self.in_repo and not self.ignored
 
 
-def _run_git(args: list[str], cwd: str | Path, *, timeout: int = 30) -> subprocess.CompletedProcess:
+def _run_git(
+    args: list[str],
+    cwd: str | Path,
+    *,
+    timeout: int = 30,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run ``git <args>`` in ``cwd``; never raises.
 
     Non-zero exits return as-is. Process-level failures (missing git,
     timeout, permission/OS errors) become a synthetic ``CompletedProcess``
     with ``returncode=127`` so callers only ever inspect ``returncode``.
+
+    When *input_text* is provided it is piped to git's stdin (used by
+    ``git apply --index``).
     """
     try:
         return subprocess.run(
@@ -115,6 +124,14 @@ def _run_git(args: list[str], cwd: str | Path, *, timeout: int = 30) -> subproce
             text=True,
             timeout=timeout,
             check=False,
+            input=input_text,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=127,
+            stdout="",
+            stderr=f"git command timed out after {timeout}s: git {' '.join(args)} ({exc})",
         )
     except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(

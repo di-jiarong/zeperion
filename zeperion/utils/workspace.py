@@ -87,6 +87,9 @@ class WorkspaceResult:
     error: str | None = None
 
 
+from zeperion.utils.changes import _is_git_repo, _run_git as _changes_run_git
+
+
 def _run_git(
     args: list[str],
     cwd: str | Path,
@@ -96,43 +99,11 @@ def _run_git(
 ) -> subprocess.CompletedProcess:
     """Run ``git <args>`` in ``cwd``; never raises.
 
-    Non-zero exits are returned as-is. Process-level failures (git missing,
-    timeout, OS/filesystem errors) are converted into a synthetic
-    ``CompletedProcess`` with ``returncode=127`` and the error text on
-    ``stderr`` so every caller can rely on the ``returncode`` check alone.
+    Delegates to :func:`zeperion.utils.changes._run_git` with a workspace-
+    appropriate default timeout (60 s vs the 30 s module-level default in
+    ``changes``, because worktree mutations can be slower).
     """
-    try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            input=input_text,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            args=["git", *args],
-            returncode=127,
-            stdout="",
-            stderr=f"git command timed out after {timeout}s: git {' '.join(args)} ({exc})",
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
-        return subprocess.CompletedProcess(
-            args=["git", *args],
-            returncode=127,
-            stdout="",
-            stderr=f"git invocation failed: {exc}",
-        )
-
-
-def _is_git_repo(project_dir: str | Path) -> bool:
-    try:
-        out = _run_git(["rev-parse", "--is-inside-work-tree"], project_dir, timeout=5)
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return False
-    return out.returncode == 0 and out.stdout.strip() == "true"
+    return _changes_run_git(args, cwd, timeout=timeout, input_text=input_text)
 
 
 def _err(proc: subprocess.CompletedProcess, fallback: str) -> str:
