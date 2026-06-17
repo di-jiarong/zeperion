@@ -277,7 +277,8 @@ class ClaudeCodeAgent(BaseAgent):
             output = self.parse_output(result_text)
             usage = reported_usage or estimate_usage(prompt, result_text)
             return output.model_copy(update={"usage": usage})
-        raise AgentInvocationError(
+        # No result from stream-json — fall back to json-envelope path
+        raise _StreamJsonNotSupported(
             f"{self.role.value}: stream-json produced no result text"
         )
 
@@ -322,8 +323,8 @@ class ClaudeCodeAgent(BaseAgent):
                 ).strip()
                 if _is_unknown_output_format_error(exit_info.stderr, b""):
                     raise _StreamJsonNotSupported() from None
-                logger.debug(
-                    "stream-json stderr: %s", err_text[:500],
+                logger.warning(
+                    "stream-json exited with stderr: %s", err_text[:500],
                 )
 
         if result_text is not None:
