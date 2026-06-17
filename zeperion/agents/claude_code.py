@@ -303,11 +303,26 @@ class ClaudeCodeAgent(BaseAgent):
         result_text: str | None = None
         result_usage: TokenUsage | None = None
         accumulated_text: list[str] = []
+        # Track tool names across events (tool_progress doesn't always
+        # carry the name — fill it in from earlier stream_event blocks).
+        tool_names: dict[str, str] = {}
 
         try:
             async for ev in self._stream_json_read(
                 cmd, execution_dir, prompt_bytes
             ):
+                # Learn tool names from start events
+                if ev.kind == "tool_call" and ev.tool_use_id and ev.tool_name:
+                    tool_names[ev.tool_use_id] = ev.tool_name
+                # Fill in missing tool name from learned mapping
+                if ev.kind == "tool_call" and not ev.tool_name and ev.tool_use_id:
+                    ev = StreamEvent(
+                        kind=ev.kind, tool_name=tool_names.get(ev.tool_use_id, "unknown"),
+                        tool_use_id=ev.tool_use_id, tool_input=ev.tool_input,
+                        is_delta=ev.is_delta, is_start=ev.is_start, is_stop=ev.is_stop,
+                        raw=ev.raw,
+                    )
+
                 if progress_callback is not None:
                     line = _format_stream_event(ev)
                     if line:
@@ -872,10 +887,20 @@ def _parse_assistant_message(msg: dict) -> StreamEvent | None:
 
 def _parse_tool_progress(msg: dict) -> StreamEvent | None:
     """Parse a ``tool_progress`` update."""
+    tool_name = (
+        msg.get("tool_name")
+        or msg.get("toolName")
+        or msg.get("name")
+        or "unknown"
+    )
     return StreamEvent(
         kind="tool_call",
-        tool_name=msg.get("tool_name"),
-        tool_use_id=msg.get("tool_use_id"),
+        tool_name=tool_name,
+        tool_use_id=(
+            msg.get("tool_use_id")
+            or msg.get("toolUseId")
+            or msg.get("id")
+        ),
         raw=msg,
     )
 
@@ -939,20 +964,40 @@ def _usage_from_stream_result(raw: dict) -> TokenUsage | None:
     )
 
 
+#: Suppress thinking deltas shorter than this to avoid word-by-word spam.
+_THINKING_MIN_CHARS = 40
+
+#: Only print tool-progress heartbeats every N seconds.
+_TOOL_PROGRESS_INTERVAL_S = 15
+_tool_progress_last: dict[str, float] = {}  # tool_use_id → last-printed timestamp
+
+
 def _format_stream_event(ev: StreamEvent) -> str | None:
     """Format a StreamEvent as a human-readable progress line."""
+    import time as _time
+
     if ev.kind == "thinking":
-        if ev.text:
+        if ev.is_delta:
+            # Suppress word-by-word thinking deltas — too noisy
+            return None
+        if ev.text and len(ev.text) >= _THINKING_MIN_CHARS:
             return f"[Thinking] {ev.text[:200]}"
         return None
 
     if ev.kind == "tool_call":
-        name = _humanize_tool_name(ev.tool_name or "?")
+        name = _humanize_tool_name(ev.tool_name or "unknown")
         if ev.is_start:
             return f"[Tool: {name}] starting..."
         if ev.is_stop:
             detail = _tool_input_summary(ev.tool_name or "", ev.tool_input or {})
             return f"[Tool: {name}] {detail}"
+        # Throttle progress heartbeats
+        tid = ev.tool_use_id or ""
+        now = _time.monotonic()
+        if tid in _tool_progress_last:
+            if now - _tool_progress_last[tid] < _TOOL_PROGRESS_INTERVAL_S:
+                return None
+        _tool_progress_last[tid] = now
         elapsed = ev.raw.get("elapsed_time_seconds", "?")
         return f"[Tool: {name}] running ({elapsed}s)"
 
