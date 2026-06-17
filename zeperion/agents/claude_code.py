@@ -245,73 +245,26 @@ class ClaudeCodeAgent(BaseAgent):
         prompt_bytes = prompt.encode("utf-8")
         logger.info("Invoking %s with model %s", self.role.value, self.model)
 
-        # --- Primary path: --verbose for rich stderr output ---
+        # --- Primary: stream-json (structured progress) ---
         try:
-            cmd = _with_session(self.build_command(
-                execution_dir, json_output=True, verbose=True,
-            ))
-            logger.debug("Command: %s", " ".join(cmd))
-            returncode, stdout, stderr = await self._spawn_and_communicate(
-                cmd, execution_dir, prompt_bytes,
-                progress_callback=progress_callback,
+            return await self._invoke_via_stream_json(
+                _with_session, execution_dir, prompt, prompt_bytes,
+                progress_callback,
             )
-            if returncode != 0 and _is_unknown_output_format_error(stderr, stdout):
-                # Self-heal: re-run without --verbose (old CLI)
-                logger.warning(
-                    "%s: Claude CLI rejected --verbose; retrying without it",
-                    self.role.value,
-                )
-                cmd = _with_session(self.build_command(
-                    execution_dir, json_output=True, verbose=False,
-                ))
-                returncode, stdout, stderr = await self._spawn_and_communicate(
-                    cmd, execution_dir, prompt_bytes,
-                    progress_callback=progress_callback,
-                )
-            # Also retry json → plain for old CLIs
-            if returncode != 0 and _is_unknown_output_format_error(stderr, stdout):
-                logger.warning(
-                    "%s: Claude CLI rejected --output-format json; "
-                    "retrying in plain-text mode",
-                    self.role.value,
-                )
-                cmd = _with_session(self.build_command(
-                    execution_dir, json_output=False, verbose=False,
-                ))
-                returncode, stdout, stderr = await self._spawn_and_communicate(
-                    cmd, execution_dir, prompt_bytes,
-                    progress_callback=progress_callback,
-                )
+        except _StreamJsonNotSupported:
+            logger.info(
+                "%s: stream-json not supported; falling back to json",
+                self.role.value,
+            )
         finally:
             if self.use_worktree and not self.keep_worktree:
                 await self._remove_worktree(execution_dir)
 
-        if returncode != 0:
-            err = stderr.decode("utf-8", errors="replace").strip()
-            out_tail = stdout.decode("utf-8", errors="replace").strip()[-2000:]
-            raise AgentInvocationError(
-                f"{self.role.value} invocation failed (exit={returncode}): "
-                f"{err or 'no stderr'}\n--- last stdout ---\n{out_tail}"
-            )
-
-        raw_output = stdout.decode("utf-8", errors="replace")
-        logger.debug("Raw output length: %d chars", len(raw_output))
-
-        if not raw_output.strip():
-            raise AgentInvocationError(
-                f"{self.role.value}: Claude CLI returned empty output"
-            )
-
-        result_text, reported_usage = _parse_claude_json_envelope(raw_output)
-        text = result_text if result_text is not None else raw_output
-        if not text.strip():
-            raise AgentInvocationError(
-                f"{self.role.value}: Claude CLI returned empty output"
-            )
-
-        output = self.parse_output(text)
-        usage = reported_usage or estimate_usage(prompt, text)
-        return output.model_copy(update={"usage": usage})
+        # --- Fallback: --output-format json ---
+        return await self._invoke_via_json_envelope(
+            _with_session, execution_dir, prompt, prompt_bytes,
+            progress_callback,
+        )
 
     # ------------------------------------------------------------------
     #  stream-json mode (kept for future use / newer CLI versions)
@@ -364,7 +317,8 @@ class ClaudeCodeAgent(BaseAgent):
 
         try:
             async for ev in self._stream_json_read(
-                cmd, execution_dir, prompt_bytes
+                cmd, execution_dir, prompt_bytes,
+                stderr_callback=progress_callback,
             ):
                 # Learn tool names from start events
                 if ev.kind == "tool_call" and ev.tool_use_id and ev.tool_name:
@@ -414,6 +368,8 @@ class ClaudeCodeAgent(BaseAgent):
         cmd: list[str],
         execution_dir: Path,
         prompt_bytes: bytes,
+        *,
+        stderr_callback: ProgressCallback | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Spawn stream-json subprocess and yield parsed StreamEvents."""
         try:
@@ -460,6 +416,10 @@ class ClaudeCodeAgent(BaseAgent):
                     if not line:
                         break
                     stderr_buf.append(line)
+                    if stderr_callback is not None:
+                        text = line.decode("utf-8", errors="replace").strip()
+                        if text:
+                            await stderr_callback(text)
 
             stderr_task = asyncio.create_task(_read_stderr())
 
