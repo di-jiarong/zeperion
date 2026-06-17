@@ -530,6 +530,10 @@ class MultiAgentNodes:
             self._apply_parse_error("reviewer", output, updates)
         elif output.review_status in (ReviewStatus.FAIL, ReviewStatus.BLOCKED):
             updates["last_error"] = output.raw_output[-500:]
+        elif output.review_status == ReviewStatus.PASS:
+            # Clear any stale failure from an earlier attempt so a run that
+            # recovers doesn't report a phantom error in its final state.
+            updates["last_error"] = None
 
         self._apply_budget(state, output, updates)
         return updates
@@ -629,6 +633,9 @@ class MultiAgentNodes:
             self._apply_parse_error("tester", output, updates)
         elif output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
             updates["last_error"] = output.raw_output[-500:]
+        elif output.test_status == TestStatus.PASS:
+            # Clear any stale failure so a recovered run ends clean.
+            updates["last_error"] = None
 
         self._apply_budget(state, output, updates)
         return updates
