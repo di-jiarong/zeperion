@@ -5,8 +5,13 @@ This file orients AI coding assistants working in this repository. Keep it in sy
 ## What this repo is
 
 ZEPERION is a **LangGraph + Python package** (`zeperion/`) that orchestrates a
-Planner → Developer → Reviewer → Tester loop and an optional PR delivery sub-pipeline
+Planner → Developer → Tester loop (Reviewer optional) with **self-repair**:
+failed tests → Developer fixes with real error output → stuck? → Planner
+re-plans with a different approach. Optional PR delivery sub-pipeline
 (commit → push → PR → Codex review → auto-merge).
+
+Default backend is `claude_code` for all roles (only the `claude` CLI
+needed). Reviewer is off by default — tests are the feedback loop.
 
 A second, legacy bash implementation has been moved to the
 `legacy/bash-harness` branch (kept for historical reference and the
@@ -44,7 +49,7 @@ zeperion/
   utils/time.py        # iso_now() / utc_strftime() (timezone-aware)
   cli.py               # `zeperion init|run|status|list`
 
-tests/                 # pytest suite (370+ tests at time of writing)
+tests/                 # pytest suite (596 tests at time of writing)
 # Legacy bash version lives on the `legacy/bash-harness` branch only.
 ```
 
@@ -60,10 +65,21 @@ pytest
 # Initialise a target project (creates .zeperion/config.yaml + requirement.txt)
 zeperion init
 
-# Run the multi-agent workflow
-zeperion run --mode multi_agent --thread-id feature-x
+# Run with inline requirement (simplest)
+zeperion "实现一个 GET /health 端点"
 
-# Run the PR pipeline (separate thread_id is recommended)
+# Or read from requirement.txt
+zeperion run
+
+# Observe a running workflow
+zeperion logs --follow --verbose   # real-time detail (attach mode)
+zeperion status --watch            # status panel
+
+# After completion
+zeperion changes                   # see what changed
+zeperion accept                    # merge into working tree
+
+# PR pipeline (separate thread_id is recommended)
 zeperion run --mode pr_pipeline --thread-id feature-x-pr
 
 # Inspect status / list all threads
@@ -138,13 +154,31 @@ optional because it never owns `global_status`.
 `AnthropicAgent.invoke` is a single `messages.create` call with no
 tool definitions, no file IO, no shell. It returns text. That text
 gets parsed and written to `*_output.txt` artifacts but **no source
-code is touched**. Operators wanting the workflow to actually edit
-project files must set the corresponding role's `*_agent_type` to
-`pi` or `claude_code`. `PiAgent` shells out to Pi Coding Agent via
-`pi --mode rpc`; `ClaudeCodeAgent` shells out to the `claude` CLI. The
-CLI itself does the file writes. This used to be undocumented and was
-the most common source of "I ran zeperion and nothing changed in my repo"
-confusion.
+code is touched**.
+
+**Default since v0.3**: all roles use `claude_code` (the `claude` CLI).
+`AnthropicAgent` is still available for "plan-only" workflows but is no
+longer the default for any role. The common confusion of "I ran zeperion
+and nothing changed" is eliminated by this default.
+
+## Self-repair & escalation ladder (routes.py)
+
+The workflow does **not** give up when Developer fails to fix a bug:
+
+1. Test/Review FAIL → retry Developer (up to `max_fix_attempts` per round)
+2. Same error repeated 2+ times → **skip remaining fix budget**, escalate
+3. Fix budget exhausted → **escalate to Planner** (new round, fresh approach)
+4. Planner re-plans with `replan_after_failure=True` directive (change strategy)
+5. Round budget exhausted → BLOCKED (human intervention)
+
+Key state fields:
+- `same_error_streak` — consecutive identical errors (hash-compared)
+- `fix_attempt` — reset to 0 each round by `increment_round`
+- `last_error` — cleared on PASS so recovered runs don't carry phantom errors
+
+On fix attempts, Developer receives:
+- Real verify command output (actual pytest/test errors, not Tester's summary)
+- Its own previous attempt output (to avoid repeating failed changes)
 
 ## Prompt output contract (parsed by `SectionParser`)
 
