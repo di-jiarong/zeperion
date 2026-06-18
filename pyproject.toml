@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zeperion"
-version = "0.2.0"
-description = "Multi-agent development and PR delivery pipeline framework"
+version = "0.3.0"
+description = "One-command auto-developer: write code, run tests, fix bugs until green"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
