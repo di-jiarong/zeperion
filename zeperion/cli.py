@@ -2890,6 +2890,45 @@ def list_runs(
     console.print("  zeperion status --thread-id <THREAD_ID>")
 
 
+def _tail_run_log(
+    log_path: Path,
+    *,
+    follow: bool = False,
+    tail_lines: int = 50,
+    poll_interval: float = 0.5,
+) -> None:
+    """Print the tail of run.log, optionally following like ``tail -f``.
+
+    Used by ``zeperion logs --verbose`` to "attach" to a detached run's
+    full human-readable output (the same Rich-formatted text that would
+    appear in a foreground run: ``◆ DEVELOPER``, ``│ [Tool: ...]``, etc.).
+    """
+    import time
+
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+    # Print the last N lines as initial context.
+    for line in all_lines[-tail_lines:]:
+        console.print(line.rstrip(), highlight=False)
+
+    if not follow:
+        return
+
+    console.print(f"\n[dim]-- following {log_path} (Ctrl-C to stop) --[/dim]")
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            # Seek to end
+            f.seek(0, 2)
+            while True:
+                line = f.readline()
+                if line:
+                    console.print(line.rstrip(), highlight=False)
+                else:
+                    time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        console.print("\n[dim]-- stopped --[/dim]")
+
+
 @app.command()
 def logs(
     config_file: str = typer.Option(
@@ -2931,6 +2970,16 @@ def logs(
             "way to see why a run is unhappy."
         ),
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help=(
+            "Tail run.log (the full foreground output: tool calls, thinking "
+            "traces, per-step headers) instead of events.jsonl. Use with "
+            "--follow to 'attach' to a detached run in real time."
+        ),
+    ),
 ):
     """Stream the workflow events file for a thread.
 
@@ -2958,6 +3007,20 @@ def logs(
         raise typer.Exit(1)
 
     thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
+
+    # --verbose: tail run.log (full foreground output) instead of events.jsonl
+    if verbose:
+        log_path = logfile_path(Path(config.state_dir), thread_id)
+        if not log_path.exists():
+            console.print(f"[yellow]No run.log at {log_path}[/yellow]")
+            console.print(
+                f"Thread ID: [dim]{thread_id}[/dim] — "
+                "run.log is created by a detached run (--detach)."
+            )
+            raise typer.Exit(0)
+        _tail_run_log(log_path, follow=follow, tail_lines=tail, poll_interval=poll_interval)
+        return
+
     events_path = Path(config.state_dir) / "runs" / thread_id / "events.jsonl"
 
     if not events_path.exists() and not follow:
