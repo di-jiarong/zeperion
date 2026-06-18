@@ -2237,10 +2237,10 @@ def run(
             ).upper() == "BLOCKED"
             if blocked:
                 console.print(
-                    "[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow] "
-                    "[dim](an agent could not proceed — check the last "
-                    "agent's output / last_error)[/dim]"
+                    "\n[bold yellow]\u26a0 Workflow finished: BLOCKED[/bold yellow]"
                 )
+                if final_last_error:
+                    console.print(f"\n{final_last_error}")
             else:
                 tail = (
                     f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
