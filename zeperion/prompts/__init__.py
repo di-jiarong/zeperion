@@ -97,6 +97,7 @@ class PromptTemplate:
         fix_attempt: int = 0,
         uses_claude_code: bool = False,
         verify_output: str | None = None,
+        prev_changes: str | None = None,
     ) -> str:
         """Render developer prompt.
 
@@ -111,6 +112,9 @@ class PromptTemplate:
                 commands (real test output). Surfaced verbatim on fix
                 attempts so the Developer reasons over actual errors rather
                 than the Tester's second-hand summary.
+            prev_changes: The Developer's own output from the previous fix
+                attempt (contains CHANGES section). Helps it know what it
+                already tried so it doesn't repeat or accidentally revert.
 
         Returns:
             Rendered developer prompt
@@ -125,6 +129,7 @@ class PromptTemplate:
             is_fixing=fix_attempt > 0,
             uses_claude_code=uses_claude_code,
             verify_output=verify_output or "无",
+            prev_changes=prev_changes or "无",
         )
 
     def render_pr_fixer(

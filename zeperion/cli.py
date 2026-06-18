@@ -1473,6 +1473,33 @@ def accept(
         )
 
 
+def _print_change_summary(project_dir: str, out: Console) -> None:
+    """Print a compact git diff --stat after a successful run.
+
+    Best-effort: if we're not in a git repo or git isn't available, skip
+    silently. The user can always run ``zeperion changes`` for details.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            out.print("\n[bold]Changes made:[/bold]")
+            for line in result.stdout.strip().split("\n")[-15:]:
+                out.print(f"  [dim]{line}[/dim]")
+        elif result.returncode == 0:
+            # No changes (e.g. workspace mode, changes are in worktree)
+            pass
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
 # Graph nodes that only mutate counters/terminal state; printing a
 # ``→ increment_round`` style line for them is pure noise in the run log.
 _QUIET_NODES = {"increment_round", "increment_fix"}
@@ -2266,6 +2293,9 @@ def run(
                     f" [dim]({global_str or phase_str})[/dim]" if (global_str or phase_str) else ""
                 )
                 console.print(f"[bold green]\u2713 Workflow completed![/bold green]{tail}")
+
+                # Print a quick change summary so the user sees what was done.
+                _print_change_summary(run_config.project_dir, console)
 
             if use_workspace and workspace is not None and workspace_manifest is not None:
                 await _finalize_run_workspace_manifest(

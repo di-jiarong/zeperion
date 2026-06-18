@@ -471,12 +471,15 @@ class MultiAgentNodes:
         """Developer agent node."""
         plan = self.storage.load_agent_output("planner") or ""
         test_report = self.storage.load_agent_output("tester")
-        # On a fix attempt, surface the real verify command output (actual
-        # test errors) so the Developer fixes from facts, not the Tester's
-        # paraphrase. Only relevant when fixing; first implementation has none.
+        # On a fix attempt, surface context from the prior attempt:
+        # 1. Real verify output (actual test errors, not Tester's paraphrase)
+        # 2. Previous developer output (what it changed last time) so it
+        #    knows what it already tried and avoids repeating/reverting.
         verify_output = None
+        prev_dev_output = None
         if state["fix_attempt"] > 0:
             verify_output = self.storage.load_agent_output("tester_verify")
+            prev_dev_output = self.storage.load_agent_output("developer")
 
         prompt = self.template_manager.render_developer(
             requirement=self.requirement,
@@ -486,6 +489,7 @@ class MultiAgentNodes:
             fix_attempt=state["fix_attempt"],
             uses_claude_code=self.developer_can_edit_files,
             verify_output=verify_output,
+            prev_changes=prev_dev_output,
         )
 
         def _span_attrs(span: Any, output: AgentOutput) -> None:

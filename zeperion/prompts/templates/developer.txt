@@ -46,6 +46,11 @@ LESSONS:
 {{ verify_output }}
 {% endif %}
 
+{% if prev_changes != "无" %}
+你上一次修复尝试的输出（参考你之前做了什么，不要重复无效的改动）：
+{{ prev_changes }}
+{% endif %}
+
 请根据测试报告与真实测试输出修复问题，不要引入新功能。
 {% else %}
 这是首次实现，请严格按计划执行。
