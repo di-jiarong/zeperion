@@ -102,13 +102,20 @@ def route_after_tester(
         return "blocked"
 
     if test_status in (TestStatus.FAIL, TestStatus.ERROR):
-        if fix_attempt < max_fix_attempts:
+        # Stuck-loop early escalation: if the same error has appeared
+        # 2+ times in a row, further fix attempts won't help — skip
+        # straight to re-plan (or block if rounds are also spent).
+        streak = state.get("same_error_streak", 0)
+        stuck = streak >= 2
+
+        if fix_attempt < max_fix_attempts and not stuck:
             logger.info("Test failed, retry fix attempt %s", fix_attempt + 1)
             return "developer"
         if round_num < max_rounds:
+            reason = "same error repeated" if stuck else "fixes exhausted"
             logger.info(
-                "Test fixes exhausted (round %s); escalating to Planner "
-                "to re-plan",
+                "Test failed (%s, round %s); escalating to Planner to re-plan",
+                reason,
                 round_num,
             )
             return "planner"

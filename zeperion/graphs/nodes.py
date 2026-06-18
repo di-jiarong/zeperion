@@ -45,6 +45,29 @@ def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
+def _error_fingerprint(error_text: str) -> str:
+    """Produce a stable fingerprint for an error message.
+
+    Strips variable noise (timestamps, pids, hex addresses, UUIDs) so that
+    "the same assertion failure" hashes identically across fix attempts even
+    when the surrounding log context has non-deterministic fields.
+    """
+    import hashlib
+    import re
+
+    if not error_text:
+        return ""
+    # Collapse whitespace, strip ANSI, remove timestamps/hex/uuids.
+    cleaned = re.sub(r"\x1b\[[0-9;]*m", "", error_text)
+    cleaned = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^\s]*", "", cleaned)
+    cleaned = re.sub(r"0x[0-9a-fA-F]+", "", cleaned)
+    cleaned = re.sub(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "", cleaned
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return hashlib.sha256(cleaned.encode()).hexdigest()[:16]
+
+
 def _format_verify_results(results: list) -> str:
     """Render verify-command results into a compact, prompt-friendly blob.
 
@@ -632,10 +655,19 @@ class MultiAgentNodes:
         if output.parse_error:
             self._apply_parse_error("tester", output, updates)
         elif output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
-            updates["last_error"] = output.raw_output[-500:]
+            new_error = output.raw_output[-500:]
+            updates["last_error"] = new_error
+            # Stuck-loop detection: if the new error is essentially the same
+            # as the previous one, increment the streak; else reset.
+            prev_error = state.get("last_error") or ""
+            if _error_fingerprint(new_error) == _error_fingerprint(prev_error):
+                updates["same_error_streak"] = state.get("same_error_streak", 0) + 1
+            else:
+                updates["same_error_streak"] = 1
         elif output.test_status == TestStatus.PASS:
             # Clear any stale failure so a recovered run ends clean.
             updates["last_error"] = None
+            updates["same_error_streak"] = 0
 
         self._apply_budget(state, output, updates)
         return updates

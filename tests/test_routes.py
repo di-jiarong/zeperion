@@ -203,6 +203,41 @@ class TestTesterRouting:
             == "planner"
         )
 
+    def test_stuck_loop_escalates_early(self):
+        """Same error 2+ times in a row skips remaining fixes and replans."""
+        assert (
+            route_after_tester(
+                _state(
+                    test_status=TestStatus.FAIL,
+                    fix_attempt=1,  # still has budget
+                    round=1,
+                    same_error_streak=2,
+                ),
+                max_fix_attempts=3,
+                max_rounds=10,
+                github_configured=False,
+                disable_pr_pipeline=False,
+            )
+            == "planner"
+        )
+
+    def test_stuck_loop_blocks_when_rounds_also_spent(self):
+        assert (
+            route_after_tester(
+                _state(
+                    test_status=TestStatus.FAIL,
+                    fix_attempt=1,
+                    round=10,
+                    same_error_streak=2,
+                ),
+                max_fix_attempts=3,
+                max_rounds=10,
+                github_configured=False,
+                disable_pr_pipeline=False,
+            )
+            == "blocked"
+        )
+
     def test_continue_at_max_rounds_ends(self):
         assert (
             route_after_tester(

@@ -139,6 +139,11 @@ class WorkflowState(TypedDict):
     # ``state.get("total_tokens", 0)`` so older checkpoints lacking the
     # key resume cleanly.
     total_tokens: int
+    # Stuck-loop detection: tracks how many consecutive fix attempts
+    # produced the same error (hash). When the streak reaches 2, the
+    # tester route skips the remaining fix budget and escalates to the
+    # Planner for a fresh approach — saving tokens on a hopeless loop.
+    same_error_streak: int
     updated_at: str  # ISO 8601 timestamp
 
 
@@ -645,6 +650,7 @@ def create_initial_state(config: WorkflowConfig) -> WorkflowState:
         reviewer_session_id=None,
         tester_session_id=None,
         total_tokens=0,
+        same_error_streak=0,
         updated_at=iso_now(),
     )
 
