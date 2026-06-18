@@ -103,14 +103,14 @@ class TestWorkflowConfig:
         assert config.developer_model == "claude-sonnet-4-6"
         assert config.reviewer_model == "claude-sonnet-4-6"
         assert config.tester_model == "claude-opus-4-7"
-        assert config.planner_agent_type == "anthropic"
-        assert config.developer_agent_type == "pi"
-        assert config.reviewer_agent_type == "pi"
-        assert config.tester_agent_type == "pi"
+        assert config.planner_agent_type == "claude_code"
+        assert config.developer_agent_type == "claude_code"
+        assert config.reviewer_agent_type == "claude_code"
+        assert config.tester_agent_type == "claude_code"
         assert config.max_rounds == 10
         assert config.max_fix_attempts == 3
         assert config.max_total_tokens == 0
-        assert config.enable_reviewer is True
+        assert config.enable_reviewer is False
         assert config.project_dir == "."
         assert config.state_dir == ".zeperion/state"
         assert config.claude_cli_tool == "claude"

@@ -336,6 +336,7 @@ def _build_config(state_dir: Path) -> WorkflowConfig:
         project_dir=str(EXAMPLE_DIR),
         max_rounds=3,
         max_fix_attempts=2,
+        enable_reviewer=True,
         github_repo=None,
         github_token=None,
     )

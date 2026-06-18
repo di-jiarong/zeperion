@@ -246,37 +246,15 @@ def get_default_config() -> dict[str, Any]:
     # and make a fresh ``zeperion init`` project fail on ``run`` (the
     # requirement file would not be found and agents would edit
     # ``.zeperion/`` instead of the project).
+    # Only emit the essential fields — everything else uses Pydantic
+    # defaults and doesn't need to clutter the user-facing config.yaml.
     return {
         "requirement_file": "../requirement.txt",
-        "planner_model": defaults["planner_model"].default,
-        "developer_model": defaults["developer_model"].default,
-        "reviewer_model": defaults["reviewer_model"].default,
-        "tester_model": defaults["tester_model"].default,
-        "planner_agent_type": defaults["planner_agent_type"].default,
-        "developer_agent_type": defaults["developer_agent_type"].default,
-        "reviewer_agent_type": defaults["reviewer_agent_type"].default,
-        "tester_agent_type": defaults["tester_agent_type"].default,
-        "max_rounds": defaults["max_rounds"].default,
-        "max_fix_attempts": defaults["max_fix_attempts"].default,
-        "max_total_tokens": defaults["max_total_tokens"].default,
-        "count_estimated_tokens": defaults["count_estimated_tokens"].default,
-        "enable_reviewer": defaults["enable_reviewer"].default,
-        "progress_max_lines": defaults["progress_max_lines"].default,
-        "progress_show_thinking": defaults["progress_show_thinking"].default,
         "project_dir": "..",
         "state_dir": "state",
-        "use_run_workspace": defaults["use_run_workspace"].default,
-        "claude_cli_tool": defaults["claude_cli_tool"].default,
-        "claude_cli_timeout": defaults["claude_cli_timeout"].default,
-        "claude_cli_use_worktree": defaults["claude_cli_use_worktree"].default,
-        "claude_cli_worktree_parent": defaults["claude_cli_worktree_parent"].default,
-        "claude_cli_keep_worktree": defaults["claude_cli_keep_worktree"].default,
-        "pi_cli_tool": defaults["pi_cli_tool"].default,
-        "pi_cli_timeout": defaults["pi_cli_timeout"].default,
-        "pi_cli_extra_args": list(defaults["pi_cli_extra_args"].default_factory()),
-        "pi_rpc_no_session": defaults["pi_rpc_no_session"].default,
-        "pi_rpc_progress_interval_seconds": defaults["pi_rpc_progress_interval_seconds"].default,
-        "pi_rpc_auto_respond_ui_requests": defaults["pi_rpc_auto_respond_ui_requests"].default,
+        "planner_agent_type": defaults["planner_agent_type"].default,
+        "developer_agent_type": defaults["developer_agent_type"].default,
+        "tester_agent_type": defaults["tester_agent_type"].default,
+        "enable_reviewer": defaults["enable_reviewer"].default,
         "tester_verify_commands": list(defaults["tester_verify_commands"].default_factory()),
-        "tester_verify_timeout_seconds": defaults["tester_verify_timeout_seconds"].default,
     }

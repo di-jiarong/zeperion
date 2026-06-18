@@ -160,6 +160,7 @@ class TestCreateAgentFactory:
         return WorkflowConfig(
             requirement_file=str(tmp_path / "req.txt"),
             state_dir=str(tmp_path / "state"),
+        enable_reviewer=True,
             project_dir=str(tmp_path),
         )
 

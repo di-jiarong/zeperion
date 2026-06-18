@@ -235,16 +235,16 @@ class WorkflowConfig(BaseModel):
     tester_fallback_models: list[str] = Field(default_factory=list)
 
     planner_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
-        default="anthropic"
+        default="claude_code"
     )
     developer_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
-        default="pi"
+        default="claude_code"
     )
     reviewer_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
-        default="pi"
+        default="claude_code"
     )
     tester_agent_type: Literal["anthropic", "claude_code", "pi"] = Field(
-        default="pi"
+        default="claude_code"
     )
 
     # Operators occasionally configure ``developer_agent_type=anthropic``
@@ -309,10 +309,11 @@ class WorkflowConfig(BaseModel):
         ),
     )
     enable_reviewer: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Run a Reviewer agent after Developer and before Tester. "
-            "Review failures are sent back to Developer as fix attempts."
+            "Review failures are sent back to Developer as fix attempts. "
+            "Off by default — tests are the primary feedback loop."
         ),
     )
 

@@ -135,13 +135,12 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert (tmp_path / "requirement.txt").exists()
 
         config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
-        assert "planner_agent_type: anthropic" in config_text
-        assert "developer_agent_type: pi" in config_text
-        assert "reviewer_agent_type: pi" in config_text
-        assert "tester_agent_type: pi" in config_text
+        assert "planner_agent_type: claude_code" in config_text
+        assert "developer_agent_type: claude_code" in config_text
+        assert "tester_agent_type: claude_code" in config_text
         assert "tester_verify_commands: []" in config_text
         plain = strip_ansi(result.output)
-        assert "Developer/Reviewer/Tester=pi" in plain
+        assert "claude_code" in plain
         assert "none detected" in plain
 
     def test_init_detects_pytest_verify_command(self, tmp_path: Path) -> None:
@@ -164,11 +163,10 @@ class TestInitCommandSucceedsOnEmptyDir:
         assert result.exit_code == 0, f"init crashed:\n{result.output}"
 
         config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
-        assert "planner_agent_type: anthropic" in config_text
+        assert "planner_agent_type: claude_code" in config_text
         assert "developer_agent_type: claude_code" in config_text
-        assert "reviewer_agent_type: claude_code" in config_text
         assert "tester_agent_type: claude_code" in config_text
-        assert "Developer/Reviewer/Tester=claude_code" in strip_ansi(result.output)
+        assert "Backend:" in strip_ansi(result.output)
 
     def test_init_backend_anthropic(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -178,9 +176,8 @@ class TestInitCommandSucceedsOnEmptyDir:
         config_text = (tmp_path / ".zeperion" / "config.yaml").read_text(encoding="utf-8")
         assert "planner_agent_type: anthropic" in config_text
         assert "developer_agent_type: anthropic" in config_text
-        assert "reviewer_agent_type: anthropic" in config_text
         assert "tester_agent_type: anthropic" in config_text
-        assert "Developer/Reviewer/Tester=anthropic" in strip_ansi(result.output)
+        assert "Backend:" in strip_ansi(result.output)
 
     def test_init_rejects_unknown_backend(self, tmp_path: Path) -> None:
         runner = CliRunner()

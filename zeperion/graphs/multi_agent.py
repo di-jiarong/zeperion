@@ -49,6 +49,7 @@ def create_multi_agent_graph(
     checkpoint_path: str | None = None,  # accepted for backward compatibility
     disable_pr_pipeline: bool = False,
     progress_callback: ProgressCallback | None = None,
+    requirement: str | None = None,
 ) -> StateGraph:
     """Create multi-agent workflow graph.
 
@@ -133,8 +134,9 @@ def create_multi_agent_graph(
     # Initialize storage, isolated per workflow thread.
     storage = StateStorage(Path(config.state_dir), thread_id=thread_id)
 
-    # Load requirement
-    requirement = Path(config.requirement_file).read_text()
+    # Load requirement: prefer explicitly passed text, fall back to file.
+    if requirement is None:
+        requirement = Path(config.requirement_file).read_text()
 
     nodes = MultiAgentNodes(
         config=config,

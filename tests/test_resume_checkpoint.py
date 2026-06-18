@@ -117,6 +117,7 @@ def resume_config(tmp_path):
         project_dir=str(tmp_path),
         github_repo=None,
         github_token=None,
+        enable_reviewer=True,
     )
 
 

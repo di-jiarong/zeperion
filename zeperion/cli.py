@@ -81,6 +81,7 @@ def _spawn_detached_run(
     in_place: bool = False,
     force_reset: bool = False,
     verify: bool = True,
+    requirement: str | None = None,
 ) -> None:
     """Re-invoke ``zeperion run`` in a detached child process.
 
@@ -147,13 +148,18 @@ def _spawn_detached_run(
         "-m",
         "zeperion.cli",
         "run",
+    ]
+    # Positional requirement arg comes right after the subcommand.
+    if requirement:
+        argv.append(requirement)
+    argv.extend([
         "--mode",
         mode,
         "--config",
         config_file,
         "--thread-id",
         resolved_thread,
-    ]
+    ])
     if resume:
         argv.append("--resume")
     if log_format:
@@ -420,12 +426,11 @@ def init(
     project_dir: str = typer.Argument(".", help="Project directory to initialize"),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
     backend: str = typer.Option(
-        "pi",
+        "claude_code",
         "--backend",
         "-b",
         help=(
-            "Backend for code-writing roles: pi | claude_code | anthropic. "
-            "Planner remains anthropic by default."
+            "Backend for all roles: claude_code (default) | pi | anthropic."
         ),
     ),
 ):
@@ -463,20 +468,25 @@ def init(
         console.print(f"[yellow]⚠ Config file already exists:[/yellow] {config_file}")
         console.print("  Use --force to overwrite")
     else:
-        from zeperion.config import get_default_config, save_config_to_yaml
+        import yaml as _yaml
 
-        default_config = get_default_config()
-        default_config["developer_agent_type"] = backend
-        default_config["reviewer_agent_type"] = backend
-        default_config["tester_agent_type"] = backend
+        from zeperion.config import get_default_config
         from zeperion.utils.verify import detect_verify_commands
 
+        default_config = get_default_config()
+        default_config["planner_agent_type"] = backend
+        default_config["developer_agent_type"] = backend
+        default_config["tester_agent_type"] = backend
         detected_verify_commands = detect_verify_commands(project_path)
         default_config["tester_verify_commands"] = detected_verify_commands
-        config = WorkflowConfig(**default_config)
-        save_config_to_yaml(config, config_file)
+        # Validate through Pydantic (catches bad field values) then write
+        # only the essential fields to keep config.yaml minimal.
+        WorkflowConfig(**default_config)
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            _yaml.dump(default_config, f, default_flow_style=False, allow_unicode=True)
         console.print(f"✓ Created config: {config_file.relative_to(project_path)}")
-        console.print("  Backend: Planner=anthropic, " f"Developer/Reviewer/Tester={backend}")
+        console.print(f"  Backend: {backend} (all roles)")
         if detected_verify_commands:
             joined = "; ".join(detected_verify_commands)
             console.print(f"  Tester will run: [cyan]{joined}[/cyan]")
@@ -1781,6 +1791,14 @@ async def _finalize_run_workspace_manifest(
 
 @app.command()
 def run(
+    requirement: str = typer.Argument(
+        None,
+        help=(
+            "Inline requirement text. When provided, used directly instead "
+            "of reading requirement_file from config. Omit to fall back to "
+            "the file (backward-compatible)."
+        ),
+    ),
     mode: str = typer.Option(
         "multi_agent",
         "--mode",
@@ -1924,6 +1942,7 @@ def run(
             in_place=in_place,
             force_reset=force_reset,
             verify=verify,
+            requirement=requirement,
         )
         return
     if log_format:
@@ -2109,6 +2128,7 @@ def run(
                 thread_id=thread_id,
                 disable_pr_pipeline=disable_pr,
                 progress_callback=progress_cb,
+                requirement=requirement,
             )
 
     elif mode == "pr_pipeline":

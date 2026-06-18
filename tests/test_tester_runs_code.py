@@ -90,6 +90,7 @@ def _make_config(project: Path, **overrides) -> WorkflowConfig:
         max_fix_attempts=0,
         github_repo=None,
         github_token=None,
+        enable_reviewer=True,
     )
     base.update(overrides)
     return WorkflowConfig(**base)

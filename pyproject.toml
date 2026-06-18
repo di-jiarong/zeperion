@@ -81,7 +81,7 @@ dev = [
 ]
 
 [project.scripts]
-zeperion = "zeperion.cli:app"
+zeperion = "zeperion.__main__:main"
 
 [project.urls]
 # TODO: replace with the canonical repo URL once the project has one.
