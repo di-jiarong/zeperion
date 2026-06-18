@@ -7,10 +7,11 @@ from zeperion.utils.time import iso_now
 
 
 def increment_round(state: WorkflowState) -> WorkflowState:
-    """Increment round counter and reset fix attempt."""
+    """Increment round counter and reset fix attempt + stuck-loop streak."""
     return {
         "round": state["round"] + 1,
         "fix_attempt": 0,
+        "same_error_streak": 0,
         "phase": PhaseType.PLANNING,
         "updated_at": iso_now(),
     }
