@@ -123,6 +123,7 @@ class ClaudeCodeAgent(BaseAgent):
         keep_worktree: bool = True,
         progress_interval_seconds: int = 30,
         show_thinking: bool = False,
+        use_stream_json: bool = False,
     ):
         """Initialise the Claude Code agent.
 
@@ -167,6 +168,7 @@ class ClaudeCodeAgent(BaseAgent):
         self.last_worktree_dir: Path | None = None
         self.progress_interval_seconds = progress_interval_seconds
         self.show_thinking = show_thinking
+        self.use_stream_json = use_stream_json
 
     def build_command(
         self,
@@ -200,6 +202,10 @@ class ClaudeCodeAgent(BaseAgent):
             ])
         elif json_output:
             cmd.extend(["--output-format", "json"])
+            # Do NOT add --verbose in json mode: it changes the output from
+            # a single {"type":"result",...} object to a massive JSON array
+            # of all events, which can exceed pipe buffers and get truncated.
+            verbose = False
         if verbose:
             cmd.append("--verbose")
         cmd.extend(["--model", self.model, "--add-dir", str(active_project_dir)])
@@ -251,21 +257,26 @@ class ClaudeCodeAgent(BaseAgent):
         logger.info("Invoking %s with model %s", self.role.value, self.model)
 
         # --- Primary: stream-json (structured progress) ---
-        try:
-            return await self._invoke_via_stream_json(
-                _with_session, execution_dir, prompt, prompt_bytes,
-                progress_callback,
-            )
-        except _StreamJsonNotSupported:
-            logger.info(
-                "%s: stream-json not supported; falling back to json",
-                self.role.value,
-            )
-        finally:
-            if self.use_worktree and not self.keep_worktree:
-                await self._remove_worktree(execution_dir)
+        # Disabled by default: json mode is more reliable across CLI versions
+        # and third-party model proxies. stream-json can hang indefinitely
+        # when the CLI process exits mid-stream. Enable via use_stream_json=True
+        # if you need real-time tool-call progress in the terminal.
+        if self.use_stream_json:
+            try:
+                return await self._invoke_via_stream_json(
+                    _with_session, execution_dir, prompt, prompt_bytes,
+                    progress_callback,
+                )
+            except _StreamJsonNotSupported:
+                logger.info(
+                    "%s: stream-json not supported; falling back to json",
+                    self.role.value,
+                )
+            finally:
+                if self.use_worktree and not self.keep_worktree:
+                    await self._remove_worktree(execution_dir)
 
-        # --- Fallback: --output-format json ---
+        # --- Default / Fallback: --output-format json ---
         return await self._invoke_via_json_envelope(
             _with_session, execution_dir, prompt, prompt_bytes,
             progress_callback,
