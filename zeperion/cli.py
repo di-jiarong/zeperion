@@ -40,7 +40,10 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="zeperion",
-    help="Multi-agent development and PR delivery pipeline framework",
+    help=(
+        "One-command auto-developer: write code, run tests, fix bugs until green.\n\n"
+        "Quick start: zeperion \"your requirement here\""
+    ),
 )
 console = Console()
 
