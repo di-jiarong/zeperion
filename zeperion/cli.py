@@ -1988,12 +1988,38 @@ def run(
         return
     if log_format:
         configure_logging(level=logging.INFO, log_format=log_format)
-    # Load config
+    # Load config — auto-init if missing and we have an inline requirement
     config_path = Path(config_file)
     if not config_path.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
-        console.print("Run 'zeperion init' first")
-        raise typer.Exit(1)
+        if requirement:
+            # Zero-config mode: auto-initialize so the user never has to
+            # run `zeperion init` separately for a one-off task.
+            console.print(
+                "[dim]No config found — auto-initializing project...[/dim]"
+            )
+            from zeperion.utils.verify import detect_verify_commands
+
+            project_dir = Path(".").resolve()
+            config_dir = project_dir / ".zeperion"
+            state_dir = config_dir / "state"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            state_dir.mkdir(parents=True, exist_ok=True)
+
+            import yaml as _yaml
+            from zeperion.config import get_default_config
+
+            auto_config = get_default_config()
+            auto_config["tester_verify_commands"] = detect_verify_commands(
+                project_dir
+            )
+            config_path = config_dir / "config.yaml"
+            with open(config_path, "w", encoding="utf-8") as f:
+                _yaml.dump(auto_config, f, default_flow_style=False)
+            console.print(f"[dim]Created {config_path}[/dim]")
+        else:
+            console.print(f"[red]Error:[/red] Config file not found: {config_path}")
+            console.print("Run [cyan]zeperion init[/cyan] or pass a requirement: [cyan]zeperion \"需求\"[/cyan]")
+            raise typer.Exit(1)
 
     console.print(f"[bold]Loading config:[/bold] {config_path}")
 
