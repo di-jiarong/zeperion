@@ -68,6 +68,46 @@ def _error_fingerprint(error_text: str) -> str:
     return hashlib.sha256(cleaned.encode()).hexdigest()[:16]
 
 
+def _extract_key_error(verify_results: list) -> str | None:
+    """Extract the most useful error snippet from failed verify results.
+
+    Looks for assertion errors, tracebacks, and FAILED summaries in the
+    output of failing commands — the kind of line a developer needs to
+    see to understand *what* went wrong. Returns None if no verify
+    results or all passed.
+    """
+    if not verify_results:
+        return None
+    failed = [r for r in verify_results if not r.passed]
+    if not failed:
+        return None
+
+    import re
+
+    key_patterns = re.compile(
+        r"(assert|Error|FAILED|FAIL|error\[|panic|exception)",
+        re.IGNORECASE,
+    )
+    snippets: list[str] = []
+    for r in failed:
+        combined = (r.stdout or "") + "\n" + (r.stderr or "")
+        lines = combined.strip().split("\n")
+        # Grab lines matching key patterns + surrounding context
+        relevant: list[str] = []
+        for i, line in enumerate(lines):
+            if key_patterns.search(line):
+                # Take this line + up to 2 lines after
+                relevant.extend(lines[i : i + 3])
+        if relevant:
+            snippets.append(f"$ {r.command}\n" + "\n".join(relevant[:10]))
+        else:
+            # Fallback: last 5 lines
+            snippets.append(f"$ {r.command}\n" + "\n".join(lines[-5:]))
+
+    result = "\n\n".join(snippets)
+    return result[:500] if result else None
+
+
 def _format_verify_results(results: list) -> str:
     """Render verify-command results into a compact, prompt-friendly blob.
 
@@ -659,7 +699,8 @@ class MultiAgentNodes:
         if output.parse_error:
             self._apply_parse_error("tester", output, updates)
         elif output.test_status in (TestStatus.FAIL, TestStatus.ERROR):
-            new_error = output.raw_output[-500:]
+            # Prefer real verify errors over tester's raw output (more precise)
+            new_error = _extract_key_error(verify_results) or output.raw_output[-500:]
             updates["last_error"] = new_error
             # Stuck-loop detection: if the new error is essentially the same
             # as the previous one, increment the streak; else reset.
