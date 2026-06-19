@@ -532,10 +532,14 @@ def init(
         console.print(f"✓ Updated .gitignore (added {len(added)} entry/entries)")
 
     console.print("\n[bold green]✓ Initialization complete![/bold green]")
-    console.print("\nNext steps:")
-    console.print("1. Edit requirement.txt with your project requirements")
-    console.print("2. Run: zeperion run")
-    console.print("3. Check status: zeperion status")
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("  [cyan]zeperion \"你的需求描述\"[/cyan]   ← 直接开始")
+    console.print("")
+    console.print("  [dim]或者先编辑 requirement.txt 再运行:[/dim]")
+    console.print("  [dim]zeperion run[/dim]")
+    console.print("")
+    console.print("  [dim]观测进度:[/dim]")
+    console.print("  [dim]zeperion logs -f -v[/dim]")
 
 
 @app.command()
