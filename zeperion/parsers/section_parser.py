@@ -385,6 +385,10 @@ def _strip_decorations(value: str) -> str:
                 break
         if cleaned == previous:
             break
+    # Strip orphaned trailing markdown chars that remain after balanced
+    # wrappers have been peeled (e.g. "FAIL**" → "FAIL", but "**bold**"
+    # was already handled by the decoration loop above).
+    cleaned = cleaned.rstrip("*#~")
     return cleaned
 
 
