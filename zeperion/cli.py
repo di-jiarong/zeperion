@@ -2291,6 +2291,15 @@ def run(
         console.print("Supported modes: multi_agent, pr_pipeline")
         raise typer.Exit(1)
 
+    # Quick cost estimation based on config limits.
+    # Rough formula: ~15k tokens per agent call × roles × rounds.
+    _est_calls = run_config.max_rounds * (3 if not run_config.enable_reviewer else 4)
+    _est_tokens = _est_calls * 15_000
+    console.print(
+        f"[dim]Estimated budget: up to ~{_est_tokens:,} tokens "
+        f"({run_config.max_rounds} rounds × "
+        f"{'4' if run_config.enable_reviewer else '3'} agents/round)[/dim]"
+    )
     console.print("\n[bold green]Starting workflow execution...[/bold green]\n")
 
     # Mutable box so run_workflow() can write and the outer scope can read.
@@ -2442,6 +2451,85 @@ def resume(
         max_rounds=None,
         max_fix=None,
     )
+
+
+@app.command()
+def watch(
+    requirement: str = typer.Argument(
+        ..., help="Requirement to implement."
+    ),
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml", "--config", "-c", help="Path to config file"
+    ),
+    thread_id: str | None = typer.Option(
+        None, "--thread-id", "-t", help="Thread ID for this run"
+    ),
+    model: str | None = typer.Option(
+        None, "--model", "-M", help="Override model for all roles"
+    ),
+):
+    """Start a background run and immediately attach to its live output.
+
+    Equivalent to ``zeperion run --detach "requirement"`` followed by
+    ``zeperion logs --follow --verbose``. One command to kick off work
+    and watch it happen.
+    """
+    import time as _time
+
+    from zeperion.config import load_config_from_yaml
+
+    config_path = Path(config_file)
+
+    # Auto-init if needed (same as run)
+    if not config_path.exists():
+        console.print("[dim]No config found — auto-initializing...[/dim]")
+        from zeperion.utils.verify import detect_verify_commands
+
+        import yaml as _yaml
+
+        from zeperion.config import get_default_config
+
+        project_dir = Path(".").resolve()
+        config_dir = project_dir / ".zeperion"
+        state_dir = config_dir / "state"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        auto_config = get_default_config()
+        auto_config["tester_verify_commands"] = detect_verify_commands(project_dir)
+        config_path = config_dir / "config.yaml"
+        with open(config_path, "w", encoding="utf-8") as f:
+            _yaml.dump(auto_config, f, default_flow_style=False)
+
+    config = load_config_from_yaml(config_path)
+    thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
+
+    # Build the detach argv
+    argv_extra = []
+    if model:
+        argv_extra.extend(["--model", model])
+
+    # Spawn detached
+    _spawn_detached_run(
+        config_file=str(config_path),
+        mode="multi_agent",
+        resume=False,
+        thread_id=thread_id,
+        log_format=None,
+        no_pr_pipeline=True,
+        yes=True,
+        requirement=requirement,
+    )
+
+    # Give the child a moment to create run.log
+    _time.sleep(2)
+
+    # Tail the log
+    log_path = logfile_path(Path(config.state_dir), thread_id)
+    console.print(
+        f"\n[bold]Watching run:[/bold] thread=[cyan]{thread_id}[/cyan]"
+    )
+    console.print(f"[dim]Stop: Ctrl-C (run continues in background)[/dim]\n")
+    _tail_run_log(log_path, follow=True, tail_lines=20, poll_interval=0.5)
 
 
 @app.command()
