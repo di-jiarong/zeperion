@@ -60,3 +60,5 @@ LESSONS:
 {% endif %}
 
 请基于以上信息，输出本轮计划。
+
+⚠️ 你必须严格按照上面"输出格式"的字段输出（TASK_ID / GLOBAL_STATUS / PLAN / RISKS / HANDOFF_TO_DEVELOPER / LESSONS），不要输出其他格式。这是硬性要求，解析器只认这些字段名。

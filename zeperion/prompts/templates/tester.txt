@@ -69,3 +69,5 @@ LESSONS:
 {% endif %}
 
 请开始测试验收。
+
+⚠️ 你必须严格按照上面"输出格式"输出（TEST_STATUS / GLOBAL_STATUS / TEST_CASES / BUGS / FIX_REQUEST / LESSONS），不要输出其他格式。解析器只认这些字段名。
