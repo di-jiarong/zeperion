@@ -55,4 +55,8 @@ LESSONS:
 {% endfor %}
 {% endif %}
 
+{% if round_num > 1 and test_report != "无" and "PASS" in test_report %}
+💡 提示：上轮测试已通过。如果需求已全部满足，请输出 GLOBAL_STATUS: DONE 结束工作流，不要为了"做得更好"而追加新任务。
+{% endif %}
+
 请基于以上信息，输出本轮计划。
