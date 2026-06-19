@@ -1976,6 +1976,13 @@ def run(
     - ``multi_agent``: Planner -> Developer -> Tester loop.
     - ``pr_pipeline``: commit -> push -> PR -> Codex review -> auto-merge.
     """
+    # Support piped input: `echo "需求" | zeperion run -`
+    if requirement == "-":
+        if sys.stdin.isatty():
+            console.print("[red]Error:[/red] '-' specified but stdin is a TTY (no piped input)")
+            raise typer.Exit(1)
+        requirement = sys.stdin.read().strip() or None
+
     if detach:
         # ``detach`` is purely a CLI affordance — we just re-spawn the
         # same command without --detach in a new session. Everything
@@ -2315,6 +2322,8 @@ def run(
         final_global = None
         final_test = None
         final_last_error = None
+        final_round = 0
+        final_fix_attempt = 0
         try:
             async with open_zeperion_checkpointer(str(checkpoint_path)) as saver:
                 graph = build_graph(saver)
@@ -2346,6 +2355,10 @@ def run(
                                 final_last_error = node_state["last_error"]
                             if node_state.get("total_tokens") is not None:
                                 final_tokens_box[0] = node_state["total_tokens"]
+                            if node_state.get("round") is not None:
+                                final_round = node_state["round"]
+                            if node_state.get("fix_attempt") is not None:
+                                final_fix_attempt = node_state["fix_attempt"]
 
             phase_str = _enum_str(final_phase) if final_phase is not None else None
             global_str = _enum_str(final_global) if final_global is not None else None
@@ -2360,6 +2373,9 @@ def run(
                         "global_status": global_str,
                         "test_status": test_str,
                         "last_error": final_last_error,
+                        "total_rounds": final_round,
+                        "total_fix_attempts": final_fix_attempt,
+                        "total_tokens": final_tokens_box[0],
                     },
                 )
             except Exception as exc:  # pragma: no cover - best-effort marker
