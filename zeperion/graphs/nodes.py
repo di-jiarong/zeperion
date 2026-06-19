@@ -542,7 +542,14 @@ class MultiAgentNodes:
         verify_output = None
         prev_dev_output = None
         if state["fix_attempt"] > 0:
-            verify_output = self.storage.load_agent_output("tester_verify")
+            raw_verify = self.storage.load_agent_output("tester_verify")
+            # Cap verify output to avoid blowing the prompt context window.
+            # 3000 chars is enough for the relevant failure details while
+            # leaving room for the rest of the prompt.
+            if raw_verify and len(raw_verify) > 3000:
+                verify_output = raw_verify[:3000] + "\n... (truncated)"
+            else:
+                verify_output = raw_verify
             prev_dev_output = self.storage.load_agent_output("developer")
 
         prompt = self.template_manager.render_developer(

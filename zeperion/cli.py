@@ -3126,9 +3126,9 @@ def list_runs(
     table.add_column("Thread ID", style="cyan", no_wrap=True)
     table.add_column("Phase", style="yellow", no_wrap=wide)
     table.add_column("Round", justify="right", no_wrap=True)
-    table.add_column("Test Status", style="magenta", no_wrap=wide)
-    table.add_column("Global Status", style="green", no_wrap=wide)
-    table.add_column("PR Phase", style="blue", no_wrap=wide)
+    table.add_column("Test", style="magenta", no_wrap=wide)
+    table.add_column("Status", style="green", no_wrap=wide)
+    table.add_column("Tokens", justify="right", style="dim", no_wrap=True)
     table.add_column("Updated", style="dim", no_wrap=True)
 
     # In ``--wide`` mode we render through a dedicated console that
@@ -3150,13 +3150,15 @@ def list_runs(
             except ValueError:
                 pass
 
+        tokens = state.get("total_tokens", 0)
+        tok_str = f"{tokens:,}" if tokens else "-"
         table.add_row(
             thread_id,
             _short(state.get("phase"), "unknown"),
             str(state.get("round", "-")),
             _short(state.get("test_status")),
             _short(state.get("global_status")),
-            _short(state.get("pr_phase")),
+            tok_str,
             updated_at or "-",
         )
 

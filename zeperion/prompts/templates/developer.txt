@@ -63,6 +63,10 @@ LESSONS:
 - 如果上次修复无效，换一种思路而非重复同样的改法
 {% else %}
 这是首次实现，请严格按计划执行。
+{% if uses_claude_code %}
+实现完成后，在输出 CHANGES 之前先运行项目的测试命令确认通过（如 pytest、npm test 等）。
+如果测试失败，直接修复后再输出结果，不要把已知失败留给 Tester。
+{% endif %}
 {% endif %}
 
 {% if lessons %}
