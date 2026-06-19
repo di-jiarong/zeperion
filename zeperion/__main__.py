@@ -13,7 +13,7 @@ def _maybe_inject_run() -> None:
     # Known subcommands (keep in sync with @app.command registrations).
     _COMMANDS = {
         "init", "doctor", "verify", "changes", "discard", "accept",
-        "run", "ship", "status", "list", "logs", "stop", "serve",
+        "run", "resume", "ship", "status", "list", "logs", "stop", "serve",
         "update", "version",
     }
     # Find the first positional arg (skip leading --flags).

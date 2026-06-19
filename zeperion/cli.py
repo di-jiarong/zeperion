@@ -2271,6 +2271,9 @@ def run(
 
     console.print("\n[bold green]Starting workflow execution...[/bold green]\n")
 
+    # Mutable box so run_workflow() can write and the outer scope can read.
+    final_tokens_box = [0]
+
     async def run_workflow():
         # Track the final phase/status as the stream advances so we can
         # emit a single terminal ``workflow_finished`` event. Without it
@@ -2310,6 +2313,8 @@ def run(
                                 final_test = node_state["test_status"]
                             if node_state.get("last_error") is not None:
                                 final_last_error = node_state["last_error"]
+                            if node_state.get("total_tokens") is not None:
+                                final_tokens_box[0] = node_state["total_tokens"]
 
             phase_str = _enum_str(final_phase) if final_phase is not None else None
             global_str = _enum_str(final_global) if final_global is not None else None
@@ -2367,7 +2372,52 @@ def run(
             console.print(f"\n[red]\u2717 Workflow failed:[/red] {e}")
             raise typer.Exit(1)
 
+    import time as _time
+
+    _start = _time.monotonic()
     asyncio.run(run_workflow())
+    _elapsed = _time.monotonic() - _start
+    _mins, _secs = divmod(int(_elapsed), 60)
+    _time_str = f"{_mins}m{_secs:02d}s" if _mins else f"{_secs}s"
+    # The run_workflow closure captures final_tokens via nonlocal-like
+    # scoping (it's a mutable int in the enclosing function).
+    # We access it here since asyncio.run() has returned.
+    # Note: final_tokens is set inside run_workflow's stream loop.
+    _tok_str = f", ~{final_tokens_box[0]:,} tokens" if final_tokens_box[0] else ""
+    console.print(f"\n[dim]Total time: {_time_str}{_tok_str}[/dim]")
+
+
+@app.command()
+def resume(
+    config_file: str = typer.Option(
+        ".zeperion/config.yaml", "--config", "-c", help="Path to config file"
+    ),
+    thread_id: str | None = typer.Option(
+        None, "--thread-id", "-t", help="Thread ID to resume"
+    ),
+):
+    """Resume a blocked or interrupted workflow run.
+
+    Shorthand for ``zeperion run --resume``. Picks up from the last
+    checkpoint — useful after fixing a blocked issue manually.
+    """
+    run(
+        requirement=None,
+        mode="multi_agent",
+        config_file=config_file,
+        resume=True,
+        thread_id=thread_id,
+        log_format=None,
+        detach=False,
+        from_thread=None,
+        no_pr_pipeline=False,
+        yes=False,
+        allow_dirty=False,
+        in_place=False,
+        force_reset=False,
+        verify=True,
+        model=None,
+    )
 
 
 @app.command()
