@@ -430,12 +430,27 @@ class ClaudeCodeAgent(BaseAgent):
 
             stderr_task = asyncio.create_task(_read_stderr())
 
+            first_line = True
             while True:
+                # Use a short timeout for the first message: if stream-json
+                # mode isn't working (e.g. CLI version mismatch), we detect
+                # it quickly and fall back to json mode instead of waiting
+                # the full self.timeout (600s).
+                read_timeout = 30 if first_line else self.timeout
                 try:
                     line = await asyncio.wait_for(
-                        proc_stdout.readline(), timeout=self.timeout,
+                        proc_stdout.readline(), timeout=read_timeout,
                     )
+                    if first_line and line:
+                        first_line = False
                 except asyncio.TimeoutError:
+                    if first_line:
+                        # No response at all — stream-json likely unsupported
+                        process.kill()
+                        await process.wait()
+                        raise _StreamJsonNotSupported(
+                            "No stream-json response within 30s"
+                        )
                     process.kill()
                     await process.wait()
                     raise AgentInvocationError(
