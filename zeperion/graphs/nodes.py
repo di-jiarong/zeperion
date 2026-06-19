@@ -68,6 +68,30 @@ def _error_fingerprint(error_text: str) -> str:
     return hashlib.sha256(cleaned.encode()).hexdigest()[:16]
 
 
+def _git_changed_files(project_dir: Path) -> list[str] | None:
+    """Return a list of changed file paths relative to the project root.
+
+    Uses ``git diff --name-only HEAD`` to detect what the Developer changed.
+    Returns None on any error (not a git repo, git not installed, etc.)
+    so the caller falls back to running the full test suite.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [f for f in result.stdout.strip().split("\n") if f]
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 def _extract_key_error(verify_results: list) -> str | None:
     """Extract the most useful error snippet from failed verify results.
 
@@ -616,21 +640,41 @@ class MultiAgentNodes:
 
         verify_results = []
         if self.config.tester_verify_commands:
-            from zeperion.utils.verify import run_verify_commands
+            from zeperion.utils.verify import (
+                resolve_verify_commands,
+                run_verify_commands,
+            )
+
+            # On fix attempts, try to scope tests to changed files for faster
+            # feedback. On first implementation, always run the full suite.
+            commands = self.config.tester_verify_commands
+            scope = "full"
+            if state["fix_attempt"] > 0:
+                changed = _git_changed_files(Path(self.config.project_dir))
+                if changed:
+                    resolved = resolve_verify_commands(
+                        commands,
+                        changed_files=changed,
+                        project_dir=Path(self.config.project_dir),
+                    )
+                    commands = resolved.commands
+                    scope = resolved.scope
 
             logger.info(
-                "Tester: running %s verification command(s)",
-                len(self.config.tester_verify_commands),
+                "Tester: running %s verification command(s) [%s]",
+                len(commands),
+                scope,
                 extra={
                     "event": "tester_verify_started",
                     "thread_id": self.thread_id,
                     "round": state["round"],
                     "fix_attempt": state["fix_attempt"],
-                    "command_count": len(self.config.tester_verify_commands),
+                    "command_count": len(commands),
+                    "scope": scope,
                 },
             )
             verify_results = await run_verify_commands(
-                self.config.tester_verify_commands,
+                commands,
                 cwd=Path(self.config.project_dir),
                 timeout_seconds=self.config.tester_verify_timeout_seconds,
             )

@@ -1959,6 +1959,16 @@ def run(
             "for a quick one-off run with a different model."
         ),
     ),
+    max_rounds: int | None = typer.Option(
+        None,
+        "--max-rounds",
+        help="Override max_rounds (how many Planner cycles before stopping).",
+    ),
+    max_fix: int | None = typer.Option(
+        None,
+        "--max-fix",
+        help="Override max_fix_attempts per round.",
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -2076,15 +2086,24 @@ def run(
         # paths against the config dir) pointing at the real repo.
         run_config = config
 
-        # --model override: apply to all roles at once.
+        # Runtime overrides from CLI flags.
+        overrides: dict = {}
         if model:
-            run_config = run_config.model_copy(update={
+            overrides.update({
                 "planner_model": model,
                 "developer_model": model,
                 "reviewer_model": model,
                 "tester_model": model,
             })
             console.print(f"[dim]Model override: all roles → [cyan]{model}[/cyan][/dim]")
+        if max_rounds is not None:
+            overrides["max_rounds"] = max_rounds
+            console.print(f"[dim]Max rounds: {max_rounds}[/dim]")
+        if max_fix is not None:
+            overrides["max_fix_attempts"] = max_fix
+            console.print(f"[dim]Max fix attempts: {max_fix}[/dim]")
+        if overrides:
+            run_config = run_config.model_copy(update=overrides)
         if use_workspace:
             from dataclasses import replace as _dc_replace
 
@@ -2420,6 +2439,8 @@ def resume(
         force_reset=False,
         verify=True,
         model=None,
+        max_rounds=None,
+        max_fix=None,
     )
 
 
