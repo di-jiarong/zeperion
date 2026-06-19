@@ -46,6 +46,11 @@ LESSONS:
     --- stderr ---
 {{ r.stderr if r.stderr else '(empty)' }}
 {% endfor %}
+
+{% if all_verify_passed %}
+✅ 所有验证命令均已通过（exit_code=0）。
+如果计划中的验收标准也已满足，请直接输出 TEST_STATUS: PASS 和 GLOBAL_STATUS: DONE。
+{% endif %}
 {% else %}
 （本轮没有配置 tester_verify_commands；Tester 只能基于上面的开发输出做文本推理。
 若想让 Tester 真的跑测试，请在 .zeperion/config.yaml 里设置：

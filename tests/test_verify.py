@@ -324,5 +324,22 @@ class TestDetectVerifyCommands:
         (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
         assert detect_verify_commands(tmp_path) == ["pnpm test"]
 
+    def test_detects_makefile_test_target(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo hi\n\ntest:\n\tpytest\n", encoding="utf-8")
+        assert "make test" in detect_verify_commands(tmp_path)
+
+    def test_detects_gradle_project(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle").write_text("apply plugin: 'java'\n", encoding="utf-8")
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+        assert detect_verify_commands(tmp_path) == ["./gradlew test"]
+
+    def test_detects_cargo_project(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
+        assert detect_verify_commands(tmp_path) == ["cargo test"]
+
+    def test_detects_mix_project(self, tmp_path: Path) -> None:
+        (tmp_path / "mix.exs").write_text("defmodule X do end\n", encoding="utf-8")
+        assert detect_verify_commands(tmp_path) == ["mix test"]
+
     def test_ambiguous_project_returns_empty(self, tmp_path: Path) -> None:
         assert detect_verify_commands(tmp_path) == []

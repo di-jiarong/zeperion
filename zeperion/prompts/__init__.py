@@ -209,13 +209,18 @@ class PromptTemplate:
         Returns:
             Rendered tester prompt
         """
+        results = verify_results or []
+        all_passed = bool(results) and all(
+            getattr(r, "passed", False) for r in results
+        )
         return self.render(
             "tester.txt",
             requirement=requirement,
             plan=plan,
             dev_output=dev_output,
             lessons=lessons or [],
-            verify_results=verify_results or [],
+            verify_results=results,
+            all_verify_passed=all_passed,
         )
 
 

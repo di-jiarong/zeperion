@@ -106,6 +106,27 @@ def detect_verify_commands(project_dir: Path) -> list[str]:
     if (project_dir / "Cargo.toml").exists():
         commands.append("cargo test")
 
+    # Makefile with a "test" target
+    makefile = project_dir / "Makefile"
+    if makefile.exists():
+        try:
+            content = makefile.read_text(encoding="utf-8", errors="replace")
+            if "\ntest:" in content or "\ntest " in content:
+                commands.append("make test")
+        except OSError:
+            pass
+
+    # Gradle (Java/Kotlin)
+    if (project_dir / "build.gradle").exists() or (project_dir / "build.gradle.kts").exists():
+        if (project_dir / "gradlew").exists():
+            commands.append("./gradlew test")
+        else:
+            commands.append("gradle test")
+
+    # Mix (Elixir)
+    if (project_dir / "mix.exs").exists():
+        commands.append("mix test")
+
     # Preserve order while avoiding duplicates in polyglot repos where
     # two detectors might suggest the same shell command.
     return list(dict.fromkeys(commands))

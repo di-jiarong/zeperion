@@ -1942,6 +1942,16 @@ def run(
             "manifest. Only applies in Run Workspace mode."
         ),
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        "-M",
+        help=(
+            "Override the model for ALL roles (planner, developer, tester). "
+            "Example: --model claude-sonnet-4-6. Saves editing config.yaml "
+            "for a quick one-off run with a different model."
+        ),
+    ),
 ):
     """Run ZEPERION workflow.
 
@@ -2032,6 +2042,16 @@ def run(
         # while keeping state_dir / requirement_file (resolved to absolute
         # paths against the config dir) pointing at the real repo.
         run_config = config
+
+        # --model override: apply to all roles at once.
+        if model:
+            run_config = run_config.model_copy(update={
+                "planner_model": model,
+                "developer_model": model,
+                "reviewer_model": model,
+                "tester_model": model,
+            })
+            console.print(f"[dim]Model override: all roles → [cyan]{model}[/cyan][/dim]")
         if use_workspace:
             from dataclasses import replace as _dc_replace
 
