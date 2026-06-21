@@ -1561,8 +1561,13 @@ def _print_node_progress(node_name: str, node_state) -> None:
     console.print(f"[cyan]\u2192 {node_name}[/cyan]{suffix}")
 
 
-def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES):
+def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES, activity_log: Path | None = None):
     """Return an async callback suitable for :class:`ProgressCallback`.
+
+    When ``activity_log`` is provided, every progress line is also appended
+    to that file with a timestamp. This creates the detailed activity trail
+    visible via ``zeperion logs -f -v`` — showing tool calls, file reads/
+    writes, thinking traces, etc. even for detached/background runs.
 
     The callback buffers partial text from the agent and prints complete
     lines to the console with a ``  \u2502 `` visual prefix.  After
@@ -1598,6 +1603,19 @@ def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES):
         buf = state["buf"]
         if not text:
             return
+
+        # Always persist to activity log (even when terminal display is folded)
+        if activity_log is not None and text.strip():
+            try:
+                from zeperion.utils.time import iso_now
+
+                with open(activity_log, "a", encoding="utf-8") as f:
+                    # Write each non-empty line with timestamp
+                    for aline in text.split("\n"):
+                        if aline.strip():
+                            f.write(f"{iso_now()} {aline.rstrip()}\n")
+            except OSError:
+                pass
 
         if state["folded"]:
             # Already past the display cap; just log a heartbeat every
@@ -2223,8 +2241,13 @@ def run(
         # appearing only after the invocation completes). The per-agent
         # line budget is reset by each node (see nodes.py) so every
         # Planner/Developer/Reviewer/Tester step gets a fresh budget.
+        # Activity log: detailed tool-call trace persisted to disk for
+        # `zeperion logs -f -v` (even in non-detach foreground mode).
+        _activity_path = Path(config.state_dir) / "runs" / thread_id / "activity.log"
+        _activity_path.parent.mkdir(parents=True, exist_ok=True)
         progress_cb = _make_progress_callback(
-            max_lines=run_config.progress_max_lines
+            max_lines=run_config.progress_max_lines,
+            activity_log=_activity_path,
         )
 
         def build_graph(checkpointer):
@@ -3288,17 +3311,20 @@ def logs(
 
     thread_id = default_thread_id(thread_id, project_dir=config.project_dir)
 
-    # --verbose: tail run.log (full foreground output) instead of events.jsonl
+    # --verbose: tail activity.log (detailed tool-call trace) or run.log
     if verbose:
+        # Prefer activity.log (written by all runs) over run.log (detach only)
+        activity_path = Path(config.state_dir) / "runs" / thread_id / "activity.log"
         log_path = logfile_path(Path(config.state_dir), thread_id)
-        if not log_path.exists():
-            console.print(f"[yellow]No run.log at {log_path}[/yellow]")
+        chosen = activity_path if activity_path.exists() else log_path
+        if not chosen.exists():
+            console.print(f"[yellow]No activity log at {activity_path}[/yellow]")
             console.print(
                 f"Thread ID: [dim]{thread_id}[/dim] — "
-                "run.log is created by a detached run (--detach)."
+                "activity.log is created once a run starts."
             )
             raise typer.Exit(0)
-        _tail_run_log(log_path, follow=follow, tail_lines=tail, poll_interval=poll_interval)
+        _tail_run_log(chosen, follow=follow, tail_lines=tail, poll_interval=poll_interval)
         return
 
     events_path = Path(config.state_dir) / "runs" / thread_id / "events.jsonl"

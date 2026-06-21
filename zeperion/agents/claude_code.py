@@ -256,12 +256,12 @@ class ClaudeCodeAgent(BaseAgent):
         prompt_bytes = prompt.encode("utf-8")
         logger.info("Invoking %s with model %s", self.role.value, self.model)
 
-        # --- Primary: stream-json (structured progress) ---
-        # Disabled by default: json mode is more reliable across CLI versions
-        # and third-party model proxies. stream-json can hang indefinitely
-        # when the CLI process exits mid-stream. Enable via use_stream_json=True
-        # if you need real-time tool-call progress in the terminal.
-        if self.use_stream_json:
+        # --- Primary: stream-json (structured progress + activity logging) ---
+        # Re-enabled as default: stream-json provides real-time tool-call
+        # progress and activity logging. The 30s first-message timeout
+        # (below) handles CLI version mismatches gracefully by falling back
+        # to json mode.
+        if True:  # Always try stream-json first; falls back to json on failure
             try:
                 return await self._invoke_via_stream_json(
                     _with_session, execution_dir, prompt, prompt_bytes,
