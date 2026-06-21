@@ -1604,16 +1604,18 @@ def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES, a
         if not text:
             return
 
-        # Always persist to activity log (even when terminal display is folded)
+        # Persist structured progress lines to activity log (tool calls,
+        # init, thinking — not raw text deltas which are per-word noise).
         if activity_log is not None and text.strip():
             try:
-                from zeperion.utils.time import iso_now
+                for aline in text.split("\n"):
+                    stripped = aline.strip()
+                    # Only log structured events (formatted by _format_stream_event)
+                    if stripped and stripped.startswith("["):
+                        from zeperion.utils.time import iso_now
 
-                with open(activity_log, "a", encoding="utf-8") as f:
-                    # Write each non-empty line with timestamp
-                    for aline in text.split("\n"):
-                        if aline.strip():
-                            f.write(f"{iso_now()} {aline.rstrip()}\n")
+                        with open(activity_log, "a", encoding="utf-8") as f:
+                            f.write(f"{iso_now()} {stripped}\n")
             except OSError:
                 pass
 
