@@ -668,9 +668,28 @@ class ClaudeCodeAgent(BaseAgent):
                 if not line:
                     break
                 chunks.append(line)
+                if progress_callback is None:
+                    continue
                 text = line.decode("utf-8", errors="replace").strip()
-                if text and progress_callback is not None:
-                    await progress_callback(text)
+                if not text:
+                    continue
+                # Try to parse as JSON event and format nicely
+                try:
+                    import json as _json
+
+                    msg = _json.loads(text)
+                    ev = _parse_stream_message(msg)
+                    if ev is not None:
+                        formatted = _format_stream_event(
+                            ev, show_thinking=self.show_thinking
+                        )
+                        if formatted:
+                            await progress_callback(formatted)
+                            continue
+                except (ValueError, _json.JSONDecodeError):
+                    pass
+                # Fallback: pass raw text (non-JSON stderr lines)
+                await progress_callback(text)
             return b"".join(chunks)
 
         async def _read_stdout() -> bytes:
