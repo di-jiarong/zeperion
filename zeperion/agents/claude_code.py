@@ -552,6 +552,16 @@ class ClaudeCodeAgent(BaseAgent):
             )
 
         result_text, reported_usage = _parse_claude_json_envelope(raw_output)
+
+        # Extract activity events from the JSON array for progress logging.
+        # In json+verbose mode, stdout is a JSON array of all events; we
+        # parse tool-call events and forward them to progress_callback so
+        # the activity.log captures what happened during this invocation.
+        if progress_callback is not None:
+            await _emit_activity_from_json_array(
+                raw_output, progress_callback, self.show_thinking
+            )
+
         text = result_text if result_text is not None else raw_output
         if not text.strip():
             raise AgentInvocationError(
@@ -809,6 +819,37 @@ class ClaudeCodeAgent(BaseAgent):
         if process.returncode != 0:
             shutil.rmtree(worktree_dir, ignore_errors=True)
         self.last_worktree_dir = None
+
+
+async def _emit_activity_from_json_array(
+    raw_output: str,
+    progress_callback: "ProgressCallback",
+    show_thinking: bool = False,
+) -> None:
+    """Extract formatted activity events from a json-mode stdout array.
+
+    In ``--output-format json --verbose`` mode, stdout is a JSON array
+    containing all session events (init, tool calls, messages, result).
+    We parse each element and emit formatted progress lines to the
+    callback (which writes them to activity.log).
+    """
+    import json as _json
+
+    try:
+        data = _json.loads(raw_output)
+    except (ValueError, _json.JSONDecodeError):
+        return
+
+    items = data if isinstance(data, list) else [data]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ev = _parse_stream_message(item)
+        if ev is None:
+            continue
+        formatted = _format_stream_event(ev, show_thinking=show_thinking)
+        if formatted:
+            await progress_callback(formatted + "\n")
 
 
 def _is_unknown_output_format_error(stderr: bytes, stdout: bytes) -> bool:
