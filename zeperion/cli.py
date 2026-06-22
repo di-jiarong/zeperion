@@ -1604,17 +1604,22 @@ def _make_progress_callback(out=None, *, max_lines: int = _PROGRESS_MAX_LINES, a
         if not text:
             return
 
-        # Persist structured progress lines to activity log (tool calls,
-        # init, thinking — not raw text deltas which are per-word noise).
+        # Persist structured progress lines to activity log.
         if activity_log is not None and text.strip():
             try:
-                for aline in text.split("\n"):
-                    stripped = aline.strip()
-                    # Only log structured events (formatted by _format_stream_event)
-                    if stripped and stripped.startswith("["):
-                        from zeperion.utils.time import iso_now
+                from zeperion.utils.time import iso_now
 
-                        with open(activity_log, "a", encoding="utf-8") as f:
+                with open(activity_log, "a", encoding="utf-8") as f:
+                    for aline in text.split("\n"):
+                        stripped = aline.strip()
+                        # Log lines that look like formatted events:
+                        # [Tool: ...], [Init], [Thinking], [Tool Result]
+                        # or any non-trivial line (skip single words / deltas)
+                        if stripped and (
+                            stripped.startswith("[")
+                            or "starting..." in stripped
+                            or "running" in stripped
+                        ):
                             f.write(f"{iso_now()} {stripped}\n")
             except OSError:
                 pass
