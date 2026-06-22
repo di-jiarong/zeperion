@@ -36,12 +36,27 @@ def _instantiate(
     """Build a single (un-wrapped) agent. Internal helper."""
     agent_class = resolve_agent_class(agent_type)
     if agent_class is ClaudeCodeAgent:
+        # Planner: can read files to understand the project, but must not
+        # modify anything. Tester/Reviewer: pure text judgment, no tools.
+        extra_args: list[str] = []
+        timeout = config.claude_cli_timeout
+        if role == AgentRole.PLANNER:
+            # Allow reading but not writing/executing
+            extra_args = [
+                "--disallowedTools",
+                "Edit,Write,NotebookEdit,Bash,Task,TaskCreate,TaskUpdate,TaskGet,TaskList,Workflow",
+            ]
+            timeout = min(timeout, 300)  # 5 min cap
+        elif role in (AgentRole.TESTER, AgentRole.REVIEWER):
+            extra_args = ["--allowedTools", ""]
+            timeout = min(timeout, 120)  # 2 min cap for text-only roles
         return ClaudeCodeAgent(
             role=role,
             model=model,
             cli_tool=config.claude_cli_tool,
-            timeout=config.claude_cli_timeout,
+            timeout=timeout,
             project_dir=config.project_dir,
+            extra_args=extra_args,
             use_worktree=config.claude_cli_use_worktree,
             worktree_parent=config.claude_cli_worktree_parent,
             keep_worktree=config.claude_cli_keep_worktree,
