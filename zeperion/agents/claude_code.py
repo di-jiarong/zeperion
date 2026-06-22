@@ -202,10 +202,10 @@ class ClaudeCodeAgent(BaseAgent):
             ])
         elif json_output:
             cmd.extend(["--output-format", "json"])
-            # Do NOT add --verbose in json mode: it changes the output from
-            # a single {"type":"result",...} object to a massive JSON array
-            # of all events, which can exceed pipe buffers and get truncated.
-            verbose = False
+            # --verbose in json mode: stdout stays as a single result object,
+            # but stderr gets tool-call progress lines which we forward to
+            # progress_callback for activity logging. This is safe because
+            # _spawn_and_communicate reads stderr separately from stdout.
         if verbose:
             cmd.append("--verbose")
         cmd.extend(["--model", self.model, "--add-dir", str(active_project_dir)])
@@ -257,11 +257,10 @@ class ClaudeCodeAgent(BaseAgent):
         logger.info("Invoking %s with model %s", self.role.value, self.model)
 
         # --- Primary: stream-json (structured progress + activity logging) ---
-        # Re-enabled as default: stream-json provides real-time tool-call
-        # progress and activity logging. The 30s first-message timeout
-        # (below) handles CLI version mismatches gracefully by falling back
-        # to json mode.
-        if True:  # Always try stream-json first; falls back to json on failure
+        # Disabled by default: stream-json has reliability issues with large
+        # files (line-length limits), long thinking pauses, and pipe buffer
+        # problems. json mode + stderr verbose is more robust.
+        if self.use_stream_json:
             try:
                 return await self._invoke_via_stream_json(
                     _with_session, execution_dir, prompt, prompt_bytes,
